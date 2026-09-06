@@ -1,0 +1,29 @@
+# Runtime state and secrets
+config.json
+accounts.vault.json
+accounts.vault.backup.json
+*.ccbackup
+*.token
+*.secret
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.previous
+launcher-state.json
+notification-state.json
+
+# Generated packages and embedded runtimes
+*.exe
+*.zip
+PAYLOAD-MANIFEST.json
+runtime/
+node_modules/
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

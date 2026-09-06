@@ -1,0 +1,107 @@
+# Codex Companion 交接文档
+
+当前稳定版本：**v0.7.8**（2026-09-06）
+
+## 当前功能
+
+- 72×72 WPF 置顶圆形额度浮窗，显示当前账号可用百分比。
+- 点击浮窗显示全部账号；Plus 同行显示 5h/7d，只有 7d 的 Pro 使用整行。
+- 点击非当前账号卡片可以切换账号。Codex 桌面端运行时先二次确认，切换后自动重新打开 Codex。
+- 完整网页提供账号登录、额度刷新、历史对话继续、新对话启动/继续/停止、飞书配置和通知过滤。
+- 网页账号卡片可编辑备注名，浮窗账号列表优先显示备注；原邮箱仍保留在网页和悬浮提示中。
+- 读取重置次数及最近到期时间；新版 app-server 直接读取明细，旧版通过官方只读明细接口兼容；7 天内每天提醒一次。
+- 同一账号、同一种额度的“额度已用尽”每天最多发送一次，跨 Companion 重启仍去重。
+- 任务完成后刷新额度；多个账号额度恢复可合并通知。
+- 原生账号库使用 Windows DPAPI CurrentUser 加密；高级设置可无损迁移 Switcher 账号副本，新登录账号直接写入原生库。
+- 全部账号额度由独立 `CODEX_HOME` 中的官方 Codex app-server 读取，互不覆盖当前登录；成功结果写入原生库作为启动快照。
+- 原生切换会保存离开账号、原子替换并校验 `~/.codex/auth.json`，失败时从 `auth.json.companion.bak` 回滚，然后重启任务引擎和 Codex 桌面端。
+- 通用网页登录和设备码登录直接新增/更新 DPAPI 原生账号库；原生模式不再调用 Switcher 导入接口。
+- 浮窗和网页的会员徽标均显示为 `Plus` / `Pro`。
+- 原生账号库写入前自动备份上一份有效数据；高级设置支持手动备份和确认恢复，恢复前保留 `accounts.vault.before-restore.json`。
+- 网页对失效账号提供“重新登录”，对非当前账号提供确认删除；删除仅影响 Companion 原生账号库并先自动备份。
+- 高级设置支持跨电脑 `.ccbackup`：scrypt（N=32768、r=8、p=1）派生密钥，AES-256-GCM 加密账号凭据与备注；密码不落盘，导入采用合并/更新语义。
+
+## 必需依赖
+
+1. Windows 10/11 与 Windows PowerShell 5.1；
+2. Node.js LTS（`node.exe` 必须在 PATH）；
+3. OpenAI Codex CLI（完整任务和设备码登录功能需要）；
+
+Codex Switcher 不再是运行依赖。若机器上已有 Switcher，Companion 只会在用户点击“安全迁移账号副本”时读取 `%USERPROFILE%\.codex-switcher\accounts.json`；正常登录、额度、重置次数和切换均使用 Companion 原生实现。
+
+## 对外分发
+
+推荐把单个 `CodexCompanion-Setup-v0.7.8.exe` 交给用户。用户只需双击一次，安装器会：
+
+1. 解压到 `%LOCALAPPDATA%\Programs\CodexCompanion`；
+2. 安装内置 Node.js 与官方 Codex CLI 运行时；
+3. 创建桌面“Codex 助手”快捷方式；
+4. 启动 Companion；
+5. 在 Windows“已安装的应用”登记版本和卸载入口；
+6. 用户打开网页后直接登录账号，以后只需双击桌面快捷方式。
+
+覆盖升级前会把原程序目录移动为 `CodexCompanion.previous`。解包、内置运行时、后台语法或启动健康检查任何一步失败，安装引导都会恢复并重启旧版本；账号和配置始终保存在独立的 `%APPDATA%\CodexCompanion`。
+安装包会在运行时根据 `PAYLOAD-MANIFEST.json` 对所有载荷文件执行大小与 SHA256 校验，并拒绝未登记的额外文件。
+
+安装目录中的 `Uninstall Companion.cmd` 提供两种模式：只删程序并保留账号/设置，或经二次确认后连 `%APPDATA%\CodexCompanion` 一起删除。脚本对正式安装目录做了精确路径限制。
+
+传统 ZIP 包保留为开发/排错备用。单文件安装器当前未签名，外部分发前应补充 Authenticode 代码签名以减少 SmartScreen 警告。
+
+用户配置保存在 `%APPDATA%\CodexCompanion\config.json`，不放进发布包。不要把自己的飞书 Webhook、账号数据或 `.codex-switcher` 目录交给别人。
+
+## 正式文件
+
+| 文件 | 用途 |
+| --- | --- |
+| `server.mjs` | 本地后台、账号/额度、任务、通知和 API |
+| `dashboard.html` | 完整网页控制台 |
+| `Quota Widget WPF.ps1` | WPF 圆形浮窗及账号面板 |
+| `Launch Quota Widget.vbs` | 隐藏启动浮窗 |
+| `Start Codex Companion.ps1` | 清理旧实例并启动后台和浮窗 |
+| `Codex Companion Launcher.vbs` | 桌面快捷方式入口 |
+| `Start Codex Companion.cmd` | 启动并打开网页 |
+| `Start Codex Companion Background.cmd` | 启动但不打开网页 |
+| `Start Quota Widget.cmd` | 单独启动浮窗 |
+| `Stop Codex Companion.ps1/.cmd` | 停止后台 |
+| `Install Companion.ps1/.cmd` | 分发安装与依赖检查 |
+| `Install Startup.ps1` | 安装开机自启 |
+| `Uninstall Companion.ps1/.cmd` | 卸载程序，可选保留或彻底清除用户数据 |
+| `README.md` | 用户说明 |
+| `companion.ico` | 快捷方式图标 |
+| `Install Portable.ps1` | 单文件安装器解包后的安装引导 |
+| `Install Branded.cmd` | 现代安装向导调用的静默安装入口 |
+| `Build Branded Installer.ps1` | 推荐的维护者构建脚本：下载固定版本官方 Codex CLI、加入 Node 并调用 Inno Setup 7 |
+
+旧式 IExpress 构建脚本和失效的 `Install Portable.cmd` 已删除；正式构建统一使用 Inno Setup 7。
+
+`launcher.log`、`server.stdout.log`、`server.stderr.log` 是运行时诊断日志，不应放入发布包。
+
+## 已验证基线
+
+- `/api/status`：v0.7.8，返回全部 4 个账号、`alias` / `display_name`、重置数量/最近到期时间及 `nativeVault` 备份状态；
+- 安装版数据目录固定测试：启动器显式设置 `%APPDATA%\CodexCompanion`；主账号库读取成功时 `source=primary`，主库临时失败时可回退显示有效备份。
+- 账号库回退实测：在隔离目录故意写入损坏主库并放入 4 账号有效备份，安装版后台返回 4 个账号、`source=backup`、`usingBackup=true`，测试目录已清理。
+- `/api/accounts/migrate-native`：先执行 DPAPI 往返自检，再把现有 Switcher 凭据加密复制到 `%APPDATA%\CodexCompanion\accounts.vault.json`；
+- `/api/threads`：通过 Codex 官方 `thread/list` 返回最近对话；`/api/threads/:id/continue` 通过 `thread/resume` 在原对话追加消息；
+- 浮窗自检：4 张卡片、3 张可切换卡片、运行时错误 0；
+- 正式进程：1 个 server、1 个 widget；
+- 重启去重测试：重启前后当天同账号 5h 耗尽通知条数不增加；
+- 官方重置明细兼容测试：本机 Codex CLI 0.142.0 只返回数量时，3 个有效账号均通过只读官方后端补齐最近到期时间；
+- 账号库备份测试：手动备份返回 4 个账号，`backupReady=true`；恢复接口需要网页明确确认且恢复前另存当前副本；
+- 现代单文件构建测试：Inno Setup 7.1.0 成功生成中文现代向导安装器，内置 Node v24.14.0 与 Codex CLI 0.153.4，载荷清单登记 29 个受校验文件。
+- 单文件真实解包测试：安装器以模拟双击方式解到隔离临时目录，29 个受校验程序文件加 1 个完整性清单、后台语法、Node/Codex 版本、浮窗脚本、卸载入口及两份许可证全部通过；测试目录已清理，现有账号/配置未触碰。
+- 跨电脑备份闭环测试：4 个账号导出后密文不包含邮箱明文；错误密码被拒绝；正确密码合并导入 4 个账号后总数仍为 4、当前账号不变、本机恢复备份仍有效。
+- 升级回滚故障注入测试：在临时目录模拟已有旧版，新版解包后故意报错；旧版标记完整恢复、新版文件不残留、`.previous` 临时目录已清理。
+- 完整性破坏测试：故意使文件 SHA256 与载荷清单不一致，安装器拒绝安装，旧版自动恢复，损坏文件与回滚临时目录均无残留。
+- 卸载安全测试：从开发目录运行测试模式时返回 `Protected=true`，未产生文件或配置变更。
+- Windows 卸载登记干跑测试：注册表目标为当前用户 `...\Uninstall\CodexCompanion`，版本、安装目录和带空格卸载命令均正确。
+- 覆盖升级测试：模拟旧版目录覆盖升级，新版文件安装成功，旧版回滚副本保留，独立用户数据文件 SHA256 前后不变。
+- `server.mjs` 通过 `node --check`，PowerShell 正式脚本均通过语法解析。
+
+历史构建产物已移入 `archive\legacy-builds`，发布目录根部只保留当前版本安装器、ZIP、版本说明和 SHA256 清单。
+
+## 已知边界
+
+- Companion 的账号存储、登录、额度、重置次数和切换均已原生运行；Codex Switcher 仅作为可选的一次性旧账号迁移来源。
+- 网页切换账号后自动打开 Codex 使用 Microsoft Store 应用 ID；未安装 Codex 桌面应用时，账号仍会切换，但无法自动打开桌面端。
+- Companion 创建的任务可完整跟踪；网页可列出并继续 Codex 已保存的既有对话。未通过 Companion 接入的桌面端进行中任务，仍主要通过 Windows 通知转发感知。
