@@ -46,6 +46,13 @@ $appFiles = @(
 try {
     New-Item -ItemType Directory -Force -Path $payloadRoot,$runtimeRoot,$depsRoot,$stageRoot | Out-Null
     foreach ($file in $appFiles) { Copy-Item -LiteralPath (Join-Path $root $file) -Destination $payloadRoot }
+    # Windows PowerShell 5.1 treats UTF-8 files without a BOM as the active ANSI
+    # code page. A few Chinese strings can then decode into stray quote bytes and
+    # make an otherwise valid script fail to parse on the target computer.
+    Get-ChildItem -LiteralPath $payloadRoot -Filter '*.ps1' -File | ForEach-Object {
+        $scriptText = [IO.File]::ReadAllText($_.FullName, [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($_.FullName, $scriptText, [Text.UTF8Encoding]::new($true))
+    }
     Copy-Item -LiteralPath $node -Destination (Join-Path $runtimeRoot 'node.exe')
 
     & $npm install --prefix $depsRoot "@openai/codex@$CodexVersion" --omit=dev --ignore-scripts --no-audit --no-fund
@@ -70,6 +77,9 @@ try {
     Compress-Archive -LiteralPath (Get-ChildItem -LiteralPath $payloadRoot | ForEach-Object FullName) -DestinationPath $payloadZip -CompressionLevel Optimal
     Copy-Item -LiteralPath (Join-Path $root 'Install Portable.ps1') -Destination (Join-Path $stageRoot 'Install Portable.ps1')
     Copy-Item -LiteralPath (Join-Path $root 'Install Branded.cmd') -Destination (Join-Path $stageRoot 'Install Branded.cmd')
+    $portableInstaller = Join-Path $stageRoot 'Install Portable.ps1'
+    $portableText = [IO.File]::ReadAllText($portableInstaller, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($portableInstaller, $portableText, [Text.UTF8Encoding]::new($true))
 
     $iconPath = (Join-Path $root 'companion.ico').Replace('"', '""')
     $payloadSource = $payloadZip.Replace('"', '""')
@@ -114,8 +124,17 @@ Source: "$payloadSource"; DestDir: "{tmp}\CodexCompanionSetup"; DestName: "Codex
 Source: "$scriptSource"; DestDir: "{tmp}\CodexCompanionSetup"; DestName: "Install Portable.ps1"; Flags: deleteafterinstall
 Source: "$commandSource"; DestDir: "{tmp}\CodexCompanionSetup"; DestName: "Install Branded.cmd"; Flags: deleteafterinstall
 
-[Run]
-Filename: "{tmp}\CodexCompanionSetup\Install Branded.cmd"; Description: "安装并启动 Codex Companion"; StatusMsg: "正在校验程序文件并安全升级…"; Flags: runhidden waituntilterminated
+[Code]
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    if (not Exec(ExpandConstant('{tmp}\CodexCompanionSetup\Install Branded.cmd'), '', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)) or (ResultCode <> 0) then
+      RaiseException('Codex Companion 安装失败。详细信息已保存到临时目录中的 CodexCompanion-install.log。');
+  end;
+end;
 
 [Messages]
 WelcomeLabel1=安装 Codex Companion
