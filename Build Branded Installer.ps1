@@ -35,8 +35,8 @@ $issPath = Join-Path $temporaryRoot 'CodexCompanion.iss'
 $node = (Get-Command node.exe -ErrorAction Stop).Source
 $npm = (Get-Command npm.cmd -ErrorAction Stop).Source
 $appFiles = @(
-    'Codex Companion Launcher.vbs','companion.ico','dashboard.html','HANDOVER.md',
-    'Install Companion.cmd','Install Companion.ps1','Install Startup.ps1','Launch Quota Widget.vbs',
+    'Codex Companion Launcher.vbs','Codex Companion Worker.vbs','companion.ico','dashboard.html','HANDOVER.md',
+    'Install Companion.cmd','Install Companion.ps1','Install Startup Task.ps1','Launch Quota Widget.vbs',
     'package.json','Quota Widget WPF.ps1','README.md','server.mjs',
     'Start Codex Companion Background.cmd','Start Codex Companion.cmd','Start Codex Companion.ps1',
     'Start Quota Widget.cmd','Stop Codex Companion.cmd','Stop Codex Companion.ps1',
@@ -104,6 +104,7 @@ CloseApplications=no
 RestartApplications=no
 SetupLogging=yes
 ShowLanguageDialog=no
+SetupMutex=CodexCompanionInstaller
 
 [Languages]
 Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"

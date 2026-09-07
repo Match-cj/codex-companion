@@ -86,12 +86,12 @@ try {
 
     $env:CODEX_COMPANION_QUIET = '1'
     & (Join-Path $destination 'Install Companion.ps1')
-    & (Join-Path $destination 'Start Codex Companion.ps1') -NoBrowser
+    Start-ScheduledTask -TaskName 'Codex Companion'
     $status = $null
     for ($attempt = 0; $attempt -lt 15 -and -not $status; $attempt++) {
         try { $status = Invoke-RestMethod 'http://127.0.0.1:17841/api/status' -TimeoutSec 2 } catch { Start-Sleep -Seconds 1 }
     }
-    if (-not $status -or [string]$status.version -ne '0.7.8') { throw '安装后后台没有正常启动。' }
+    if (-not $status -or [string]$status.version -ne [string]$manifest.version) { throw '安装后后台没有正常启动。' }
 
     if ($env:CODEX_COMPANION_INSTALL_SILENT -ne '1') {
         Add-Type -AssemblyName System.Windows.Forms

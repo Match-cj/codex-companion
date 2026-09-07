@@ -1,6 +1,6 @@
 # Codex Companion
 
-独立的 Windows Codex 伴侣程序。当前稳定基线为 v0.7.8：
+独立的 Windows Codex 伴侣程序。当前稳定基线为 v0.7.9：
 
 - 日常只需双击桌面 **Codex 助手**，后台与小浮窗会一起启动，不自动打开网页；
 - 圆形浮窗用抗锯齿圆环显示当前账号剩余额度，数字居中且大、百分号小并靠右下；启动时会快速等待账号数据。点击打开圆角、无标题栏的账号面板，点击外部自动关闭，右键打开完整页面；
@@ -35,7 +35,7 @@
 
 推荐直接发送单个文件：
 
-`CodexCompanion-Setup-v0.7.8.exe`
+`CodexCompanion-Setup-v0.7.9.exe`
 
 用户双击一次即可安装并启动，安装器已经内置 Node.js 和官方 Codex CLI，不再要求另外安装 Node.js、Codex CLI 或 Codex Switcher。已有 Switcher 账号的用户仍可在高级设置中一次性迁移；新用户直接使用 Companion 的通用网页登录或设备码登录。Codex 桌面应用可选，但想使用切换后自动打开功能时需要安装。
 
@@ -53,7 +53,7 @@
 
 传统 ZIP 包继续作为开发和故障排查备用。只有使用 ZIP 且包内没有 `runtime` 目录时，才需要用户自己安装 Node.js LTS 与 OpenAI Codex CLI。
 
-解压后双击 `Install Companion.cmd`，它会检查依赖并创建桌面“Codex 助手”快捷方式。以后只需双击该快捷方式。如果需要开机自启，另外运行 `Install Startup.ps1`。
+解压后双击 `Install Companion.cmd`，它会检查依赖、创建桌面“Codex 助手”快捷方式，并注册隐藏的开机启动任务。以后只需双击该快捷方式。
 
 ## 最快运行方式
 
@@ -76,7 +76,7 @@
 
 首次使用飞书时，在飞书群聊的“设置 → 群机器人 → 添加机器人 → 自定义机器人”中创建机器人。安全设置可只填写关键词 `Codex`，不必提供应用 ID 或 Secret。把生成的 Webhook 粘贴到页面底部，点击“保存并发送测试消息”。通知覆盖任务完成、失败、等待确认、长时间无进展、额度用尽、临近重置和额度已经重置。
 
-需要开机自启时，右键使用 PowerShell 运行 `Install Startup.ps1`。停止程序可双击 `Stop Codex Companion.cmd`。本机已于 2026-09-02 安装开机启动快捷方式。
+安装时会自动注册隐藏的开机启动任务，不再通过 `.cmd` 启动项弹出黑色窗口。停止程序可双击 `Stop Codex Companion.cmd`。
 
 ## 命令行运行
 

@@ -1,6 +1,6 @@
 # Codex Companion 交接文档
 
-当前稳定版本：**v0.7.8**（2026-09-06）
+当前稳定版本：**v0.7.9**（2026-09-07）
 
 ## 当前功能
 
@@ -31,7 +31,7 @@ Codex Switcher 不再是运行依赖。若机器上已有 Switcher，Companion �
 
 ## 对外分发
 
-推荐把单个 `CodexCompanion-Setup-v0.7.8.exe` 交给用户。用户只需双击一次，安装器会：
+推荐把单个 `CodexCompanion-Setup-v0.7.9.exe` 交给用户。用户只需双击一次，安装器会：
 
 1. 解压到 `%LOCALAPPDATA%\Programs\CodexCompanion`；
 2. 安装内置 Node.js 与官方 Codex CLI 运行时；
@@ -59,12 +59,13 @@ Codex Switcher 不再是运行依赖。若机器上已有 Switcher，Companion �
 | `Launch Quota Widget.vbs` | 隐藏启动浮窗 |
 | `Start Codex Companion.ps1` | 清理旧实例并启动后台和浮窗 |
 | `Codex Companion Launcher.vbs` | 桌面快捷方式入口 |
+| `Codex Companion Worker.vbs` | 任务计划程序调用的隐藏独立启动入口 |
 | `Start Codex Companion.cmd` | 启动并打开网页 |
 | `Start Codex Companion Background.cmd` | 启动但不打开网页 |
 | `Start Quota Widget.cmd` | 单独启动浮窗 |
 | `Stop Codex Companion.ps1/.cmd` | 停止后台 |
 | `Install Companion.ps1/.cmd` | 分发安装与依赖检查 |
-| `Install Startup.ps1` | 安装开机自启 |
+| `Install Startup Task.ps1` | 注册隐藏的当前用户登录任务，并移除旧 `.cmd` 启动项 |
 | `Uninstall Companion.ps1/.cmd` | 卸载程序，可选保留或彻底清除用户数据 |
 | `README.md` | 用户说明 |
 | `companion.ico` | 快捷方式图标 |
@@ -78,7 +79,7 @@ Codex Switcher 不再是运行依赖。若机器上已有 Switcher，Companion �
 
 ## 已验证基线
 
-- `/api/status`：v0.7.8，返回全部 4 个账号、`alias` / `display_name`、重置数量/最近到期时间及 `nativeVault` 备份状态；
+- `/api/status`：v0.7.9，返回全部账号、`alias` / `display_name`、重置数量/最近到期时间及 `nativeVault` 备份状态；
 - 安装版数据目录固定测试：启动器显式设置 `%APPDATA%\CodexCompanion`；主账号库读取成功时 `source=primary`，主库临时失败时可回退显示有效备份。
 - 账号库回退实测：在隔离目录故意写入损坏主库并放入 4 账号有效备份，安装版后台返回 4 个账号、`source=backup`、`usingBackup=true`，测试目录已清理。
 - `/api/accounts/migrate-native`：先执行 DPAPI 往返自检，再把现有 Switcher 凭据加密复制到 `%APPDATA%\CodexCompanion\accounts.vault.json`；

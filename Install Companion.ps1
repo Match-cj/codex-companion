@@ -55,7 +55,9 @@ foreach ($entry in $registryValues.GetEnumerator()) {
     New-ItemProperty -Path $uninstallRegistryPath -Name $entry.Key -Value $entry.Value -PropertyType $kind -Force | Out-Null
 }
 
-if ($EnableStartup) { & (Join-Path $root 'Install Startup.ps1') }
+# Always register the hidden scheduled task. It prevents console flashes and
+# keeps Companion independent when ChatGPT/Codex is closed.
+& (Join-Path $root 'Install Startup Task.ps1')
 
 if ($env:CODEX_COMPANION_QUIET -ne '1') {
     Add-Type -AssemblyName System.Windows.Forms

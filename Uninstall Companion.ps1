@@ -31,6 +31,7 @@ if (Test-Path -LiteralPath $stop) { & $stop }
 $desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Codex 助手.lnk'
 $startupShortcut = Join-Path ([Environment]::GetFolderPath('Startup')) 'Codex Companion.lnk'
 foreach ($shortcut in @($desktopShortcut, $startupShortcut)) { if (Test-Path -LiteralPath $shortcut) { [IO.File]::Delete($shortcut) } }
+Unregister-ScheduledTask -TaskName 'Codex Companion' -Confirm:$false -ErrorAction SilentlyContinue
 $uninstallRegistryPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexCompanion'
 if (Test-Path -LiteralPath $uninstallRegistryPath) { Remove-Item -LiteralPath $uninstallRegistryPath -Recurse -Force }
 
