@@ -89,7 +89,7 @@ try {
         if (Test-Path -LiteralPath $oldStop) { & $oldStop }
     }
     Get-CimInstance Win32_Process | Where-Object {
-        $_.ProcessId -ne $PID -and $_.CommandLine -and
+        $_.ProcessId -ne $PID -and $_.Name -in @('node.exe','codex.exe','powershell.exe','wscript.exe') -and $_.CommandLine -and
         $_.CommandLine.IndexOf($destination, [StringComparison]::OrdinalIgnoreCase) -ge 0
     } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 700
@@ -109,6 +109,7 @@ try {
         try { $status = Invoke-RestMethod 'http://127.0.0.1:17841/api/status' -TimeoutSec 2 } catch { Start-Sleep -Seconds 1 }
     }
     if (-not $status -or [string]$status.version -ne [string]$manifest.version) { throw '安装后后台没有正常启动。' }
+    if (Test-Path -LiteralPath $rollback) { Remove-Item -LiteralPath $rollback -Recurse -Force -ErrorAction SilentlyContinue }
 
     if ($env:CODEX_COMPANION_INSTALL_SILENT -ne '1') {
         Add-Type -AssemblyName System.Windows.Forms
@@ -126,7 +127,7 @@ catch {
     }
     try { Stop-ScheduledTask -TaskName 'Codex Companion' -ErrorAction SilentlyContinue } catch {}
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-        $_.ProcessId -ne $PID -and $_.CommandLine -and
+        $_.ProcessId -ne $PID -and $_.Name -in @('node.exe','codex.exe','powershell.exe','wscript.exe') -and $_.CommandLine -and
         $_.CommandLine.IndexOf($destination, [StringComparison]::OrdinalIgnoreCase) -ge 0
     } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 500
