@@ -1,6 +1,6 @@
 # Codex Companion 交接文档
 
-当前稳定版本：**v0.7.10**（2026-09-07）
+当前稳定版本：**v0.7.11**（2026-09-08）
 
 ## 当前功能
 
@@ -8,6 +8,7 @@
 - 点击浮窗显示全部账号；Plus 同行显示 5h/7d，只有 7d 的 Pro 使用整行。
 - 点击非当前账号卡片可以切换账号。Codex 桌面端运行时先二次确认，切换后自动重新打开 Codex。
 - 完整网页提供账号登录、额度刷新、历史对话继续、新对话启动/继续/停止、飞书配置和通知过滤。
+- 浮窗账号切换使用双击和固定二次确认；服务端会先验证目标凭据，随后关闭并重新打开 ChatGPT/Codex，额度刷新不再阻塞切换响应。
 - 网页账号卡片可编辑备注名，浮窗账号列表优先显示备注；原邮箱仍保留在网页和悬浮提示中。
 - 读取重置次数及最近到期时间；新版 app-server 直接读取明细，旧版通过官方只读明细接口兼容；7 天内每天提醒一次。
 - 同一账号、同一种额度的“额度已用尽”每天最多发送一次，跨 Companion 重启仍去重。
@@ -31,7 +32,7 @@ Codex Switcher 不再是运行依赖。若机器上已有 Switcher，Companion �
 
 ## 对外分发
 
-推荐把单个 `CodexCompanion-Setup-v0.7.10.exe` 交给用户。用户只需双击一次，安装器会：
+推荐把单个 `CodexCompanion-Setup-v0.7.11.exe` 交给用户。用户只需双击一次，安装器会：
 
 1. 解压到 `%LOCALAPPDATA%\Programs\CodexCompanion`；
 2. 安装内置 Node.js 与官方 Codex CLI 运行时；
@@ -79,7 +80,7 @@ Codex Switcher 不再是运行依赖。若机器上已有 Switcher，Companion �
 
 ## 已验证基线
 
-- `/api/status`：v0.7.10，返回全部账号、`alias` / `display_name`、重置数量/最近到期时间及 `nativeVault` 备份状态；
+- `/api/status`：v0.7.11，返回全部账号、`alias` / `display_name`、重置数量/最近到期时间及 `nativeVault` 备份状态；
 - 安装版数据目录固定测试：启动器显式设置 `%APPDATA%\CodexCompanion`；主账号库读取成功时 `source=primary`，主库临时失败时可回退显示有效备份。
 - 账号库回退实测：在隔离目录故意写入损坏主库并放入 4 账号有效备份，安装版后台返回 4 个账号、`source=backup`、`usingBackup=true`，测试目录已清理。
 - `/api/accounts/migrate-native`：先执行 DPAPI 往返自检，再把现有 Switcher 凭据加密复制到 `%APPDATA%\CodexCompanion\accounts.vault.json`；

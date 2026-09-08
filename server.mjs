@@ -12,7 +12,7 @@ import os from 'node:os';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.10';
+const APP_VERSION = '0.7.11';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -153,6 +153,7 @@ $targets = @(Get-CimInstance Win32_Process | Where-Object {
   $_.Name -eq 'ChatGPT.exe' -or ($_.Name -eq 'codex.exe' -and $_.CommandLine -match 'OpenAI\\\\Codex')
 })
 $targets | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+foreach ($target in $targets) { Wait-Process -Id $target.ProcessId -Timeout 8 -ErrorAction SilentlyContinue }
 [pscustomobject]@{ stopped = @($targets).Count } | ConvertTo-Json -Compress
 `;
   await execFileAsync('powershell.exe', ['-NoProfile', '-Command', script], { windowsHide: true, encoding: 'utf8' });
@@ -160,7 +161,11 @@ $targets | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction Si
 }
 async function isCodexDesktopRunning() {
   if (process.platform !== 'win32') return false;
-  const script = `@(Get-Process -Name 'ChatGPT','codex' -ErrorAction SilentlyContinue) | Select-Object -ExpandProperty ProcessName -Unique | ConvertTo-Json -Compress`;
+  const script = `@(
+Get-CimInstance Win32_Process | Where-Object {
+  $_.Name -eq 'ChatGPT.exe' -or ($_.Name -eq 'codex.exe' -and $_.CommandLine -match 'OpenAI\\\\Codex')
+} | Select-Object -ExpandProperty ProcessId
+) | ConvertTo-Json -Compress`;
   try {
     const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-Command', script], { windowsHide: true, encoding: 'utf8' });
     const value = JSON.parse(stdout.trim() || '[]');
@@ -758,11 +763,24 @@ async function switchNativeAccount(id) {
     officialRateLimits = null;
     if (codex) { codex.close(); codex = null; }
     await startTaskEngine();
-    await refreshAccounts({ forceNative: true, awaitNative: true });
+    refreshAccounts({ forceNative: true, awaitNative: false }).catch(error => console.error('[switch refresh]', humanError(error)));
     return { alreadyActive: false };
   } finally {
     nativeSwitchInProgress = false;
   }
+}
+async function validateNativeSwitchTarget(id) {
+  const vault = await readJson(nativeAccountsPath);
+  const target = Array.isArray(vault.accounts) ? vault.accounts.find(item => String(item.id) === String(id)) : null;
+  if (!target?.protected_auth) throw Error('原生账号库中没有这个账号的加密凭据，请重新登录后再切换。');
+  let auth;
+  try { auth = JSON.parse(await unprotectCredential(target.protected_auth)); }
+  catch { throw Error('目标账号的本机加密凭据无法读取，请重新登录这个账号。'); }
+  if (!auth?.tokens?.id_token || !auth?.tokens?.access_token || !auth?.tokens?.refresh_token) throw Error('目标账号凭据不完整，请重新登录后再切换。');
+  const claims = decodeJwtPayload(auth.tokens.id_token);
+  const actualAccountId = auth.tokens.account_id || claims['https://api.openai.com/auth']?.chatgpt_account_id || null;
+  if (target.account_id && actualAccountId && String(target.account_id) !== String(actualAccountId)) throw Error('目标账号身份校验失败，请重新登录这个账号。');
+  return { ok: true, id: String(target.id), name: target.email || target.name || String(target.id) };
 }
 async function migrateSwitcherAccountsToNativeVault() {
   const source = await readJson(switcherAccountsPath);
@@ -1466,13 +1484,18 @@ async function handle(req, res) {
     if (req.method==='POST'&&u.pathname==='/api/widget/open') return send(res,200,await openQuotaWidget());
     if (req.method==='GET'&&u.pathname==='/api/codex/status') return send(res,200,{running:await isCodexDesktopRunning()});
     if (req.method==='POST'&&u.pathname==='/api/accounts/switch'){
+      const target=await validateNativeSwitchTarget(String(data.id));
+      if(data.validateOnly===true)return send(res,200,{...target,validated:true});
       if([...tasks.values()].some(t=>t.status==='running'||t.status==='waiting_confirmation'))throw Error('有任务正在运行或等待确认，请结束后再切换账号。');
       const closeCodex=data.closeCodex===true;
       if(closeCodex)await closeCodexDesktop();
       if(!(await nativeVaultStatus()).ready)throw Error('还没有可切换的 Companion 原生账号。请先登录账号。');
-      const result=await switchNativeAccount(String(data.id));
-      launchCodexDesktop();
-      return send(res,200,{ok:true,message:result.alreadyActive?'已经是当前账号，Codex 桌面端正在打开。':'账号已由 Companion 安全切换，Codex 桌面端正在重新打开。'});
+      try{
+        const result=await switchNativeAccount(String(data.id));
+        return send(res,200,{ok:true,message:result.alreadyActive?'已经是当前账号，ChatGPT/Codex 正在打开。':'账号已由 Companion 安全切换，ChatGPT/Codex 正在重新打开。'});
+      }finally{
+        launchCodexDesktop();
+      }
     }
     if (req.method==='POST'&&u.pathname==='/api/config'){config.feishuWebhookUrl=String(data.feishuWebhookUrl||'');config.publicDashboardUrl=String(data.publicDashboardUrl||'');await saveConfig();return send(res,200,{ok:true});}
     if (req.method==='POST'&&u.pathname==='/api/feishu/setup'){const webhook=String(data.feishuWebhookUrl||'').trim();if(!validFeishuWebhook(webhook))throw Error('Webhook 地址格式不对。请复制飞书自定义机器人提供的完整 HTTPS 地址。');const previous=config.feishuWebhookUrl;config.feishuWebhookUrl=webhook;const result=await notify(`Codex Companion 通知测试成功\n\n以后任务完成、失败、等待确认、长时间无进展或额度不足时，我会通知到这个群。\n\n时间：${new Date().toLocaleString('zh-CN')}`, { appName: 'Codex Companion' });if(!result.ok){config.feishuWebhookUrl=previous;throw Error('飞书没有接收测试消息。请检查 Webhook 是否完整，以及机器人安全设置是否允许发送。')}await saveConfig();return send(res,200,{ok:true,message:'已经保存，测试消息也发送成功了。'});}

@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 Add-Type 'using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); }'
-$script:Port=$Port; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0
+$script:Port=$Port; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchInProgress=$false
 $mutexName=if($SelfTest){'Global\CodexCompanionQuotaWidget_v5_selftest'}else{'Global\CodexCompanionQuotaWidget_v5'}
 $script:Mutex=New-Object System.Threading.Mutex($false,$mutexName); if(-not $script:Mutex.WaitOne(0,$false)){exit}
 $Transparent=[Windows.Media.Brushes]::Transparent
@@ -114,22 +114,24 @@ function Get-WidgetMonitorWorkArea{
  return [pscustomobject]@{Left=$fallback.Left;Top=$fallback.Top;Right=$fallback.Right;Bottom=$fallback.Bottom}
 }
 function Switch-WidgetAccount($accountId,$accountName){
+ if($script:SwitchInProgress){return}
  try{
+  $validationPayload=@{id=$accountId;validateOnly=$true}|ConvertTo-Json -Compress
+  Invoke-RestMethod "http://127.0.0.1:$script:Port/api/accounts/switch" -Method Post -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($validationPayload)) -TimeoutSec 15|Out-Null
   $state=Invoke-RestMethod "http://127.0.0.1:$script:Port/api/codex/status" -TimeoutSec 8
-  $closeCodex=$false
-  if($state.running){
-   $choice=[Windows.MessageBox]::Show("切换到 $accountName 会先关闭正在运行的 Codex，当前桌面端任务可能中断。`n`n确定继续吗？",'切换 Codex 账号','YesNo','Warning')
-   if($choice-ne[Windows.MessageBoxResult]::Yes){return}
-   $closeCodex=$true
-  }
+  $desktopText=if($state.running){'检测到 ChatGPT/Codex 正在运行；确认后会先将它关闭，切换成功再自动重新打开。'}else{'确认后会切换账号，并自动打开 ChatGPT/Codex。'}
+  $choice=[Windows.MessageBox]::Show("确定切换到【${accountName}】吗？`n`n$desktopText`n`n正在运行的桌面端任务可能中断。",'确认切换账号','YesNo','Warning')
+  if($choice-ne[Windows.MessageBoxResult]::Yes){return}
+  $script:SwitchInProgress=$true
   [Windows.Input.Mouse]::OverrideCursor=[Windows.Input.Cursors]::Wait
-  $payload=@{id=$accountId;closeCodex=$closeCodex}|ConvertTo-Json -Compress
-  Invoke-RestMethod "http://127.0.0.1:$script:Port/api/accounts/switch" -Method Post -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($payload)) -TimeoutSec 30|Out-Null
+  $payload=@{id=$accountId;closeCodex=$true}|ConvertTo-Json -Compress
+  $result=Invoke-RestMethod "http://127.0.0.1:$script:Port/api/accounts/switch" -Method Post -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($payload)) -TimeoutSec 90
   Close-Detail
   Update-Widget
+  [Windows.MessageBox]::Show([string]$result.message,'Codex Companion','OK','Information')|Out-Null
  }catch{
   [Windows.MessageBox]::Show("账号切换失败：`n$($_.Exception.Message)",'Codex Companion','OK','Error')|Out-Null
- }finally{[Windows.Input.Mouse]::OverrideCursor=$null}
+ }finally{$script:SwitchInProgress=$false;[Windows.Input.Mouse]::OverrideCursor=$null}
 }
 function Show-Detail{
  if($null-ne$script:Detail){Close-Detail;return};if(([DateTime]::UtcNow-$script:DetailClosedAt).TotalMilliseconds-lt 250){return};$script:Status=Get-Status;$accounts=@($script:Status.accounts|Sort-Object{Get-SortReset $_})
@@ -166,10 +168,10 @@ function Show-Detail{
   $reset.Children.Add((New-Text "$count  ·  到期 $(Get-Expiry $a)" 10 $Muted))|Out-Null
   $content.Children.Add($reset)|Out-Null
   if(-not$a.is_active){
-    $card.Cursor=[Windows.Input.Cursors]::Hand;$card.ToolTip="点击切换到 $shownName"
+    $card.Cursor=[Windows.Input.Cursors]::Hand;$card.ToolTip="双击切换到 $shownName"
     $accountId=[string]$a.id;$accountName=$shownName
-   $switchHandler={param($sender,$eventArgs);$eventArgs.Handled=$true;Switch-WidgetAccount $accountId $accountName}.GetNewClosure()
-   $card.Add_MouseLeftButtonUp($switchHandler)
+   $switchHandler={param($sender,$eventArgs);if($eventArgs.ClickCount-eq 2){$eventArgs.Handled=$true;Switch-WidgetAccount $accountId $accountName}}.GetNewClosure()
+   $card.Add_MouseLeftButtonDown($switchHandler)
    $script:SwitchableCardsBuilt++
   }
   $stack.Children.Add($card)|Out-Null
