@@ -1,6 +1,6 @@
 import http from 'node:http';
 import fs from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, watch as watchFs } from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
@@ -13,7 +13,7 @@ import * as Lark from '@larksuiteoapi/node-sdk';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.13';
+const APP_VERSION = '0.7.14';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -63,6 +63,11 @@ const pendingApprovals = new Map();
 let feishuClient = null;
 let feishuWsClient = null;
 let feishuState = { state: 'not_configured', error: '', connectedAt: 0 };
+let codexSessionWatcher = null;
+let codexSessionWatcherReady = false;
+const codexSessionOffsets = new Map();
+const codexSessionPartials = new Map();
+const codexSessionDebounces = new Map();
 
 const jsonHeaders = { 'content-type': 'application/json; charset=utf-8' };
 const trim = (s, n) => String(s || '').length <= n ? String(s || '') : String(s || '').slice(-n);
@@ -1450,6 +1455,79 @@ function formatNotificationAppName(handlerId) {
   return readable || clean || id;
 }
 
+async function listCodexSessionFiles(directory, result = []) {
+  let entries = [];
+  try { entries = await fs.readdir(directory, { withFileTypes: true }); } catch { return result; }
+  for (const entry of entries) {
+    const fullPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) await listCodexSessionFiles(fullPath, result);
+    else if (entry.isFile() && entry.name.endsWith('.jsonl')) result.push(fullPath);
+  }
+  return result;
+}
+
+function sessionThreadId(file) {
+  return path.basename(file).match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i)?.[1] || '';
+}
+
+async function markCodexTurnComplete(turnId) {
+  const id = String(turnId || '').trim();
+  if (!id) return true;
+  const completed = Array.isArray(config.codexCompletedTurnIds) ? config.codexCompletedTurnIds.map(String) : [];
+  if (completed.includes(id)) return false;
+  config.codexCompletedTurnIds = [...completed, id].slice(-300);
+  await saveConfig();
+  return true;
+}
+
+async function processCodexSessionAppend(file) {
+  try {
+    const stat = await fs.stat(file);
+    let offset = codexSessionOffsets.get(file);
+    if (offset == null) { codexSessionOffsets.set(file, stat.size); return; }
+    if (stat.size < offset) { offset = 0; codexSessionPartials.delete(file); }
+    if (stat.size === offset) return;
+    const length = stat.size - offset;
+    const handle = await fs.open(file, 'r');
+    const buffer = Buffer.alloc(length);
+    try { await handle.read(buffer, 0, length, offset); } finally { await handle.close(); }
+    codexSessionOffsets.set(file, stat.size);
+    const combined = (codexSessionPartials.get(file) || '') + buffer.toString('utf8');
+    const lines = combined.split(/\r?\n/);
+    codexSessionPartials.set(file, lines.pop() || '');
+    for (const line of lines) {
+      let event;
+      try { event = JSON.parse(line); } catch { continue; }
+      if (event?.type !== 'event_msg' || event?.payload?.type !== 'task_complete') continue;
+      const turnId = String(event.payload.turn_id || '');
+      const threadId = sessionThreadId(file);
+      const message = String(event.payload.last_agent_message || '').trim();
+      if (!message) continue;
+      if (!await markCodexTurnComplete(turnId)) continue;
+      await notify(`Codex 任务完成\n任务：${threadId || '-'}\n\n${message}`, { appName: 'Codex 任务', taskId: threadId });
+    }
+  } catch (error) { console.error('[codex session monitor]', error.message); }
+}
+
+async function startCodexSessionMonitor() {
+  const root = path.join(process.env.USERPROFILE || '', '.codex', 'sessions');
+  if (!existsSync(root)) return;
+  for (const file of await listCodexSessionFiles(root)) {
+    const stat = await fs.stat(file).catch(() => null);
+    if (stat) codexSessionOffsets.set(file, stat.size);
+  }
+  try {
+    codexSessionWatcher = watchFs(root, { recursive: true }, (_eventType, filename) => {
+      if (!filename || !String(filename).endsWith('.jsonl')) return;
+      const file = path.join(root, String(filename));
+      clearTimeout(codexSessionDebounces.get(file));
+      codexSessionDebounces.set(file, setTimeout(() => { codexSessionDebounces.delete(file); processCodexSessionAppend(file); }, 250));
+    });
+    codexSessionWatcher.on('error', error => { codexSessionWatcherReady = false; console.error('[codex session watcher]', error.message); });
+    codexSessionWatcherReady = true;
+  } catch (error) { console.error('[codex session watcher]', error.message); }
+}
+
 async function monitorWindowsNotifications() {
   if (process.platform !== 'win32') return;
   try {
@@ -1473,6 +1551,7 @@ async function monitorWindowsNotifications() {
       const texts = [...String(row.payload || '').matchAll(/<text(?:\s[^>]*)?>([\s\S]*?)<\/text>/gi)].map(match => decodeXmlText(match[1])).filter(Boolean);
       if (!texts.length) continue;
       const appName = formatNotificationAppName(row.handlerId);
+      if (codexSessionWatcherReady && appName === 'Codex') continue;
       await notify(`Windows 通知 · ${appName}\n${texts.join('\n')}`, { appName });
     }
     if (rows.length) refreshQuotaFromBaseline(baseline, { source: 'desktop', title: 'Windows 通知' }).catch(error => console.error('[desktop quota]', error.message));
@@ -1562,7 +1641,7 @@ class CodexServer {
     if (!line.trim()) return; let msg; try { msg = JSON.parse(line); } catch { return; }
     if (msg.id !== undefined && this.pending.has(msg.id)) { const p = this.pending.get(msg.id); clearTimeout(p.timer); this.pending.delete(msg.id); if (msg.error) p.reject(new Error(msg.error.message || JSON.stringify(msg.error))); else p.resolve(msg.result); return; }
     const p = msg.params || {}; const id = p.threadId;
-    if (id && tasks.has(id)) { const task = tasks.get(id); task.lastEventAt = Date.now(); if (msg.method?.includes('agentMessage/delta')) task.output += p.delta || ''; if (msg.method === 'turn/started' && p.turn?.id) this.turns.set(id, p.turn.id); if (msg.method === 'turn/completed') { this.turns.delete(id); task.status = p.turn?.status === 'completed' ? 'completed' : p.turn?.status === 'interrupted' ? 'interrupted' : 'failed'; notify(`Codex 任务${task.status === 'completed' ? '完成' : '结束'}\n任务：${id}\n状态：${task.status}\n\n${trim(task.output, 3000)}\n\n${dashboardLink(`#task=${encodeURIComponent(id)}`)}`, { appName: 'Codex 任务', taskId: id }); refreshQuotaAfterTask(task).catch(error => console.error('[task quota]', error.message)); } }
+    if (id && tasks.has(id)) { const task = tasks.get(id); task.lastEventAt = Date.now(); if (msg.method?.includes('agentMessage/delta')) task.output += p.delta || ''; if (msg.method === 'turn/started' && p.turn?.id) this.turns.set(id, p.turn.id); if (msg.method === 'turn/completed') { this.turns.delete(id); task.status = p.turn?.status === 'completed' ? 'completed' : p.turn?.status === 'interrupted' ? 'interrupted' : 'failed'; markCodexTurnComplete(p.turn?.id).then(fresh => { if (fresh) return notify(`Codex 任务${task.status === 'completed' ? '完成' : '结束'}\n任务：${id}\n状态：${task.status}\n\n${trim(task.output, 3000)}\n\n${dashboardLink(`#task=${encodeURIComponent(id)}`)}`, { appName: 'Codex 任务', taskId: id }); }).catch(error => console.error('[task notification]', error.message)); refreshQuotaAfterTask(task).catch(error => console.error('[task quota]', error.message)); } }
     if (msg.id !== undefined && (msg.method?.includes('requestApproval') || msg.method?.includes('requestUserInput'))) { const task = id ? tasks.get(id) : null; if (task) { task.status = 'waiting_confirmation'; task.lastEventAt = Date.now(); } pendingApprovals.set(String(msg.id), { id: String(msg.id), method: msg.method, params: p, taskId: id }); notify(`Codex 等待确认\n任务：${id || '-'}\n类型：${msg.method}\n${confirmationDetails(msg.method, p)}\n\n${trim(task?.output, 1800)}\n\n请打开控制台：${dashboardLink(`#approval=${msg.id}`)}`, { appName: 'Codex 任务', taskId: id }); }
   }
   respondApproval(requestId, decision, answers = {}) { const request = pendingApprovals.get(String(requestId)); if (!request) throw new Error('确认请求已经失效'); const result = request.method.includes('requestUserInput') ? { answers } : { decision }; this.send({ id: Number(requestId), result }); pendingApprovals.delete(String(requestId)); const task = request.taskId ? tasks.get(request.taskId) : null; if (task) task.status = 'running'; }
@@ -1590,6 +1669,7 @@ async function handle(req, res) {
       return send(res,200,{
         version:APP_VERSION,
         taskEngineReady:!!codex?.proc,
+        codexSessionMonitorReady: codexSessionWatcherReady,
         taskEngineError,
         lastQuotaDelta,
         config:{...config,accounts:undefined,deletedAccountKeys:undefined,feishuAppSecretProtected:undefined,feishuBoundChatId:undefined,feishuMessageThreads:undefined,feishuReceivedMessageIds:undefined},
@@ -1774,6 +1854,7 @@ async function main() {
   refreshAccounts().catch(e => console.error('[accounts]', e.message));
   startTaskEngine().catch(e => console.error('[task engine]', e.message));
   startFeishuLongConnection().catch(e => console.error('[feishu connection]', e.message));
+  startCodexSessionMonitor().catch(e => console.error('[codex session monitor]', e.message));
   monitorWindowsNotifications();
   setInterval(async () => {
     if (!codex?.proc) startTaskEngine().catch(e => console.error('[task engine]', e.message));
@@ -1788,6 +1869,6 @@ async function main() {
       try { await refreshAccounts(); } catch (e) { console.error('[accounts]', e.message); }
     }
   }, 15000);
-  process.on('SIGINT', () => { codex.close(); try { feishuWsClient?.close({ force: true }); } catch {} try { notificationDb?.close(); } catch {} server.close(); process.exit(0); });
+  process.on('SIGINT', () => { codex.close(); try { codexSessionWatcher?.close(); } catch {} try { feishuWsClient?.close({ force: true }); } catch {} try { notificationDb?.close(); } catch {} server.close(); process.exit(0); });
 }
 main().catch(e=>{console.error(e);process.exit(1)});
