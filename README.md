@@ -1,6 +1,6 @@
 # Codex Companion
 
-独立的 Windows Codex 伴侣程序。当前稳定基线为 v0.7.14：
+独立的 Windows Codex 伴侣程序。当前稳定基线为 v0.7.15：
 
 - 日常只需双击桌面 **Codex 助手**，后台与小浮窗会一起启动，不自动打开网页；
 - 圆形浮窗用抗锯齿圆环显示当前账号剩余额度，数字居中且大、百分号小并靠右下；启动时会快速等待账号数据。点击打开圆角、无标题栏的账号面板，点击外部自动关闭，右键打开完整页面；
@@ -8,7 +8,8 @@
 
 - 从 Companion 的 Windows 加密账号库读取全部账号，并通过 Codex 官方接口读取额度、重置时间、可用重置次数及最近到期时间；旧版 Codex CLI 也会由 Companion 兼容读取官方只读明细；
 - 通过 Codex 官方 app-server 启动并跟踪由本程序创建的任务；
-- 直接监听 Codex 官方本地会话的 `task_complete` 记录；即使任务不是从 Companion 启动、Windows 没有弹通知，也能把完成结果和准确对话 ID 发到飞书；
+- 直接监听 Codex 官方本地会话的 `task_complete` 记录；即使任务不是从 Companion 启动、Windows 没有弹通知，也能把完成结果和准确对话 ID 发到飞书；子代理的中间完成不会冒充整个任务完成。
+- 回复飞书中的完成通知会继续对应的原对话；若 Codex 桌面端正在占用该对话，Companion 会自动关闭桌面端、后台接管并在完成后重新打开。
 - 通过 Codex 官方 `thread/list` / `thread/resume` 显示最近对话，并在原对话中继续回复；
 - 支持成功、失败、等待确认、长时间无进展通知；
 - 支持飞书机器人文本通知；
@@ -36,7 +37,7 @@
 
 推荐直接发送单个文件：
 
-`CodexCompanion-Setup-v0.7.14.exe`
+`CodexCompanion-Setup-v0.7.15.exe`
 
 用户双击一次即可安装并启动，安装器已经内置 Node.js 和官方 Codex CLI，不再要求另外安装 Node.js、Codex CLI 或 Codex Switcher。已有 Switcher 账号的用户仍可在高级设置中一次性迁移；新用户直接使用 Companion 的通用网页登录或设备码登录。Codex 桌面应用可选，但想使用切换后自动打开功能时需要安装。
 

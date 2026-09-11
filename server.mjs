@@ -13,7 +13,7 @@ import * as Lark from '@larksuiteoapi/node-sdk';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.14';
+const APP_VERSION = '0.7.15';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -68,6 +68,8 @@ let codexSessionWatcherReady = false;
 const codexSessionOffsets = new Map();
 const codexSessionPartials = new Map();
 const codexSessionDebounces = new Map();
+const codexSessionKinds = new Map();
+const relaunchCodexAfterTask = new Set();
 
 const jsonHeaders = { 'content-type': 'application/json; charset=utf-8' };
 const trim = (s, n) => String(s || '').length <= n ? String(s || '') : String(s || '').slice(-n);
@@ -690,14 +692,50 @@ async function handleFeishuMessage(data) {
       await sendFeishuAppText('还没有绑定 Codex 对话，请先发送“绑定”。', { replyTo: message.message_id });
       return;
     }
-    const task = await codex.resumeTask(String(threadId));
-    await codex.continueTask(task, text);
+    const task = await continueThreadFromFeishu(String(threadId), text);
     config.feishuBoundThreadId = task.id;
     await saveConfig();
     await sendFeishuAppText(`已发送到原 Codex 对话：${config.feishuBoundThreadName || task.prompt || task.id}`, { replyTo: message.message_id, taskId: task.id });
   } catch (error) {
     console.error('[feishu reply]', error.message);
     try { await sendFeishuAppText(`没有成功继续 Codex 对话：${humanError(error)}`, { replyTo: data?.message?.message_id || '' }); } catch {}
+  }
+}
+
+function isActiveWriterError(error) {
+  return /already has an active writer|thread-store conflict/i.test(String(error?.message || error || ''));
+}
+
+async function continueThreadFromFeishu(threadId, text) {
+  try {
+    const task = await codex.resumeTask(threadId);
+    await codex.continueTask(task, text);
+    return task;
+  } catch (error) {
+    if (!isActiveWriterError(error) || !await isCodexDesktopRunning()) throw error;
+  }
+
+  await closeCodexDesktop();
+  try {
+    let task;
+    let lastError;
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      try {
+        task = await codex.resumeTask(threadId);
+        break;
+      } catch (error) {
+        lastError = error;
+        if (!isActiveWriterError(error)) throw error;
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+    if (!task) throw lastError || Error('Codex 桌面端仍在占用这个对话。');
+    await codex.continueTask(task, text);
+    relaunchCodexAfterTask.add(threadId);
+    return task;
+  } catch (error) {
+    launchCodexDesktop();
+    throw error;
   }
 }
 
@@ -1470,6 +1508,24 @@ function sessionThreadId(file) {
   return path.basename(file).match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i)?.[1] || '';
 }
 
+function sessionKindFromMeta(payload) {
+  if (payload?.thread_source === 'subagent' || payload?.source?.subagent) return 'subagent';
+  return String(payload?.thread_source || 'user');
+}
+
+async function readCodexSessionKind(file) {
+  try {
+    const handle = await fs.open(file, 'r');
+    const buffer = Buffer.alloc(16384);
+    let bytesRead = 0;
+    try { ({ bytesRead } = await handle.read(buffer, 0, buffer.length, 0)); } finally { await handle.close(); }
+    const prefix = buffer.subarray(0, bytesRead).toString('utf8');
+    if (/"thread_source"\s*:\s*"subagent"|"source"\s*:\s*\{\s*"subagent"/i.test(prefix)) return 'subagent';
+    const match = prefix.match(/"thread_source"\s*:\s*"([^"]+)"/i);
+    return match?.[1] || 'user';
+  } catch { return 'user'; }
+}
+
 async function markCodexTurnComplete(turnId) {
   const id = String(turnId || '').trim();
   if (!id) return true;
@@ -1484,7 +1540,7 @@ async function processCodexSessionAppend(file) {
   try {
     const stat = await fs.stat(file);
     let offset = codexSessionOffsets.get(file);
-    if (offset == null) { codexSessionOffsets.set(file, stat.size); return; }
+    if (offset == null) offset = 0;
     if (stat.size < offset) { offset = 0; codexSessionPartials.delete(file); }
     if (stat.size === offset) return;
     const length = stat.size - offset;
@@ -1498,7 +1554,14 @@ async function processCodexSessionAppend(file) {
     for (const line of lines) {
       let event;
       try { event = JSON.parse(line); } catch { continue; }
+      if (event?.type === 'session_meta') {
+        codexSessionKinds.set(file, sessionKindFromMeta(event.payload));
+        continue;
+      }
       if (event?.type !== 'event_msg' || event?.payload?.type !== 'task_complete') continue;
+      const sessionKind = codexSessionKinds.get(file) || await readCodexSessionKind(file);
+      codexSessionKinds.set(file, sessionKind);
+      if (sessionKind === 'subagent') continue;
       const turnId = String(event.payload.turn_id || '');
       const threadId = sessionThreadId(file);
       const message = String(event.payload.last_agent_message || '').trim();
@@ -1514,7 +1577,10 @@ async function startCodexSessionMonitor() {
   if (!existsSync(root)) return;
   for (const file of await listCodexSessionFiles(root)) {
     const stat = await fs.stat(file).catch(() => null);
-    if (stat) codexSessionOffsets.set(file, stat.size);
+    if (stat) {
+      codexSessionOffsets.set(file, stat.size);
+      codexSessionKinds.set(file, await readCodexSessionKind(file));
+    }
   }
   try {
     codexSessionWatcher = watchFs(root, { recursive: true }, (_eventType, filename) => {
@@ -1641,7 +1707,7 @@ class CodexServer {
     if (!line.trim()) return; let msg; try { msg = JSON.parse(line); } catch { return; }
     if (msg.id !== undefined && this.pending.has(msg.id)) { const p = this.pending.get(msg.id); clearTimeout(p.timer); this.pending.delete(msg.id); if (msg.error) p.reject(new Error(msg.error.message || JSON.stringify(msg.error))); else p.resolve(msg.result); return; }
     const p = msg.params || {}; const id = p.threadId;
-    if (id && tasks.has(id)) { const task = tasks.get(id); task.lastEventAt = Date.now(); if (msg.method?.includes('agentMessage/delta')) task.output += p.delta || ''; if (msg.method === 'turn/started' && p.turn?.id) this.turns.set(id, p.turn.id); if (msg.method === 'turn/completed') { this.turns.delete(id); task.status = p.turn?.status === 'completed' ? 'completed' : p.turn?.status === 'interrupted' ? 'interrupted' : 'failed'; markCodexTurnComplete(p.turn?.id).then(fresh => { if (fresh) return notify(`Codex 任务${task.status === 'completed' ? '完成' : '结束'}\n任务：${id}\n状态：${task.status}\n\n${trim(task.output, 3000)}\n\n${dashboardLink(`#task=${encodeURIComponent(id)}`)}`, { appName: 'Codex 任务', taskId: id }); }).catch(error => console.error('[task notification]', error.message)); refreshQuotaAfterTask(task).catch(error => console.error('[task quota]', error.message)); } }
+    if (id && tasks.has(id)) { const task = tasks.get(id); task.lastEventAt = Date.now(); if (msg.method?.includes('agentMessage/delta')) task.output += p.delta || ''; if (msg.method === 'turn/started' && p.turn?.id) this.turns.set(id, p.turn.id); if (msg.method === 'turn/completed') { this.turns.delete(id); task.status = p.turn?.status === 'completed' ? 'completed' : p.turn?.status === 'interrupted' ? 'interrupted' : 'failed'; markCodexTurnComplete(p.turn?.id).then(fresh => { if (fresh) return notify(`Codex 任务${task.status === 'completed' ? '完成' : '结束'}\n任务：${id}\n状态：${task.status}\n\n${trim(task.output, 3000)}\n\n${dashboardLink(`#task=${encodeURIComponent(id)}`)}`, { appName: 'Codex 任务', taskId: id }); }).catch(error => console.error('[task notification]', error.message)); if (relaunchCodexAfterTask.delete(id)) setTimeout(launchCodexDesktop, 800); refreshQuotaAfterTask(task).catch(error => console.error('[task quota]', error.message)); } }
     if (msg.id !== undefined && (msg.method?.includes('requestApproval') || msg.method?.includes('requestUserInput'))) { const task = id ? tasks.get(id) : null; if (task) { task.status = 'waiting_confirmation'; task.lastEventAt = Date.now(); } pendingApprovals.set(String(msg.id), { id: String(msg.id), method: msg.method, params: p, taskId: id }); notify(`Codex 等待确认\n任务：${id || '-'}\n类型：${msg.method}\n${confirmationDetails(msg.method, p)}\n\n${trim(task?.output, 1800)}\n\n请打开控制台：${dashboardLink(`#approval=${msg.id}`)}`, { appName: 'Codex 任务', taskId: id }); }
   }
   respondApproval(requestId, decision, answers = {}) { const request = pendingApprovals.get(String(requestId)); if (!request) throw new Error('确认请求已经失效'); const result = request.method.includes('requestUserInput') ? { answers } : { decision }; this.send({ id: Number(requestId), result }); pendingApprovals.delete(String(requestId)); const task = request.taskId ? tasks.get(request.taskId) : null; if (task) task.status = 'running'; }
