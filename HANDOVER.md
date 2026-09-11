@@ -1,6 +1,6 @@
 # Codex Companion 交接文档
 
-当前稳定版本：**v0.7.11**（2026-09-08）
+当前稳定版本：**v0.7.12**（2026-09-11）
 
 ## 当前功能
 
@@ -32,7 +32,7 @@ Codex Switcher 不再是运行依赖。若机器上已有 Switcher，Companion �
 
 ## 对外分发
 
-推荐把单个 `CodexCompanion-Setup-v0.7.11.exe` 交给用户。用户只需双击一次，安装器会：
+推荐把单个 `CodexCompanion-Setup-v0.7.12.exe` 交给用户。用户只需双击一次，安装器会：
 
 1. 解压到 `%LOCALAPPDATA%\Programs\CodexCompanion`；
 2. 安装内置 Node.js 与官方 Codex CLI 运行时；
@@ -80,7 +80,7 @@ Codex Switcher 不再是运行依赖。若机器上已有 Switcher，Companion �
 
 ## 已验证基线
 
-- `/api/status`：v0.7.11，返回全部账号、`alias` / `display_name`、重置数量/最近到期时间及 `nativeVault` 备份状态；
+- `/api/status`：v0.7.12，返回全部账号、`alias` / `display_name`、重置数量/最近到期时间、飞书长连接状态及 `nativeVault` 备份状态；
 - 安装版数据目录固定测试：启动器显式设置 `%APPDATA%\CodexCompanion`；主账号库读取成功时 `source=primary`，主库临时失败时可回退显示有效备份。
 - 账号库回退实测：在隔离目录故意写入损坏主库并放入 4 账号有效备份，安装版后台返回 4 个账号、`source=backup`、`usingBackup=true`，测试目录已清理。
 - `/api/accounts/migrate-native`：先执行 DPAPI 往返自检，再把现有 Switcher 凭据加密复制到 `%APPDATA%\CodexCompanion\accounts.vault.json`；

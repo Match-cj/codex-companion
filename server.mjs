@@ -9,10 +9,11 @@ import { promisify } from 'node:util';
 import { createHash, createCipheriv, createDecipheriv, randomBytes, randomUUID, scrypt as scryptCallback } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
+import * as Lark from '@larksuiteoapi/node-sdk';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.11';
+const APP_VERSION = '0.7.12';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -30,6 +31,10 @@ const dashboardHtml = await fs.readFile(new URL('./dashboard.html', import.meta.
 const defaultConfig = {
   port: 17841,
   feishuWebhookUrl: '',
+  feishuAppId: '',
+  feishuAppSecretProtected: '',
+  feishuBoundChatId: '',
+  feishuBoundThreadId: '',
   stallMinutes: 3,
   quotaRefreshMinutes: 5,
   resetReminderMinutes: 15,
@@ -55,6 +60,9 @@ const nativeUsageCache = new Map();
 let nativeVaultWriteQueue = Promise.resolve();
 const tasks = new Map();
 const pendingApprovals = new Map();
+let feishuClient = null;
+let feishuWsClient = null;
+let feishuState = { state: 'not_configured', error: '', connectedAt: 0 };
 
 const jsonHeaders = { 'content-type': 'application/json; charset=utf-8' };
 const trim = (s, n) => String(s || '').length <= n ? String(s || '') : String(s || '').slice(-n);
@@ -554,6 +562,108 @@ async function dpapiTransform(value, protect) {
 }
 const protectCredential = value => dpapiTransform(String(value), true);
 const unprotectCredential = value => dpapiTransform(String(value), false);
+
+function publicFeishuState() {
+  return {
+    configured: Boolean(config.feishuAppId && config.feishuAppSecretProtected),
+    state: feishuWsClient?.getConnectionStatus?.().state || feishuState.state,
+    error: feishuState.error,
+    connectedAt: feishuState.connectedAt,
+    boundChat: Boolean(config.feishuBoundChatId),
+    boundThreadId: config.feishuBoundThreadId || '',
+    boundThreadName: config.feishuBoundThreadName || '',
+  };
+}
+
+async function sendFeishuAppText(text, { replyTo = '', taskId = '' } = {}) {
+  if (!feishuClient || !config.feishuBoundChatId) return { ok: false, reason: 'app-bot-not-ready' };
+  const data = { content: JSON.stringify({ text: trim(text, 3800) }), msg_type: 'text' };
+  const response = replyTo
+    ? await feishuClient.im.v1.message.reply({ path: { message_id: replyTo }, data })
+    : await feishuClient.im.v1.message.create({ params: { receive_id_type: 'chat_id' }, data: { ...data, receive_id: config.feishuBoundChatId } });
+  if (response?.code) throw Error(response.msg || `飞书消息发送失败（${response.code}）`);
+  const messageId = response?.data?.message_id;
+  if (messageId && taskId) {
+    const links = config.feishuMessageThreads && typeof config.feishuMessageThreads === 'object' ? config.feishuMessageThreads : {};
+    links[messageId] = taskId;
+    config.feishuMessageThreads = Object.fromEntries(Object.entries(links).slice(-100));
+    saveConfig().catch(() => {});
+  }
+  return { ok: true, messageId };
+}
+
+async function chooseLatestThread() {
+  if (!codex?.proc) throw Error('任务引擎正在重连，请稍后重试。');
+  const threads = await codex.listThreads(20, '');
+  if (!threads.length) throw Error('没有找到可绑定的 Codex 对话。');
+  return threads.find(thread => thread.status?.type === 'active') || threads[0];
+}
+
+async function bindLatestFeishuThread() {
+  const thread = await chooseLatestThread();
+  config.feishuBoundThreadId = String(thread.id);
+  config.feishuBoundThreadName = String(thread.name || thread.preview || '最近的 Codex 对话');
+  await saveConfig();
+  return { id: config.feishuBoundThreadId, name: config.feishuBoundThreadName };
+}
+
+async function handleFeishuMessage(data) {
+  try {
+    const message = data?.message || {};
+    if (message.message_type !== 'text') return;
+    let text = '';
+    try { text = String(JSON.parse(message.content || '{}').text || '').trim(); } catch { return; }
+    text = text.replace(/@_user_\d+/g, '').trim();
+    if (!text) return;
+    const chatId = String(message.chat_id || '');
+    if (!config.feishuBoundChatId || /^(绑定|bind)$/i.test(text)) {
+      config.feishuBoundChatId = chatId;
+      const thread = await bindLatestFeishuThread();
+      await sendFeishuAppText(`已绑定本群。\n当前 Codex 对话：${thread.name}\n以后回复机器人通知，会继续这条对话。`, { replyTo: message.message_id, taskId: thread.id });
+      return;
+    }
+    if (chatId !== config.feishuBoundChatId) return;
+    const links = config.feishuMessageThreads && typeof config.feishuMessageThreads === 'object' ? config.feishuMessageThreads : {};
+    const threadId = links[message.parent_id] || links[message.root_id] || config.feishuBoundThreadId;
+    if (!threadId) {
+      await sendFeishuAppText('还没有绑定 Codex 对话，请先发送“绑定”。', { replyTo: message.message_id });
+      return;
+    }
+    const task = await codex.resumeTask(String(threadId));
+    await codex.continueTask(task, text);
+    config.feishuBoundThreadId = task.id;
+    await saveConfig();
+    await sendFeishuAppText(`已发送到原 Codex 对话：${config.feishuBoundThreadName || task.prompt || task.id}`, { replyTo: message.message_id, taskId: task.id });
+  } catch (error) {
+    console.error('[feishu reply]', error.message);
+    try { await sendFeishuAppText(`没有成功继续 Codex 对话：${humanError(error)}`, { replyTo: data?.message?.message_id || '' }); } catch {}
+  }
+}
+
+async function startFeishuLongConnection() {
+  try { feishuWsClient?.close({ force: true }); } catch {}
+  feishuClient = null; feishuWsClient = null;
+  if (!config.feishuAppId || !config.feishuAppSecretProtected) {
+    feishuState = { state: 'not_configured', error: '', connectedAt: 0 };
+    return;
+  }
+  const appSecret = await unprotectCredential(config.feishuAppSecretProtected);
+  const base = { appId: config.feishuAppId, appSecret };
+  feishuClient = new Lark.Client(base);
+  feishuState = { state: 'connecting', error: '', connectedAt: 0 };
+  feishuWsClient = new Lark.WSClient({
+    ...base,
+    autoReconnect: true,
+    handshakeTimeoutMs: 15000,
+    loggerLevel: Lark.LoggerLevel.warn,
+    onReady: () => { feishuState = { state: 'connected', error: '', connectedAt: Date.now() }; },
+    onReconnecting: () => { feishuState.state = 'reconnecting'; },
+    onReconnected: () => { feishuState = { state: 'connected', error: '', connectedAt: Date.now() }; },
+    onError: error => { feishuState = { ...feishuState, state: 'failed', error: humanError(error) }; },
+  });
+  const dispatcher = new Lark.EventDispatcher({}).register({ 'im.message.receive_v1': handleFeishuMessage });
+  feishuWsClient.start({ eventDispatcher: dispatcher }).catch(error => { feishuState = { ...feishuState, state: 'failed', error: humanError(error) }; });
+}
 function authFileFromSwitcherAccount(account) {
   const source = account?.auth_data || {};
   if (!source.id_token || !source.access_token || !source.refresh_token) return null;
@@ -1103,7 +1213,7 @@ async function refreshAccounts({ forceNative = false, awaitNative = false } = {}
   return accounts;
 }
 async function notify(text, opts = {}) {
-  if (!config.feishuWebhookUrl) return { ok: false, reason: 'webhook-not-configured' };
+  if (!config.feishuWebhookUrl && !(feishuClient && config.feishuBoundChatId)) return { ok: false, reason: 'feishu-not-configured' };
   const appName = normalizeAppName(opts.appName);
   const blacklist = Array.isArray(config.notificationBlacklist) ? config.notificationBlacklist : [];
   if (blacklist.includes(appName)) {
@@ -1113,10 +1223,15 @@ async function notify(text, opts = {}) {
     return { ok: false, reason: 'muted' };
   }
   try {
-    const response = await fetch(config.feishuWebhookUrl, { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ msg_type: 'text', content: { text: trim(text, 3800) } }) });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const result = await response.json().catch(() => ({}));
-    if (result.code && result.code !== 0) throw new Error(result.msg || `飞书错误 ${result.code}`);
+    const embeddedTaskId = String(text).match(/任务：([0-9a-f-]{20,})/i)?.[1] || config.feishuBoundThreadId || '';
+    if (feishuClient && config.feishuBoundChatId) {
+      await sendFeishuAppText(text, { taskId: embeddedTaskId });
+    } else {
+      const response = await fetch(config.feishuWebhookUrl, { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ msg_type: 'text', content: { text: trim(text, 3800) } }) });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const result = await response.json().catch(() => ({}));
+      if (result.code && result.code !== 0) throw new Error(result.msg || `飞书错误 ${result.code}`);
+    }
     pushHistory({ at: Date.now(), appName, body: trim(text, 3800), sent: true });
     saveConfig().catch(() => {});
     return { ok: true };
@@ -1408,7 +1523,8 @@ async function handle(req, res) {
         taskEngineReady:!!codex?.proc,
         taskEngineError,
         lastQuotaDelta,
-        config:{...config,accounts:undefined},
+        config:{...config,accounts:undefined,feishuAppSecretProtected:undefined,feishuMessageThreads:undefined},
+        feishu:publicFeishuState(),
         accounts,
         tasks:Object.fromEntries(tasks),
         approvals:[...pendingApprovals.values()],
@@ -1499,7 +1615,21 @@ async function handle(req, res) {
     }
     if (req.method==='POST'&&u.pathname==='/api/config'){config.feishuWebhookUrl=String(data.feishuWebhookUrl||'');config.publicDashboardUrl=String(data.publicDashboardUrl||'');await saveConfig();return send(res,200,{ok:true});}
     if (req.method==='POST'&&u.pathname==='/api/feishu/setup'){const webhook=String(data.feishuWebhookUrl||'').trim();if(!validFeishuWebhook(webhook))throw Error('Webhook 地址格式不对。请复制飞书自定义机器人提供的完整 HTTPS 地址。');const previous=config.feishuWebhookUrl;config.feishuWebhookUrl=webhook;const result=await notify(`Codex Companion 通知测试成功\n\n以后任务完成、失败、等待确认、长时间无进展或额度不足时，我会通知到这个群。\n\n时间：${new Date().toLocaleString('zh-CN')}`, { appName: 'Codex Companion' });if(!result.ok){config.feishuWebhookUrl=previous;throw Error('飞书没有接收测试消息。请检查 Webhook 是否完整，以及机器人安全设置是否允许发送。')}await saveConfig();return send(res,200,{ok:true,message:'已经保存，测试消息也发送成功了。'});}
-    if (req.method==='POST'&&u.pathname==='/api/feishu/test'){if(!config.feishuWebhookUrl)throw Error('请先填写飞书机器人 Webhook 地址');const result=await notify(`Codex Companion 飞书通知测试成功\n时间：${new Date().toLocaleString('zh-CN')}\n${dashboardLink()}`, { appName: 'Codex Companion' });if(!result.ok)throw Error('飞书没有接收测试消息，请检查 Webhook 和机器人安全设置');return send(res,200,{ok:true});}
+    if (req.method==='POST'&&u.pathname==='/api/feishu/test'){if(!config.feishuWebhookUrl&&!(feishuClient&&config.feishuBoundChatId))throw Error('请先配置 Webhook，或连接并绑定应用机器人');const result=await notify(`Codex Companion 飞书通知测试成功\n时间：${new Date().toLocaleString('zh-CN')}\n${dashboardLink()}`, { appName: 'Codex Companion' });if(!result.ok)throw Error('飞书没有接收测试消息，请检查机器人配置和连接状态');return send(res,200,{ok:true});}
+    if (req.method==='GET'&&u.pathname==='/api/feishu/app/status') return send(res,200,{ok:true,...publicFeishuState()});
+    if (req.method==='POST'&&u.pathname==='/api/feishu/app/setup'){
+      const appId=String(data.appId||'').trim();const appSecret=String(data.appSecret||'').trim();
+      if(!/^cli_[a-z0-9]+$/i.test(appId))throw Error('App ID 格式不正确，应以 cli_ 开头。');
+      if(!appSecret&&!(config.feishuAppId===appId&&config.feishuAppSecretProtected))throw Error('首次配置需要填写 App Secret。');
+      config.feishuAppId=appId;
+      if(appSecret)config.feishuAppSecretProtected=await protectCredential(appSecret);
+      await saveConfig();await startFeishuLongConnection();
+      return send(res,200,{ok:true,message:'应用机器人配置已保存，正在建立飞书长连接。请在机器人所在群发送“绑定”。',...publicFeishuState()});
+    }
+    if (req.method==='POST'&&u.pathname==='/api/feishu/thread/bind-latest'){
+      const thread=await bindLatestFeishuThread();
+      return send(res,200,{ok:true,thread,message:`已绑定最近的 Codex 对话：${thread.name}`});
+    }
     if (req.method==='GET'&&u.pathname==='/api/notifications/apps'){
       ensureHistory();
       const blacklist = Array.isArray(config.notificationBlacklist) ? config.notificationBlacklist : [];
@@ -1574,6 +1704,7 @@ async function main() {
   });
   refreshAccounts().catch(e => console.error('[accounts]', e.message));
   startTaskEngine().catch(e => console.error('[task engine]', e.message));
+  startFeishuLongConnection().catch(e => console.error('[feishu connection]', e.message));
   monitorWindowsNotifications();
   setInterval(async () => {
     if (!codex?.proc) startTaskEngine().catch(e => console.error('[task engine]', e.message));
@@ -1588,6 +1719,6 @@ async function main() {
       try { await refreshAccounts(); } catch (e) { console.error('[accounts]', e.message); }
     }
   }, 15000);
-  process.on('SIGINT', () => { codex.close(); try { notificationDb?.close(); } catch {} server.close(); process.exit(0); });
+  process.on('SIGINT', () => { codex.close(); try { feishuWsClient?.close({ force: true }); } catch {} try { notificationDb?.close(); } catch {} server.close(); process.exit(0); });
 }
 main().catch(e=>{console.error(e);process.exit(1)});

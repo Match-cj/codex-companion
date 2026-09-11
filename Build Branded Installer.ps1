@@ -24,7 +24,11 @@ if ([string]::IsNullOrWhiteSpace($IsccPath)) {
 if (-not $IsccPath -or -not (Test-Path -LiteralPath $IsccPath)) {
     throw '没有找到 Inno Setup 7 命令行编译器 ISCC.exe。请先安装官方 Inno Setup 7 x64。'
 }
-if (Test-Path -LiteralPath $output) { throw "输出文件已存在：$output" }
+if (Test-Path -LiteralPath $output) {
+    $expectedOutputRoot = [IO.Path]::GetFullPath($outputRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    if (-not $output.StartsWith($expectedOutputRoot, [StringComparison]::OrdinalIgnoreCase)) { throw '已有安装包路径校验失败。' }
+    Remove-Item -LiteralPath $output -Force
+}
 
 $payloadRoot = Join-Path $temporaryRoot 'payload'
 $runtimeRoot = Join-Path $payloadRoot 'runtime'
@@ -55,6 +59,9 @@ try {
     }
     Copy-Item -LiteralPath $node -Destination (Join-Path $runtimeRoot 'node.exe')
 
+    & $npm install --prefix $payloadRoot --omit=dev --ignore-scripts --no-audit --no-fund
+    if ($LASTEXITCODE -ne 0) { throw '飞书长连接运行依赖下载失败。' }
+
     & $npm install --prefix $depsRoot "@openai/codex@$CodexVersion" --omit=dev --ignore-scripts --no-audit --no-fund
     if ($LASTEXITCODE -ne 0) { throw "Codex CLI $CodexVersion 下载失败。" }
     $vendorCandidates = @(
@@ -74,7 +81,20 @@ try {
     })
     $payloadManifest = [ordered]@{ format = 1; version = $appVersion; algorithm = 'SHA256'; files = $manifestFiles }
     [IO.File]::WriteAllText((Join-Path $payloadRoot 'PAYLOAD-MANIFEST.json'), ($payloadManifest | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($true))
-    Compress-Archive -LiteralPath (Get-ChildItem -LiteralPath $payloadRoot | ForEach-Object FullName) -DestinationPath $payloadZip -CompressionLevel Optimal
+    $archiveError = $null
+    for ($archiveAttempt = 1; $archiveAttempt -le 4; $archiveAttempt++) {
+        try {
+            if (Test-Path -LiteralPath $payloadZip) { Remove-Item -LiteralPath $payloadZip -Force }
+            Compress-Archive -LiteralPath (Get-ChildItem -LiteralPath $payloadRoot | ForEach-Object FullName) -DestinationPath $payloadZip -CompressionLevel Optimal
+            $archiveError = $null
+            break
+        }
+        catch {
+            $archiveError = $_
+            if ($archiveAttempt -lt 4) { Start-Sleep -Seconds (2 * $archiveAttempt) }
+        }
+    }
+    if ($archiveError) { throw $archiveError }
     Copy-Item -LiteralPath (Join-Path $root 'Install Portable.ps1') -Destination (Join-Path $stageRoot 'Install Portable.ps1')
     Copy-Item -LiteralPath (Join-Path $root 'Install Branded.cmd') -Destination (Join-Path $stageRoot 'Install Branded.cmd')
     $portableInstaller = Join-Path $stageRoot 'Install Portable.ps1'
