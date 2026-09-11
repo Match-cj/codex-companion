@@ -36,12 +36,12 @@
     <div class="row"><button class="small" onclick="bindLatestThread(this)">一键绑定最近任务</button><span id="feishuAppState" class="muted">尚未配置</span></div>
     <p class="muted">连接后，在机器人所在群里 @机器人发送“绑定”。以后回复机器人通知并 @机器人，内容会追加到绑定的原 Codex 对话，不会新建对话；私聊机器人时可直接回复。</p>
   </section>
-  <section>
-    <h2>通知管理</h2>
+  <section><details>
+    <summary><b style="font-size:17px;color:var(--text)">通知管理</b> <span class="muted">（点击展开）</span></summary>
     <p class="muted">这里只列出曾经通知过的应用。取消勾选后，对应类型的消息会继续写进下方历史，但不会发到飞书（不会再刷屏）。同一类额度耗尽通知每次额度真的回到 0% 才会重发。</p>
     <div id="notifications"><div class="empty">正在读取通知历史……</div></div>
     <details><summary>最近通知历史（最多 50 条）</summary><div id="notificationHistory"><div class="empty">还没有记录。</div></div></details>
-  </section>
+  </details></section>
   <section><details><summary>高级设置</summary><p class="muted">手机远程控制配置好 Tailscale 后，再填写下面的地址；现在可以留空。</p><input id="publicUrl" class="wide" placeholder="手机可访问的控制台地址（可留空）"><button onclick="saveAdvanced()">保存高级设置</button><hr><p><b>Companion 原生账号库</b></p><p id="vaultState" class="muted">正在检查……</p><div class="row"><button class="small" onclick="migrateNative(this)">从旧软件迁移</button><button class="small good" onclick="backupVault(this)">立即备份</button><button class="small danger" onclick="restoreVault(this)">从备份恢复</button></div><p class="muted">上面是绑定当前 Windows 用户的本机恢复副本。</p><div class="row"><button class="small good" onclick="exportPortableBackup(this)">导出跨电脑备份</button><button class="small" onclick="$('portableBackupFile').click()">导入跨电脑备份</button><input id="portableBackupFile" type="file" accept=".ccbackup,application/json" hidden onchange="importPortableBackup(this)"></div><p class="muted">跨电脑备份使用你设置的密码加密，可在另一台电脑导入；导入只合并或更新账号，不会删除已有账号。请妥善保存密码，忘记后无法恢复。</p></details></section>
 </main><div id="toast" class="toast"></div>
 <script>

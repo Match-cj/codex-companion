@@ -13,7 +13,7 @@ import * as Lark from '@larksuiteoapi/node-sdk';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.12';
+const APP_VERSION = '0.7.13';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -526,7 +526,7 @@ async function importPortableAccountBackup(envelope, password) {
   const imported = [];
   for (const item of payload.accounts) {
     const metadata = item.metadata || {};
-    const account = await upsertNativeAccount(item.auth, { ...metadata, id: undefined, is_active: false });
+    const account = await upsertNativeAccount(item.auth, { ...metadata, id: undefined, is_active: false, restoreDeleted: true });
     imported.push(account);
     const alias = String(item.alias || '').trim();
     if (alias) {
@@ -577,7 +577,7 @@ function publicFeishuState() {
 
 async function sendFeishuAppText(text, { replyTo = '', taskId = '' } = {}) {
   if (!feishuClient || !config.feishuBoundChatId) return { ok: false, reason: 'app-bot-not-ready' };
-  const data = { content: JSON.stringify({ text: trim(text, 3800) }), msg_type: 'text' };
+  const data = { content: JSON.stringify(buildFeishuPost(text)), msg_type: 'post' };
   const response = replyTo
     ? await feishuClient.im.v1.message.reply({ path: { message_id: replyTo }, data })
     : await feishuClient.im.v1.message.create({ params: { receive_id_type: 'chat_id' }, data: { ...data, receive_id: config.feishuBoundChatId } });
@@ -590,6 +590,54 @@ async function sendFeishuAppText(text, { replyTo = '', taskId = '' } = {}) {
     saveConfig().catch(() => {});
   }
   return { ok: true, messageId };
+}
+
+function wrapFeishuText(value, maxLength = 110) {
+  const source = String(value || '').trim();
+  if (!source) return [];
+  const sentences = source.split(/(?<=[。！？；])/u);
+  const lines = [];
+  for (const sentence of sentences) {
+    let rest = sentence.trim();
+    while (rest.length > maxLength) { lines.push(rest.slice(0, maxLength)); rest = rest.slice(maxLength); }
+    if (rest) lines.push(rest);
+  }
+  return lines;
+}
+
+function buildFeishuPost(text) {
+  const rawLines = trim(text, 3800).split(/\r?\n/);
+  const title = String(rawLines.shift() || 'Codex Companion').trim().slice(0, 80) || 'Codex Companion';
+  const content = [];
+  for (const raw of rawLines) {
+    if (!raw.trim()) { content.push([{ tag: 'text', text: ' ' }]); continue; }
+    for (const line of wrapFeishuText(raw)) content.push([{ tag: 'text', text: line }]);
+  }
+  if (!content.length) content.push([{ tag: 'text', text: title }]);
+  return { zh_cn: { title, content } };
+}
+
+async function inferNotificationTaskId(text, preferred = '') {
+  if (preferred) return String(preferred);
+  const body = String(text || '');
+  const embedded = body.match(/任务：([0-9a-f-]{20,})/i)?.[1];
+  if (embedded) return embedded;
+  for (const task of tasks.values()) {
+    const title = String(task.prompt || '').trim();
+    if (title && body.includes(title)) return task.id;
+  }
+  if (codex?.proc) {
+    try {
+      const threads = await codex.listThreads(20, '');
+      const match = threads.find(thread => {
+        const title = String(thread.name || thread.preview || '').trim();
+        return title.length >= 3 && body.includes(title);
+      });
+      if (match) return String(match.id);
+    } catch {}
+  }
+  if (config.feishuBoundThreadName && body.includes(config.feishuBoundThreadName)) return String(config.feishuBoundThreadId || '');
+  return String(config.feishuBoundThreadId || '');
 }
 
 async function chooseLatestThread() {
@@ -610,6 +658,14 @@ async function bindLatestFeishuThread() {
 async function handleFeishuMessage(data) {
   try {
     const message = data?.message || {};
+    if (data?.sender?.sender_type === 'app') return;
+    const messageId = String(message.message_id || '');
+    const received = Array.isArray(config.feishuReceivedMessageIds) ? config.feishuReceivedMessageIds.map(String) : [];
+    if (messageId && received.includes(messageId)) return;
+    if (messageId) {
+      config.feishuReceivedMessageIds = [...received, messageId].slice(-200);
+      await saveConfig();
+    }
     if (message.message_type !== 'text') return;
     let text = '';
     try { text = String(JSON.parse(message.content || '{}').text || '').trim(); } catch { return; }
@@ -619,7 +675,7 @@ async function handleFeishuMessage(data) {
     if (!config.feishuBoundChatId || /^(绑定|bind)$/i.test(text)) {
       config.feishuBoundChatId = chatId;
       const thread = await bindLatestFeishuThread();
-      await sendFeishuAppText(`已绑定本群。\n当前 Codex 对话：${thread.name}\n以后回复机器人通知，会继续这条对话。`, { replyTo: message.message_id, taskId: thread.id });
+      await sendFeishuAppText(`已绑定本群\n\n当前 Codex 对话：${thread.name}\n\n以后回复机器人通知，会继续这条对话。`, { replyTo: message.message_id, taskId: thread.id });
       return;
     }
     if (chatId !== config.feishuBoundChatId) return;
@@ -714,6 +770,13 @@ async function upsertNativeAccount(authContents, metadata = {}) {
   const accountId = tokens.account_id || authClaims.chatgpt_account_id || metadata.account_id || null;
   const email = claims.email || metadata.email || null;
   const stableKey = String(metadata.id || accountId || email || randomUUID());
+  const identityKeys = [stableKey, accountId, email && String(email).toLowerCase()].filter(Boolean).map(String);
+  const deletedKeys = Array.isArray(config.deletedAccountKeys) ? config.deletedAccountKeys.map(String) : [];
+  if (metadata.restoreDeleted) {
+    config.deletedAccountKeys = deletedKeys.filter(key => !identityKeys.includes(key));
+  } else if (identityKeys.some(key => deletedKeys.includes(key))) {
+    return null;
+  }
   const vault = await readJson(nativeAccountsPath);
   if (!Array.isArray(vault.accounts)) vault.accounts = [];
   vault.version = 1;
@@ -758,7 +821,8 @@ async function loadNativeAccountsSnapshot() {
   const { vault } = await readEffectiveNativeVault();
   if (!Array.isArray(vault.accounts)) return [];
   const aliases = config.accountAliases && typeof config.accountAliases === 'object' && !Array.isArray(config.accountAliases) ? config.accountAliases : {};
-  return vault.accounts.map(entry => {
+  const deletedKeys = new Set(Array.isArray(config.deletedAccountKeys) ? config.deletedAccountKeys.map(String) : []);
+  return vault.accounts.filter(entry => ![entry.id, entry.account_id, entry.email && String(entry.email).toLowerCase()].filter(Boolean).some(key => deletedKeys.has(String(key)))).map(entry => {
     const alias = String(aliases[entry.id] || '').trim();
     return {
       id: entry.id,
@@ -814,6 +878,10 @@ async function deleteNativeAccount(id) {
     if (String(vault.active_account_id || '') === String(id)) throw Error('当前正在使用的账号不能删除，请先切换到其他账号。');
     const [removed] = vault.accounts.splice(index, 1);
     await writeNativeVault(vault);
+    const deletedKeys = new Set(Array.isArray(config.deletedAccountKeys) ? config.deletedAccountKeys.map(String) : []);
+    for (const key of [removed.id, removed.account_id, removed.email && String(removed.email).toLowerCase()].filter(Boolean)) deletedKeys.add(String(key));
+    config.deletedAccountKeys = [...deletedKeys].slice(-300);
+    await saveConfig();
     nativeUsageCache.delete(String(id));
     return { ok: true, id: String(id), name: removed.email || removed.name || '账号' };
   });
@@ -900,8 +968,8 @@ async function migrateSwitcherAccountsToNativeVault() {
   for (const account of source.accounts) {
     const auth = authFileFromSwitcherAccount(account);
     if (!auth) { skipped += 1; continue; }
-    await upsertNativeAccount(auth, { ...account, is_active: source.active_account_id === account.id });
-    imported += 1;
+    const result = await upsertNativeAccount(auth, { ...account, is_active: source.active_account_id === account.id });
+    if (result) imported += 1; else skipped += 1;
   }
   return { ok: true, imported, skipped, ...(await nativeVaultStatus()) };
 }
@@ -1076,6 +1144,7 @@ async function importOrUpdateAccount(contents, requestedName) {
   const existing = Array.isArray(vault.accounts) ? vault.accounts.find(item => (accountId && item.account_id === accountId) || (email && String(item.email || '').toLowerCase() === String(email).toLowerCase())) : null;
   const imported = await upsertNativeAccount(auth, {
     id: existing?.id,
+    restoreDeleted: true,
     name: String(requestedName || '').trim() || existing?.name || email || 'ChatGPT 账号',
     email,
     plan_type: authClaims.chatgpt_plan_type || existing?.plan_type || null,
@@ -1223,11 +1292,11 @@ async function notify(text, opts = {}) {
     return { ok: false, reason: 'muted' };
   }
   try {
-    const embeddedTaskId = String(text).match(/任务：([0-9a-f-]{20,})/i)?.[1] || config.feishuBoundThreadId || '';
+    const embeddedTaskId = await inferNotificationTaskId(text, opts.taskId);
     if (feishuClient && config.feishuBoundChatId) {
       await sendFeishuAppText(text, { taskId: embeddedTaskId });
     } else {
-      const response = await fetch(config.feishuWebhookUrl, { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ msg_type: 'text', content: { text: trim(text, 3800) } }) });
+      const response = await fetch(config.feishuWebhookUrl, { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ msg_type: 'post', content: { post: buildFeishuPost(text) } }) });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const result = await response.json().catch(() => ({}));
       if (result.code && result.code !== 0) throw new Error(result.msg || `飞书错误 ${result.code}`);
@@ -1493,8 +1562,8 @@ class CodexServer {
     if (!line.trim()) return; let msg; try { msg = JSON.parse(line); } catch { return; }
     if (msg.id !== undefined && this.pending.has(msg.id)) { const p = this.pending.get(msg.id); clearTimeout(p.timer); this.pending.delete(msg.id); if (msg.error) p.reject(new Error(msg.error.message || JSON.stringify(msg.error))); else p.resolve(msg.result); return; }
     const p = msg.params || {}; const id = p.threadId;
-    if (id && tasks.has(id)) { const task = tasks.get(id); task.lastEventAt = Date.now(); if (msg.method?.includes('agentMessage/delta')) task.output += p.delta || ''; if (msg.method === 'turn/started' && p.turn?.id) this.turns.set(id, p.turn.id); if (msg.method === 'turn/completed') { this.turns.delete(id); task.status = p.turn?.status === 'completed' ? 'completed' : p.turn?.status === 'interrupted' ? 'interrupted' : 'failed'; notify(`Codex 任务${task.status === 'completed' ? '完成' : '结束'}\n任务：${id}\n状态：${task.status}\n\n${trim(task.output, 3000)}\n\n${dashboardLink(`#task=${encodeURIComponent(id)}`)}`, { appName: 'Codex 任务' }); refreshQuotaAfterTask(task).catch(error => console.error('[task quota]', error.message)); } }
-    if (msg.id !== undefined && (msg.method?.includes('requestApproval') || msg.method?.includes('requestUserInput'))) { const task = id ? tasks.get(id) : null; if (task) { task.status = 'waiting_confirmation'; task.lastEventAt = Date.now(); } pendingApprovals.set(String(msg.id), { id: String(msg.id), method: msg.method, params: p, taskId: id }); notify(`Codex 等待确认\n任务：${id || '-'}\n类型：${msg.method}\n${confirmationDetails(msg.method, p)}\n\n${trim(task?.output, 1800)}\n\n请打开控制台：${dashboardLink(`#approval=${msg.id}`)}`, { appName: 'Codex 任务' }); }
+    if (id && tasks.has(id)) { const task = tasks.get(id); task.lastEventAt = Date.now(); if (msg.method?.includes('agentMessage/delta')) task.output += p.delta || ''; if (msg.method === 'turn/started' && p.turn?.id) this.turns.set(id, p.turn.id); if (msg.method === 'turn/completed') { this.turns.delete(id); task.status = p.turn?.status === 'completed' ? 'completed' : p.turn?.status === 'interrupted' ? 'interrupted' : 'failed'; notify(`Codex 任务${task.status === 'completed' ? '完成' : '结束'}\n任务：${id}\n状态：${task.status}\n\n${trim(task.output, 3000)}\n\n${dashboardLink(`#task=${encodeURIComponent(id)}`)}`, { appName: 'Codex 任务', taskId: id }); refreshQuotaAfterTask(task).catch(error => console.error('[task quota]', error.message)); } }
+    if (msg.id !== undefined && (msg.method?.includes('requestApproval') || msg.method?.includes('requestUserInput'))) { const task = id ? tasks.get(id) : null; if (task) { task.status = 'waiting_confirmation'; task.lastEventAt = Date.now(); } pendingApprovals.set(String(msg.id), { id: String(msg.id), method: msg.method, params: p, taskId: id }); notify(`Codex 等待确认\n任务：${id || '-'}\n类型：${msg.method}\n${confirmationDetails(msg.method, p)}\n\n${trim(task?.output, 1800)}\n\n请打开控制台：${dashboardLink(`#approval=${msg.id}`)}`, { appName: 'Codex 任务', taskId: id }); }
   }
   respondApproval(requestId, decision, answers = {}) { const request = pendingApprovals.get(String(requestId)); if (!request) throw new Error('确认请求已经失效'); const result = request.method.includes('requestUserInput') ? { answers } : { decision }; this.send({ id: Number(requestId), result }); pendingApprovals.delete(String(requestId)); const task = request.taskId ? tasks.get(request.taskId) : null; if (task) task.status = 'running'; }
   close() { this.intentionalClose = true; try { this.proc?.kill(); } catch {} }
@@ -1523,7 +1592,7 @@ async function handle(req, res) {
         taskEngineReady:!!codex?.proc,
         taskEngineError,
         lastQuotaDelta,
-        config:{...config,accounts:undefined,feishuAppSecretProtected:undefined,feishuMessageThreads:undefined},
+        config:{...config,accounts:undefined,deletedAccountKeys:undefined,feishuAppSecretProtected:undefined,feishuBoundChatId:undefined,feishuMessageThreads:undefined,feishuReceivedMessageIds:undefined},
         feishu:publicFeishuState(),
         accounts,
         tasks:Object.fromEntries(tasks),
@@ -1534,7 +1603,7 @@ async function handle(req, res) {
         network:{addresses:addrs, tailscaleIp:tailscale, port}
       });
     }
-    if (req.method==='POST'&&u.pathname==='/api/task'){if(!codex?.proc)throw Error('任务引擎正在重连，请稍等十几秒再试；账号、额度和切换功能不受影响。');const prompt=String(data.prompt||'').trim();if(!prompt)throw Error('请填写任务内容');const cwd=String(data.cwd||'').trim()||process.cwd();try{await refreshAccounts()}catch{}const baseline=activeQuotaSnapshot();const t=await codex.startTask(prompt,cwd);t.quotaBaseline=baseline;await notify(`Codex 任务已启动\n任务：${t.id}\n目录：${t.cwd}`, { appName: 'Codex 任务' });return send(res,200,{ok:true,id:t.id});}
+    if (req.method==='POST'&&u.pathname==='/api/task'){if(!codex?.proc)throw Error('任务引擎正在重连，请稍等十几秒再试；账号、额度和切换功能不受影响。');const prompt=String(data.prompt||'').trim();if(!prompt)throw Error('请填写任务内容');const cwd=String(data.cwd||'').trim()||process.cwd();try{await refreshAccounts()}catch{}const baseline=activeQuotaSnapshot();const t=await codex.startTask(prompt,cwd);t.quotaBaseline=baseline;await notify(`Codex 任务已启动\n任务：${t.id}\n目录：${t.cwd}`, { appName: 'Codex 任务', taskId: t.id });return send(res,200,{ok:true,id:t.id});}
     if (req.method==='GET'&&u.pathname==='/api/threads'){
       if(!codex?.proc)throw Error('任务引擎正在重连，请稍后刷新。');
       const threads=await codex.listThreads(u.searchParams.get('limit'),u.searchParams.get('q'));
@@ -1713,7 +1782,7 @@ async function main() {
       if (t.status !== 'running' || t.stallNotified) continue;
       if (Date.now() - t.lastEventAt <= config.stallMinutes * 60000) continue;
       t.stallNotified = true;
-      await notify(`Codex 任务长时间没有进展\n任务：${t.id}\n已无事件：${config.stallMinutes} 分钟\n\n${trim(t.output, 1800)}\n${dashboardLink(`#task=${t.id}`)}`, { appName: 'Codex 任务' });
+      await notify(`Codex 任务长时间没有进展\n任务：${t.id}\n已无事件：${config.stallMinutes} 分钟\n\n${trim(t.output, 1800)}\n${dashboardLink(`#task=${t.id}`)}`, { appName: 'Codex 任务', taskId: t.id });
     }
     if (Date.now() - lastAccountRefreshAt > config.quotaRefreshMinutes * 60000) {
       try { await refreshAccounts(); } catch (e) { console.error('[accounts]', e.message); }
