@@ -1,6 +1,6 @@
 # Codex Companion 交接文档
 
-当前稳定版本：**v0.7.15**（2026-09-11）
+当前稳定版本：**v0.7.16**（2026-09-11）
 
 ## 当前功能
 
@@ -13,8 +13,10 @@
 - 读取重置次数及最近到期时间；新版 app-server 直接读取明细，旧版通过官方只读明细接口兼容；7 天内每天提醒一次。
 - 同一账号、同一种额度的“额度已用尽”每天最多发送一次，跨 Companion 重启仍去重。
 - 任务完成后刷新额度；多个账号额度恢复可合并通知。
-- 直接监听 `~/.codex/sessions` 中新增的 `task_complete` 记录；启动时从文件末尾开始，不重发历史完成消息，以 turn ID 跨来源去重，并根据 `session_meta.thread_source` 排除 subagent 中间完成。
-- 飞书回复命中桌面端 active-writer 冲突时，自动关闭 Codex 桌面端、重试接管原 thread，并在该 turn 完成后重新打开桌面端。
+- 直接监听 `~/.codex/sessions` 中新增的 `task_complete` 记录；启动时从文件末尾开始，不重发历史完成消息，以 turn ID 跨来源去重；仅接受明确的 `session_meta.thread_source=user`，subagent 和 unknown 均过滤。
+- 飞书回复命中桌面端 active-writer 冲突时，自动关闭 Codex 桌面端、重试接管原 thread；接管 thread ID 持久化，全部远程 turn 完成后再重新打开桌面端，Companion 重启时会释放中断的接管状态。
+- 飞书单行回执正文不再重复标题；确认文字使用实际恢复出的 thread 名称，而不是旧的全局绑定名称。
+- 飞书 `image` 消息通过 `im.v1.messageResource.get` 下载至 `%APPDATA%\CodexCompanion\feishu-images`，作为 app-server `localImage` 输入继续原 thread，一小时后删除临时文件。
 - 原生账号库使用 Windows DPAPI CurrentUser 加密；高级设置可无损迁移 Switcher 账号副本，新登录账号直接写入原生库。
 - 全部账号额度由独立 `CODEX_HOME` 中的官方 Codex app-server 读取，互不覆盖当前登录；成功结果写入原生库作为启动快照。
 - 原生切换会保存离开账号、原子替换并校验 `~/.codex/auth.json`，失败时从 `auth.json.companion.bak` 回滚，然后重启任务引擎和 Codex 桌面端。
@@ -34,7 +36,7 @@ Codex Switcher 不再是运行依赖。若机器上已有 Switcher，Companion �
 
 ## 对外分发
 
-推荐把单个 `CodexCompanion-Setup-v0.7.15.exe` 交给用户。用户只需双击一次，安装器会：
+推荐把单个 `CodexCompanion-Setup-v0.7.16.exe` 交给用户。用户只需双击一次，安装器会：
 
 1. 解压到 `%LOCALAPPDATA%\Programs\CodexCompanion`；
 2. 安装内置 Node.js 与官方 Codex CLI 运行时；
@@ -82,7 +84,7 @@ Codex Switcher 不再是运行依赖。若机器上已有 Switcher，Companion �
 
 ## 已验证基线
 
-- `/api/status`：v0.7.15，返回全部账号、`alias` / `display_name`、重置数量/最近到期时间、Codex 会话监听、飞书长连接状态及 `nativeVault` 备份状态；
+- `/api/status`：v0.7.16，返回全部账号、`alias` / `display_name`、重置数量/最近到期时间、Codex 会话监听、飞书长连接状态及 `nativeVault` 备份状态；
 - 安装版数据目录固定测试：启动器显式设置 `%APPDATA%\CodexCompanion`；主账号库读取成功时 `source=primary`，主库临时失败时可回退显示有效备份。
 - 账号库回退实测：在隔离目录故意写入损坏主库并放入 4 账号有效备份，安装版后台返回 4 个账号、`source=backup`、`usingBackup=true`，测试目录已清理。
 - `/api/accounts/migrate-native`：先执行 DPAPI 往返自检，再把现有 Switcher 凭据加密复制到 `%APPDATA%\CodexCompanion\accounts.vault.json`；

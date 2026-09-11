@@ -13,7 +13,7 @@ import * as Lark from '@larksuiteoapi/node-sdk';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.15';
+const APP_VERSION = '0.7.16';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -41,6 +41,7 @@ const defaultConfig = {
   publicDashboardUrl: '',
   accountAliases: {},
   accountBackend: 'native',
+  codexDesktopTakeoverThreadIds: [],
 };
 let config = { ...defaultConfig };
 let accounts = [];
@@ -69,7 +70,6 @@ const codexSessionOffsets = new Map();
 const codexSessionPartials = new Map();
 const codexSessionDebounces = new Map();
 const codexSessionKinds = new Map();
-const relaunchCodexAfterTask = new Set();
 
 const jsonHeaders = { 'content-type': 'application/json; charset=utf-8' };
 const trim = (s, n) => String(s || '').length <= n ? String(s || '') : String(s || '').slice(-n);
@@ -599,6 +599,24 @@ async function sendFeishuAppText(text, { replyTo = '', taskId = '' } = {}) {
   return { ok: true, messageId };
 }
 
+async function downloadFeishuImage(messageId, imageKey) {
+  if (!feishuClient || !messageId || !imageKey) throw Error('图片消息缺少可下载的资源标识。');
+  const resource = await feishuClient.im.v1.messageResource.get({
+    params: { type: 'image' },
+    path: { message_id: messageId, file_key: imageKey },
+  });
+  const rawType = resource?.headers?.get?.('content-type') || resource?.headers?.['content-type'] || '';
+  const extension = /png/i.test(rawType) ? '.png' : /webp/i.test(rawType) ? '.webp' : /gif/i.test(rawType) ? '.gif' : '.jpg';
+  const imageDir = path.join(appDir, 'feishu-images');
+  await fs.mkdir(imageDir, { recursive: true });
+  const safeId = String(messageId).replace(/[^a-z0-9_-]/gi, '_');
+  const imagePath = path.join(imageDir, `${safeId}${extension}`);
+  await resource.writeFile(imagePath);
+  const cleanup = setTimeout(() => fs.unlink(imagePath).catch(() => {}), 60 * 60 * 1000);
+  cleanup.unref?.();
+  return imagePath;
+}
+
 function wrapFeishuText(value, maxLength = 110) {
   const source = String(value || '').trim();
   if (!source) return [];
@@ -620,7 +638,7 @@ function buildFeishuPost(text) {
     if (!raw.trim()) { content.push([{ tag: 'text', text: ' ' }]); continue; }
     for (const line of wrapFeishuText(raw)) content.push([{ tag: 'text', text: line }]);
   }
-  if (!content.length) content.push([{ tag: 'text', text: title }]);
+  if (!content.length) content.push([{ tag: 'text', text: ' ' }]);
   return { zh_cn: { title, content } };
 }
 
@@ -673,12 +691,24 @@ async function handleFeishuMessage(data) {
       config.feishuReceivedMessageIds = [...received, messageId].slice(-200);
       await saveConfig();
     }
-    if (message.message_type !== 'text') return;
     let text = '';
-    try { text = String(JSON.parse(message.content || '{}').text || '').trim(); } catch { return; }
-    text = text.replace(/@_user_\d+/g, '').trim();
-    if (!text) return;
+    let input = [];
+    if (message.message_type === 'text') {
+      try { text = String(JSON.parse(message.content || '{}').text || '').trim(); } catch { return; }
+      text = text.replace(/@_user_\d+/g, '').trim();
+      if (!text) return;
+      input = [{ type: 'text', text }];
+    } else if (message.message_type === 'image') {
+      let imageKey = '';
+      try { imageKey = String(JSON.parse(message.content || '{}').image_key || '').trim(); } catch { return; }
+      const imagePath = await downloadFeishuImage(messageId, imageKey);
+      input = [{ type: 'text', text: '请查看并处理我从飞书回复的这张图片。' }, { type: 'localImage', path: imagePath }];
+    } else return;
     const chatId = String(message.chat_id || '');
+    if (!config.feishuBoundChatId && message.message_type !== 'text') {
+      await sendFeishuAppText('请先发送“绑定”，再在 Codex 通知下回复图片。', { replyTo: message.message_id });
+      return;
+    }
     if (!config.feishuBoundChatId || /^(绑定|bind)$/i.test(text)) {
       config.feishuBoundChatId = chatId;
       const thread = await bindLatestFeishuThread();
@@ -692,10 +722,12 @@ async function handleFeishuMessage(data) {
       await sendFeishuAppText('还没有绑定 Codex 对话，请先发送“绑定”。', { replyTo: message.message_id });
       return;
     }
-    const task = await continueThreadFromFeishu(String(threadId), text);
+    const task = await continueThreadFromFeishu(String(threadId), input);
     config.feishuBoundThreadId = task.id;
+    config.feishuBoundThreadName = String(task.prompt || task.id);
     await saveConfig();
-    await sendFeishuAppText(`已发送到原 Codex 对话：${config.feishuBoundThreadName || task.prompt || task.id}`, { replyTo: message.message_id, taskId: task.id });
+    const backgroundNote = task.remoteDesktopTakeover ? '\n\nCodex 正在后台处理；本轮结束后会自动重新打开桌面端。' : '';
+    await sendFeishuAppText(`${message.message_type === 'image' ? '图片已发送' : '已发送'}到原 Codex 对话：${task.prompt || task.id}${backgroundNote}`, { replyTo: message.message_id, taskId: task.id });
   } catch (error) {
     console.error('[feishu reply]', error.message);
     try { await sendFeishuAppText(`没有成功继续 Codex 对话：${humanError(error)}`, { replyTo: data?.message?.message_id || '' }); } catch {}
@@ -706,10 +738,10 @@ function isActiveWriterError(error) {
   return /already has an active writer|thread-store conflict/i.test(String(error?.message || error || ''));
 }
 
-async function continueThreadFromFeishu(threadId, text) {
+async function continueThreadFromFeishu(threadId, input) {
   try {
     const task = await codex.resumeTask(threadId);
-    await codex.continueTask(task, text);
+    await codex.continueTask(task, input);
     return task;
   } catch (error) {
     if (!isActiveWriterError(error) || !await isCodexDesktopRunning()) throw error;
@@ -730,13 +762,41 @@ async function continueThreadFromFeishu(threadId, text) {
       }
     }
     if (!task) throw lastError || Error('Codex 桌面端仍在占用这个对话。');
-    await codex.continueTask(task, text);
-    relaunchCodexAfterTask.add(threadId);
+    await codex.continueTask(task, input);
+    task.remoteDesktopTakeover = true;
+    await rememberDesktopTakeover(threadId);
     return task;
   } catch (error) {
     launchCodexDesktop();
     throw error;
   }
+}
+
+function desktopTakeoverIds() {
+  return Array.isArray(config.codexDesktopTakeoverThreadIds) ? config.codexDesktopTakeoverThreadIds.map(String) : [];
+}
+
+async function rememberDesktopTakeover(threadId) {
+  const ids = desktopTakeoverIds();
+  if (!ids.includes(String(threadId))) config.codexDesktopTakeoverThreadIds = [...ids, String(threadId)].slice(-20);
+  await saveConfig();
+}
+
+async function finishDesktopTakeover(threadId) {
+  const ids = desktopTakeoverIds();
+  if (!ids.includes(String(threadId))) return;
+  config.codexDesktopTakeoverThreadIds = ids.filter(id => id !== String(threadId));
+  await saveConfig();
+  if (!config.codexDesktopTakeoverThreadIds.length) {
+    setTimeout(async () => { if (!await isCodexDesktopRunning()) launchCodexDesktop(); }, 800);
+  }
+}
+
+async function recoverInterruptedDesktopTakeovers() {
+  if (!desktopTakeoverIds().length) return;
+  config.codexDesktopTakeoverThreadIds = [];
+  await saveConfig();
+  if (!await isCodexDesktopRunning()) setTimeout(launchCodexDesktop, 800);
 }
 
 async function startFeishuLongConnection() {
@@ -1510,7 +1570,7 @@ function sessionThreadId(file) {
 
 function sessionKindFromMeta(payload) {
   if (payload?.thread_source === 'subagent' || payload?.source?.subagent) return 'subagent';
-  return String(payload?.thread_source || 'user');
+  return String(payload?.thread_source || 'unknown');
 }
 
 async function readCodexSessionKind(file) {
@@ -1522,8 +1582,8 @@ async function readCodexSessionKind(file) {
     const prefix = buffer.subarray(0, bytesRead).toString('utf8');
     if (/"thread_source"\s*:\s*"subagent"|"source"\s*:\s*\{\s*"subagent"/i.test(prefix)) return 'subagent';
     const match = prefix.match(/"thread_source"\s*:\s*"([^"]+)"/i);
-    return match?.[1] || 'user';
-  } catch { return 'user'; }
+    return match?.[1] || 'unknown';
+  } catch { return 'unknown'; }
 }
 
 async function markCodexTurnComplete(turnId) {
@@ -1559,15 +1619,21 @@ async function processCodexSessionAppend(file) {
         continue;
       }
       if (event?.type !== 'event_msg' || event?.payload?.type !== 'task_complete') continue;
-      const sessionKind = codexSessionKinds.get(file) || await readCodexSessionKind(file);
+      const cachedKind = codexSessionKinds.get(file) || 'unknown';
+      const freshKind = await readCodexSessionKind(file);
+      const sessionKind = freshKind !== 'unknown' ? freshKind : cachedKind;
       codexSessionKinds.set(file, sessionKind);
-      if (sessionKind === 'subagent') continue;
+      if (sessionKind !== 'user') {
+        console.log(`[codex session monitor] ignored ${sessionKind} completion: ${sessionThreadId(file) || path.basename(file)}`);
+        continue;
+      }
       const turnId = String(event.payload.turn_id || '');
       const threadId = sessionThreadId(file);
       const message = String(event.payload.last_agent_message || '').trim();
       if (!message) continue;
       if (!await markCodexTurnComplete(turnId)) continue;
-      await notify(`Codex 任务完成\n任务：${threadId || '-'}\n\n${message}`, { appName: 'Codex 任务', taskId: threadId });
+      await finishDesktopTakeover(threadId);
+      await notify(`Codex 本轮回复完成\n对话：${threadId || '-'}\n\n${message}`, { appName: 'Codex 任务', taskId: threadId });
     }
   } catch (error) { console.error('[codex session monitor]', error.message); }
 }
@@ -1696,10 +1762,11 @@ class CodexServer {
     if (activeTurn) this.turns.set(threadId, activeTurn.id);
     return task;
   }
-  async continueTask(task, text) {
+  async continueTask(task, input) {
+    const items = Array.isArray(input) ? input : [{ type: 'text', text: String(input || '') }];
     const active = this.turns.get(task.id);
-    if (active) await this.request('turn/steer', { threadId: task.id, input: [{ type: 'text', text }], expectedTurnId: active });
-    else await this.request('turn/start', { threadId: task.id, input: [{ type: 'text', text }], cwd: task.cwd });
+    if (active) await this.request('turn/steer', { threadId: task.id, input: items, expectedTurnId: active });
+    else await this.request('turn/start', { threadId: task.id, input: items, cwd: task.cwd });
     task.status = 'running'; task.lastEventAt = Date.now(); task.stallNotified = false;
   }
   async stopTask(task) { const turn = this.turns.get(task.id); if (turn) await this.request('turn/interrupt', { threadId: task.id, turnId: turn }); task.status = 'interrupted'; }
@@ -1707,7 +1774,7 @@ class CodexServer {
     if (!line.trim()) return; let msg; try { msg = JSON.parse(line); } catch { return; }
     if (msg.id !== undefined && this.pending.has(msg.id)) { const p = this.pending.get(msg.id); clearTimeout(p.timer); this.pending.delete(msg.id); if (msg.error) p.reject(new Error(msg.error.message || JSON.stringify(msg.error))); else p.resolve(msg.result); return; }
     const p = msg.params || {}; const id = p.threadId;
-    if (id && tasks.has(id)) { const task = tasks.get(id); task.lastEventAt = Date.now(); if (msg.method?.includes('agentMessage/delta')) task.output += p.delta || ''; if (msg.method === 'turn/started' && p.turn?.id) this.turns.set(id, p.turn.id); if (msg.method === 'turn/completed') { this.turns.delete(id); task.status = p.turn?.status === 'completed' ? 'completed' : p.turn?.status === 'interrupted' ? 'interrupted' : 'failed'; markCodexTurnComplete(p.turn?.id).then(fresh => { if (fresh) return notify(`Codex 任务${task.status === 'completed' ? '完成' : '结束'}\n任务：${id}\n状态：${task.status}\n\n${trim(task.output, 3000)}\n\n${dashboardLink(`#task=${encodeURIComponent(id)}`)}`, { appName: 'Codex 任务', taskId: id }); }).catch(error => console.error('[task notification]', error.message)); if (relaunchCodexAfterTask.delete(id)) setTimeout(launchCodexDesktop, 800); refreshQuotaAfterTask(task).catch(error => console.error('[task quota]', error.message)); } }
+    if (id && tasks.has(id)) { const task = tasks.get(id); task.lastEventAt = Date.now(); if (msg.method?.includes('agentMessage/delta')) task.output += p.delta || ''; if (msg.method === 'turn/started' && p.turn?.id) this.turns.set(id, p.turn.id); if (msg.method === 'turn/completed') { this.turns.delete(id); task.status = p.turn?.status === 'completed' ? 'completed' : p.turn?.status === 'interrupted' ? 'interrupted' : 'failed'; markCodexTurnComplete(p.turn?.id).then(fresh => { if (fresh) return notify(`Codex 本轮${task.status === 'completed' ? '回复完成' : '已结束'}\n对话：${id}\n状态：${task.status}\n\n${trim(task.output, 3000)}\n\n${dashboardLink(`#task=${encodeURIComponent(id)}`)}`, { appName: 'Codex 任务', taskId: id }); }).catch(error => console.error('[task notification]', error.message)); finishDesktopTakeover(id).catch(error => console.error('[desktop relaunch]', error.message)); refreshQuotaAfterTask(task).catch(error => console.error('[task quota]', error.message)); } }
     if (msg.id !== undefined && (msg.method?.includes('requestApproval') || msg.method?.includes('requestUserInput'))) { const task = id ? tasks.get(id) : null; if (task) { task.status = 'waiting_confirmation'; task.lastEventAt = Date.now(); } pendingApprovals.set(String(msg.id), { id: String(msg.id), method: msg.method, params: p, taskId: id }); notify(`Codex 等待确认\n任务：${id || '-'}\n类型：${msg.method}\n${confirmationDetails(msg.method, p)}\n\n${trim(task?.output, 1800)}\n\n请打开控制台：${dashboardLink(`#approval=${msg.id}`)}`, { appName: 'Codex 任务', taskId: id }); }
   }
   respondApproval(requestId, decision, answers = {}) { const request = pendingApprovals.get(String(requestId)); if (!request) throw new Error('确认请求已经失效'); const result = request.method.includes('requestUserInput') ? { answers } : { decision }; this.send({ id: Number(requestId), result }); pendingApprovals.delete(String(requestId)); const task = request.taskId ? tasks.get(request.taskId) : null; if (task) task.status = 'running'; }
@@ -1738,7 +1805,7 @@ async function handle(req, res) {
         codexSessionMonitorReady: codexSessionWatcherReady,
         taskEngineError,
         lastQuotaDelta,
-        config:{...config,accounts:undefined,deletedAccountKeys:undefined,feishuAppSecretProtected:undefined,feishuBoundChatId:undefined,feishuMessageThreads:undefined,feishuReceivedMessageIds:undefined},
+        config:{...config,accounts:undefined,deletedAccountKeys:undefined,feishuAppSecretProtected:undefined,feishuBoundChatId:undefined,feishuMessageThreads:undefined,feishuReceivedMessageIds:undefined,codexDesktopTakeoverThreadIds:undefined},
         feishu:publicFeishuState(),
         accounts,
         tasks:Object.fromEntries(tasks),
@@ -1894,6 +1961,7 @@ async function startTaskEngine(){if(codex?.proc)return;codex=new CodexServer();t
 async function main() {
   config = { ...defaultConfig, ...await readJson(configPath) };
   config.accountBackend = 'native';
+  await recoverInterruptedDesktopTakeovers();
   accounts = await loadNativeAccountsSnapshot();
   const server = http.createServer(handle);
   server.on('error', error => {
