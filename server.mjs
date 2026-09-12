@@ -13,7 +13,7 @@ import * as Lark from '@larksuiteoapi/node-sdk';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.16';
+const APP_VERSION = '0.7.17';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -50,6 +50,7 @@ let officialRateLimits = null;
 let deviceLogin = null;
 let browserLogin = null;
 let nativeSwitchInProgress = false;
+const nativeWarmupsInProgress = new Set();
 let taskEngineError = '';
 let lastQuotaDelta = null;
 let notificationDb = null;
@@ -162,30 +163,35 @@ $switcherPorts = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyConti
   return result;
 }
 async function closeCodexDesktop() {
-  if (process.platform !== 'win32') return;
-  const script = `
-$targets = @(Get-CimInstance Win32_Process | Where-Object {
-  $_.Name -eq 'ChatGPT.exe' -or ($_.Name -eq 'codex.exe' -and $_.CommandLine -match 'OpenAI\\\\Codex')
-})
-$targets | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-foreach ($target in $targets) { Wait-Process -Id $target.ProcessId -Timeout 8 -ErrorAction SilentlyContinue }
-[pscustomobject]@{ stopped = @($targets).Count } | ConvertTo-Json -Compress
-`;
-  await execFileAsync('powershell.exe', ['-NoProfile', '-Command', script], { windowsHide: true, encoding: 'utf8' });
-  await new Promise(resolve => setTimeout(resolve, 900));
+  if (process.platform !== 'win32') return { stopped: 0 };
+  const before = await codexDesktopPids();
+  if (!before.length) return { stopped: 0 };
+  try {
+    await execFileAsync('taskkill.exe', ['/IM', 'ChatGPT.exe', '/T', '/F'], { windowsHide: true, encoding: 'utf8', timeout: 20000 });
+  } catch (error) {
+    // taskkill may return a non-zero code when one child exits while the process tree is being closed.
+    console.warn('[account switch] taskkill returned:', humanError(error));
+  }
+  const deadline = Date.now() + 15000;
+  let remaining = await codexDesktopPids();
+  while (remaining.length && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 300));
+    remaining = await codexDesktopPids();
+  }
+  if (remaining.length) throw Error(`ChatGPT/Codex 没有完全关闭（仍有 ${remaining.length} 个进程），账号尚未切换。请手动退出客户端后重试。`);
+  return { stopped: before.length };
 }
-async function isCodexDesktopRunning() {
-  if (process.platform !== 'win32') return false;
-  const script = `@(
-Get-CimInstance Win32_Process | Where-Object {
-  $_.Name -eq 'ChatGPT.exe' -or ($_.Name -eq 'codex.exe' -and $_.CommandLine -match 'OpenAI\\\\Codex')
-} | Select-Object -ExpandProperty ProcessId
-) | ConvertTo-Json -Compress`;
+async function codexDesktopPids() {
+  if (process.platform !== 'win32') return [];
+  const script = `@(Get-CimInstance Win32_Process -Filter "Name='ChatGPT.exe'" | Select-Object -ExpandProperty ProcessId) | ConvertTo-Json -Compress`;
   try {
     const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-Command', script], { windowsHide: true, encoding: 'utf8' });
     const value = JSON.parse(stdout.trim() || '[]');
-    return Array.isArray(value) ? value.length > 0 : Boolean(value);
-  } catch { return false; }
+    return (Array.isArray(value) ? value : value ? [value] : []).map(Number).filter(Number.isFinite);
+  } catch { return []; }
+}
+async function isCodexDesktopRunning() {
+  return (await codexDesktopPids()).length > 0;
 }
 function launchCodexDesktop() {
   if (process.platform !== 'win32') return;
@@ -1191,6 +1197,75 @@ async function readResetCreditDetails(auth) {
     credits,
   };
 }
+async function nativeAccountEntry(id) {
+  const vault = await readJson(nativeAccountsPath);
+  const entry = Array.isArray(vault.accounts) ? vault.accounts.find(item => String(item.id) === String(id)) : null;
+  if (!entry?.protected_auth) throw Error('原生账号库中没有这个账号的加密凭据。');
+  return entry;
+}
+async function sendNativeWarmupRequest(auth) {
+  const accessToken = auth?.tokens?.access_token;
+  const accountId = auth?.tokens?.account_id || decodeJwtPayload(auth?.tokens?.id_token)['https://api.openai.com/auth']?.chatgpt_account_id;
+  if (!accessToken || !accountId) throw Error('账号凭据不完整，无法预热。');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 90000);
+  try {
+    const response = await fetch('https://chatgpt.com/backend-api/codex/responses', {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'ChatGPT-Account-ID': accountId,
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream, application/json, text/plain, */*',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+        Origin: 'https://chatgpt.com',
+        Referer: 'https://chatgpt.com/',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136.0.0.0 Safari/537.36',
+      },
+      body: JSON.stringify({
+        model: 'gpt-5.6-luna',
+        instructions: 'Reply with exactly OK.',
+        input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'OK' }] }],
+        tools: [],
+        tool_choice: 'auto',
+        parallel_tool_calls: false,
+        reasoning: { effort: 'low' },
+        store: false,
+        stream: true,
+      }),
+    });
+    await response.text();
+    return { ok: response.ok, status: response.status };
+  } catch (error) {
+    if (error?.name === 'AbortError') throw Error('预热请求超时，请检查网络后重试。');
+    throw error;
+  } finally { clearTimeout(timer); }
+}
+async function warmupNativeAccount(id) {
+  const key = String(id);
+  if (nativeWarmupsInProgress.has(key)) throw Error('这个账号正在预热，请稍等。');
+  nativeWarmupsInProgress.add(key);
+  try {
+    let entry = await nativeAccountEntry(key);
+    const publicAccount = accounts.find(item => String(item.id) === key);
+    if (Number(publicAccount?.usage?.secondary_used_percent) >= 100) throw Error('这个账号的周额度已经耗尽，不能预热。');
+    let auth = JSON.parse(await unprotectCredential(entry.protected_auth));
+    let result = await sendNativeWarmupRequest(auth);
+    if (result.status === 401) {
+      await readNativeUsage(entry, true);
+      entry = await nativeAccountEntry(key);
+      auth = JSON.parse(await unprotectCredential(entry.protected_auth));
+      result = await sendNativeWarmupRequest(auth);
+    }
+    if (!result.ok) throw Error(`预热请求失败（HTTP ${result.status}），没有确认额度窗口已激活。`);
+    await updateNativeAccountMetadata(key, { last_warmup_at: new Date().toISOString() });
+    nativeUsageCache.delete(key);
+    await readNativeUsage(await nativeAccountEntry(key), true).catch(error => console.warn('[warmup refresh]', humanError(error)));
+    await refreshAccounts({ awaitNative: true }).catch(() => {});
+    return { id: key, name: entry.email || entry.name || key };
+  } finally { nativeWarmupsInProgress.delete(key); }
+}
 async function readNativeUsage(entry, force = false) {
   const cached = nativeUsageCache.get(String(entry.id));
   if (!force && cached && Date.now() - cached.at < 4 * 60 * 1000) return cached.usage;
@@ -1886,14 +1961,33 @@ async function handle(req, res) {
       if(data.validateOnly===true)return send(res,200,{...target,validated:true});
       if([...tasks.values()].some(t=>t.status==='running'||t.status==='waiting_confirmation'))throw Error('有任务正在运行或等待确认，请结束后再切换账号。');
       const closeCodex=data.closeCodex===true;
-      if(closeCodex)await closeCodexDesktop();
+      console.log(`[account switch] requested: ${target.name}; close desktop=${closeCodex}`);
+      const closed=closeCodex?await closeCodexDesktop():{stopped:0};
+      if(closeCodex)console.log(`[account switch] desktop closed: ${closed.stopped} process(es)`);
       if(!(await nativeVaultStatus()).ready)throw Error('还没有可切换的 Companion 原生账号。请先登录账号。');
       try{
         const result=await switchNativeAccount(String(data.id));
+        console.log(`[account switch] completed: ${target.name}; already active=${result.alreadyActive}`);
         return send(res,200,{ok:true,message:result.alreadyActive?'已经是当前账号，ChatGPT/Codex 正在打开。':'账号已由 Companion 安全切换，ChatGPT/Codex 正在重新打开。'});
       }finally{
         launchCodexDesktop();
       }
+    }
+    if (req.method==='POST'&&u.pathname==='/api/accounts/warmup'){
+      if(data.confirm!==true)throw Error('预热会发送一次最小请求并启动额度窗口，请先确认。');
+      const result=await warmupNativeAccount(String(data.id));
+      return send(res,200,{ok:true,...result,message:`${result.name} 已完成最小预热，5 小时窗口已开始计时。`});
+    }
+    if (req.method==='POST'&&u.pathname==='/api/accounts/warmup-all'){
+      if(data.confirm!==true)throw Error('批量预热会让全部可用账号发送一次最小请求，请先确认。');
+      const snapshot=[...accounts];
+      const results=[];
+      for(const account of snapshot){
+        try{results.push({ok:true,...await warmupNativeAccount(String(account.id))});}
+        catch(error){results.push({ok:false,id:String(account.id),name:account.display_name||account.name,error:humanError(error)});}
+      }
+      const succeeded=results.filter(item=>item.ok).length;
+      return send(res,200,{ok:succeeded>0,total:results.length,succeeded,failedCount:results.length-succeeded,results,message:`已预热 ${succeeded}/${results.length} 个账号。`});
     }
     if (req.method==='POST'&&u.pathname==='/api/config'){config.feishuWebhookUrl=String(data.feishuWebhookUrl||'');config.publicDashboardUrl=String(data.publicDashboardUrl||'');await saveConfig();return send(res,200,{ok:true});}
     if (req.method==='POST'&&u.pathname==='/api/feishu/setup'){const webhook=String(data.feishuWebhookUrl||'').trim();if(!validFeishuWebhook(webhook))throw Error('Webhook 地址格式不对。请复制飞书自定义机器人提供的完整 HTTPS 地址。');const previous=config.feishuWebhookUrl;config.feishuWebhookUrl=webhook;const result=await notify(`Codex Companion 通知测试成功\n\n以后任务完成、失败、等待确认、长时间无进展或额度不足时，我会通知到这个群。\n\n时间：${new Date().toLocaleString('zh-CN')}`, { appName: 'Codex Companion' });if(!result.ok){config.feishuWebhookUrl=previous;throw Error('飞书没有接收测试消息。请检查 Webhook 是否完整，以及机器人安全设置是否允许发送。')}await saveConfig();return send(res,200,{ok:true,message:'已经保存，测试消息也发送成功了。'});}

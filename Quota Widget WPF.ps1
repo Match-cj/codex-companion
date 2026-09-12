@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 Add-Type 'using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); }'
-$script:Port=$Port; $script:AppVersion='0.7.16'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchInProgress=$false
+$script:Port=$Port; $script:AppVersion='0.7.17'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
 $mutexName=if($SelfTest){'Global\CodexCompanionQuotaWidget_v5_selftest'}else{'Global\CodexCompanionQuotaWidget_v5'}
 $script:Mutex=New-Object System.Threading.Mutex($false,$mutexName); if(-not $script:Mutex.WaitOne(0,$false)){exit}
 $Transparent=[Windows.Media.Brushes]::Transparent
@@ -133,6 +133,21 @@ function Switch-WidgetAccount($accountId,$accountName){
   [Windows.MessageBox]::Show("账号切换失败：`n$($_.Exception.Message)",'Codex Companion','OK','Error')|Out-Null
  }finally{$script:SwitchInProgress=$false;[Windows.Input.Mouse]::OverrideCursor=$null}
 }
+function Warmup-WidgetAccount($accountId,$accountName){
+ if($script:WarmupInProgress){return}
+ $choice=[Windows.MessageBox]::Show("确定预热【${accountName}】吗？`n`n这会发送一次极小请求，让 5 小时额度窗口从现在开始计时，并消耗极少量额度。",'确认预热额度','YesNo','Information')
+ if($choice-ne[Windows.MessageBoxResult]::Yes){return}
+ try{
+  $script:WarmupInProgress=$true
+  [Windows.Input.Mouse]::OverrideCursor=[Windows.Input.Cursors]::Wait
+  $payload=@{id=$accountId;confirm=$true}|ConvertTo-Json -Compress
+  $result=Invoke-RestMethod "http://127.0.0.1:$script:Port/api/accounts/warmup" -Method Post -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($payload)) -TimeoutSec 120
+  Update-Widget
+  [Windows.MessageBox]::Show([string]$result.message,'Codex Companion','OK','Information')|Out-Null
+ }catch{
+  [Windows.MessageBox]::Show("额度预热失败：`n$($_.Exception.Message)",'Codex Companion','OK','Error')|Out-Null
+ }finally{$script:WarmupInProgress=$false;[Windows.Input.Mouse]::OverrideCursor=$null}
+}
 function Show-Detail{
  if($null-ne$script:Detail){Close-Detail;return};if(([DateTime]::UtcNow-$script:DetailClosedAt).TotalMilliseconds-lt 250){return};$script:Status=Get-Status;$accounts=@($script:Status.accounts|Sort-Object{Get-SortReset $_})
  $d=New-Object Windows.Window;$script:Detail=$d;$d.Width=430;$d.WindowStyle='None';$d.ResizeMode='NoResize';$d.AllowsTransparency=$true;$d.Background=$Transparent;$d.Topmost=$true;$d.ShowInTaskbar=$false;$d.ShowActivated=$true;$d.UseLayoutRounding=$true;$d.SnapsToDevicePixels=$true
@@ -167,6 +182,10 @@ function Show-Detail{
   $reset.Children.Add((New-QuotaIcon 'reset'))|Out-Null
   $reset.Children.Add((New-Text "$count  ·  到期 $(Get-Expiry $a)" 10 $Muted))|Out-Null
   $content.Children.Add($reset)|Out-Null
+  $cardMenu=New-Object Windows.Controls.ContextMenu
+  $warmItem=New-Object Windows.Controls.MenuItem;$warmItem.Header='预热 5 小时额度';$warmItem.Tag=@{Id=[string]$a.id;Name=[string]$shownName}
+  $warmItem.Add_Click({param($sender,$eventArgs) Warmup-WidgetAccount ([string]$sender.Tag.Id) ([string]$sender.Tag.Name)})
+  $cardMenu.Items.Add($warmItem)|Out-Null;$card.ContextMenu=$cardMenu
   if(-not$a.is_active){
     $card.Cursor=[Windows.Input.Cursors]::Hand;$card.ToolTip="双击切换到 $shownName"
     $card.Tag=@{Id=[string]$a.id;Name=[string]$shownName;LastClick=[DateTime]::MinValue}
@@ -206,6 +225,6 @@ if($SelfTest){
  exit
 }
 $Window.Add_MouseLeftButtonDown({$hadDetail=$null-ne$script:Detail;if($hadDetail){Close-Detail};$start=[System.Windows.Forms.Cursor]::Position;try{$Window.DragMove()}catch{};$end=[System.Windows.Forms.Cursor]::Position;$distance=[Math]::Abs($end.X-$start.X)+[Math]::Abs($end.Y-$start.Y);if($distance-le 3-and-not$hadDetail){Show-Detail}})
-$Menu=New-Object Windows.Controls.ContextMenu;$Refresh=New-Object Windows.Controls.MenuItem;$Refresh.Header='立即刷新额度';$Refresh.Add_Click({Update-Widget});$Menu.Items.Add($Refresh)|Out-Null;$Open=New-Object Windows.Controls.MenuItem;$Open.Header='打开完整页面';$Open.Add_Click({Start-Process "http://127.0.0.1:$script:Port/"});$Menu.Items.Add($Open)|Out-Null;$Version=New-Object Windows.Controls.MenuItem;$Version.Header="Codex Companion v$script:AppVersion";$Version.IsEnabled=$false;$Menu.Items.Add((New-Object Windows.Controls.Separator))|Out-Null;$Menu.Items.Add($Version)|Out-Null;$Exit=New-Object Windows.Controls.MenuItem;$Exit.Header='退出浮窗';$Exit.Add_Click({$Window.Close()});$Menu.Items.Add($Exit)|Out-Null;$Window.ContextMenu=$Menu
+$Menu=New-Object Windows.Controls.ContextMenu;$Refresh=New-Object Windows.Controls.MenuItem;$Refresh.Header='立即刷新额度';$Refresh.Add_Click({Update-Widget});$Menu.Items.Add($Refresh)|Out-Null;$WarmCurrent=New-Object Windows.Controls.MenuItem;$WarmCurrent.Header='预热当前账号';$WarmCurrent.Add_Click({$script:Status=Get-Status;$active=@($script:Status.accounts|Where-Object{$_.is_active})|Select-Object -First 1;if($null-ne$active){$shown=if([string]::IsNullOrWhiteSpace([string]$active.display_name)){[string]$active.name}else{[string]$active.display_name};Warmup-WidgetAccount ([string]$active.id) $shown}else{[Windows.MessageBox]::Show('没有找到当前账号。','Codex Companion','OK','Warning')|Out-Null}});$Menu.Items.Add($WarmCurrent)|Out-Null;$Open=New-Object Windows.Controls.MenuItem;$Open.Header='打开完整页面';$Open.Add_Click({Start-Process "http://127.0.0.1:$script:Port/"});$Menu.Items.Add($Open)|Out-Null;$Version=New-Object Windows.Controls.MenuItem;$Version.Header="Codex Companion v$script:AppVersion";$Version.IsEnabled=$false;$Menu.Items.Add((New-Object Windows.Controls.Separator))|Out-Null;$Menu.Items.Add($Version)|Out-Null;$Exit=New-Object Windows.Controls.MenuItem;$Exit.Header='退出浮窗';$Exit.Add_Click({$Window.Close()});$Menu.Items.Add($Exit)|Out-Null;$Window.ContextMenu=$Menu
 $OutsideTimer=New-Object Windows.Threading.DispatcherTimer;$OutsideTimer.Interval=[TimeSpan]::FromMilliseconds(60);$script:MouseWasDown=$false;$OutsideTimer.Add_Tick({$isDown=(([CompanionMouse]::GetAsyncKeyState(1)-band 0x8000)-ne 0);if($isDown-and-not$script:MouseWasDown-and$null-ne$script:Detail){$cursor=[System.Windows.Forms.Cursor]::Position;$mainOrigin=$Window.PointToScreen([Windows.Point]::new(0,0));$detailOrigin=$script:Detail.PointToScreen([Windows.Point]::new(0,0));$insideMain=$cursor.X-ge$mainOrigin.X-and$cursor.X-le($mainOrigin.X+$Window.ActualWidth)-and$cursor.Y-ge$mainOrigin.Y-and$cursor.Y-le($mainOrigin.Y+$Window.ActualHeight);$insideDetail=$cursor.X-ge$detailOrigin.X-and$cursor.X-le($detailOrigin.X+$script:Detail.ActualWidth)-and$cursor.Y-ge$detailOrigin.Y-and$cursor.Y-le($detailOrigin.Y+$script:Detail.ActualHeight);if(-not$insideMain-and-not$insideDetail){Close-Detail}};$script:MouseWasDown=$isDown});$OutsideTimer.Start()
 $Timer=New-Object Windows.Threading.DispatcherTimer;$Timer.Interval=[TimeSpan]::FromSeconds(60);$Timer.Add_Tick({Update-Widget});$Timer.Start();$Warm=New-Object Windows.Threading.DispatcherTimer;$Warm.Interval=[TimeSpan]::FromMilliseconds(800);$script:WarmCount=0;$Warm.Add_Tick({$script:WarmCount++;Update-Widget;if(@($script:Status.accounts).Count-gt 0-or$script:WarmCount-ge 25){$Warm.Stop()}});$Warm.Start();$Window.Add_Closed({Close-Detail;$Timer.Stop();$Warm.Stop();$OutsideTimer.Stop();try{$script:Mutex.ReleaseMutex()}catch{};[Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvokeShutdown('Normal')});Update-Widget;$Window.Show();[Windows.Threading.Dispatcher]::Run()
