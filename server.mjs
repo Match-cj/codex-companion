@@ -13,7 +13,7 @@ import * as Lark from '@larksuiteoapi/node-sdk';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.17';
+const APP_VERSION = '0.7.18';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -1087,7 +1087,7 @@ async function verifyNativeVaultRoundTrip() {
   return (await unprotectCredential(await protectCredential(marker))) === marker;
 }
 class IsolatedUsageSession {
-  constructor(home) { this.home = home; this.proc = null; this.pending = new Map(); this.nextId = 0; this.buffer = ''; }
+  constructor(home) { this.home = home; this.proc = null; this.pending = new Map(); this.turnWaiters = new Map(); this.completedTurns = new Map(); this.nextId = 0; this.buffer = ''; }
   async start() {
     const { command, args } = codexLaunch();
     this.proc = spawn(command, args, { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, CODEX_HOME: this.home } });
@@ -1118,15 +1118,51 @@ class IsolatedUsageSession {
     let message;
     try { message = JSON.parse(line); } catch { return; }
     const pending = this.pending.get(message.id);
-    if (!pending) return;
-    clearTimeout(pending.timer);
-    this.pending.delete(message.id);
-    if (message.error) pending.reject(new Error(message.error.message || JSON.stringify(message.error)));
-    else pending.resolve(message.result);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.pending.delete(message.id);
+      if (message.error) pending.reject(new Error(message.error.message || JSON.stringify(message.error)));
+      else pending.resolve(message.result);
+      return;
+    }
+    if (message.method === 'turn/completed') {
+      const threadId = String(message.params?.threadId || '');
+      if (!threadId) return;
+      const waiter = this.turnWaiters.get(threadId);
+      if (waiter) {
+        clearTimeout(waiter.timer);
+        this.turnWaiters.delete(threadId);
+        waiter.resolve(message.params?.turn || {});
+      } else this.completedTurns.set(threadId, message.params?.turn || {});
+    }
+  }
+  waitForTurnCompleted(threadId, timeoutMs = 150000) {
+    const key = String(threadId);
+    if (this.completedTurns.has(key)) {
+      const turn = this.completedTurns.get(key);
+      this.completedTurns.delete(key);
+      return Promise.resolve(turn);
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.turnWaiters.delete(key); reject(new Error('最小预热请求等待完成超时')); }, timeoutMs);
+      this.turnWaiters.set(key, { resolve, reject, timer });
+    });
   }
   rejectAll(error) {
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
     this.pending.clear();
+    for (const waiter of this.turnWaiters.values()) { clearTimeout(waiter.timer); waiter.reject(error); }
+    this.turnWaiters.clear();
+  }
+  async shutdown() {
+    const proc = this.proc;
+    this.proc = null;
+    if (!proc || proc.exitCode !== null) return;
+    await new Promise(resolve => {
+      const timer = setTimeout(resolve, 4000);
+      proc.once('exit', () => { clearTimeout(timer); resolve(); });
+      try { proc.kill(); } catch { clearTimeout(timer); resolve(); }
+    });
   }
   close() { try { this.proc?.kill(); } catch {} this.proc = null; }
 }
@@ -1203,62 +1239,56 @@ async function nativeAccountEntry(id) {
   if (!entry?.protected_auth) throw Error('原生账号库中没有这个账号的加密凭据。');
   return entry;
 }
-async function sendNativeWarmupRequest(auth) {
-  const accessToken = auth?.tokens?.access_token;
-  const accountId = auth?.tokens?.account_id || decodeJwtPayload(auth?.tokens?.id_token)['https://api.openai.com/auth']?.chatgpt_account_id;
-  if (!accessToken || !accountId) throw Error('账号凭据不完整，无法预热。');
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 90000);
+async function runIsolatedNativeWarmup(entry) {
+  const root = path.join(appDir, 'native-warmup');
+  const home = path.join(root, randomUUID());
+  const session = new IsolatedUsageSession(home);
   try {
-    const response = await fetch('https://chatgpt.com/backend-api/codex/responses', {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'ChatGPT-Account-ID': accountId,
-        'Content-Type': 'application/json',
-        Accept: 'text/event-stream, application/json, text/plain, */*',
-        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-        Origin: 'https://chatgpt.com',
-        Referer: 'https://chatgpt.com/',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136.0.0.0 Safari/537.36',
-      },
-      body: JSON.stringify({
-        model: 'gpt-5.6-luna',
-        instructions: 'Reply with exactly OK.',
-        input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'OK' }] }],
-        tools: [],
-        tool_choice: 'auto',
-        parallel_tool_calls: false,
-        reasoning: { effort: 'low' },
-        store: false,
-        stream: true,
-      }),
+    await fs.mkdir(home, { recursive: true });
+    const auth = JSON.parse(await unprotectCredential(entry.protected_auth));
+    if (!auth?.tokens?.access_token || !auth?.tokens?.refresh_token) throw Error('账号凭据不完整，无法预热。');
+    await atomicJsonWrite(path.join(home, 'auth.json'), auth);
+    await session.start();
+    const started = await session.request('thread/start', {
+      cwd: home,
+      model: 'gpt-5.6-luna',
+      approvalPolicy: 'never',
+      sandbox: 'read-only',
+      ephemeral: true,
+      serviceName: 'codex_companion_warmup',
+      baseInstructions: 'Reply with exactly OK.',
+      developerInstructions: 'Do not use tools. Reply with exactly OK.',
+    }, 60000);
+    const threadId = started?.thread?.id;
+    if (!threadId) throw Error('Codex 没有创建预热会话。');
+    await session.request('turn/start', {
+      threadId,
+      input: [{ type: 'text', text: 'OK' }],
+      cwd: home,
+      model: 'gpt-5.6-luna',
+      effort: 'low',
+      approvalPolicy: 'never',
     });
-    await response.text();
-    return { ok: response.ok, status: response.status };
-  } catch (error) {
-    if (error?.name === 'AbortError') throw Error('预热请求超时，请检查网络后重试。');
-    throw error;
-  } finally { clearTimeout(timer); }
+    const turn = await session.waitForTurnCompleted(threadId, 150000);
+    if (turn?.status !== 'completed') throw Error(turn?.error?.message || `预热请求没有完成（${turn?.status || '未知状态'}）。`);
+    const updatedAuth = await readJson(path.join(home, 'auth.json'));
+    if (updatedAuth?.tokens?.access_token && JSON.stringify(updatedAuth) !== JSON.stringify(auth)) await upsertNativeAccount(updatedAuth, entry);
+  } finally {
+    await session.shutdown();
+    const resolvedRoot = path.resolve(root) + path.sep;
+    const resolvedHome = path.resolve(home);
+    if (resolvedHome.startsWith(resolvedRoot)) await fs.rm(resolvedHome, { recursive: true, force: true }).catch(() => {});
+  }
 }
 async function warmupNativeAccount(id) {
   const key = String(id);
   if (nativeWarmupsInProgress.has(key)) throw Error('这个账号正在预热，请稍等。');
   nativeWarmupsInProgress.add(key);
   try {
-    let entry = await nativeAccountEntry(key);
+    const entry = await nativeAccountEntry(key);
     const publicAccount = accounts.find(item => String(item.id) === key);
     if (Number(publicAccount?.usage?.secondary_used_percent) >= 100) throw Error('这个账号的周额度已经耗尽，不能预热。');
-    let auth = JSON.parse(await unprotectCredential(entry.protected_auth));
-    let result = await sendNativeWarmupRequest(auth);
-    if (result.status === 401) {
-      await readNativeUsage(entry, true);
-      entry = await nativeAccountEntry(key);
-      auth = JSON.parse(await unprotectCredential(entry.protected_auth));
-      result = await sendNativeWarmupRequest(auth);
-    }
-    if (!result.ok) throw Error(`预热请求失败（HTTP ${result.status}），没有确认额度窗口已激活。`);
+    await runIsolatedNativeWarmup(entry);
     await updateNativeAccountMetadata(key, { last_warmup_at: new Date().toISOString() });
     nativeUsageCache.delete(key);
     await readNativeUsage(await nativeAccountEntry(key), true).catch(error => console.warn('[warmup refresh]', humanError(error)));
@@ -1297,7 +1327,7 @@ async function readNativeUsage(entry, force = false) {
     }
     return usage;
   } finally {
-    session.close();
+    await session.shutdown();
     const resolvedRoot = path.resolve(root) + path.sep;
     const resolvedHome = path.resolve(home);
     if (resolvedHome.startsWith(resolvedRoot)) await fs.rm(resolvedHome, { recursive: true, force: true }).catch(() => {});

@@ -1,6 +1,6 @@
 # Codex Companion
 
-独立的 Windows Codex 伴侣程序。当前稳定基线为 v0.7.17：
+独立的 Windows Codex 伴侣程序。当前稳定基线为 v0.7.18：
 
 - 日常只需双击桌面 **Codex 助手**，后台与小浮窗会一起启动，不自动打开网页；
 - 圆形浮窗用抗锯齿圆环显示当前账号剩余额度，数字居中且大、百分号小并靠右下；启动时会快速等待账号数据。点击打开圆角、无标题栏的账号面板，点击外部自动关闭，右键打开完整页面；
@@ -39,7 +39,7 @@
 
 推荐直接发送单个文件：
 
-`CodexCompanion-Setup-v0.7.17.exe`
+`CodexCompanion-Setup-v0.7.18.exe`
 
 用户双击一次即可安装并启动，安装器已经内置 Node.js 和官方 Codex CLI，不再要求另外安装 Node.js、Codex CLI 或 Codex Switcher。已有 Switcher 账号的用户仍可在高级设置中一次性迁移；新用户直接使用 Companion 的通用网页登录或设备码登录。Codex 桌面应用可选，但想使用切换后自动打开功能时需要安装。
 

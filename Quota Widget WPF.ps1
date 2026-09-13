@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 Add-Type 'using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); }'
-$script:Port=$Port; $script:AppVersion='0.7.17'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
+$script:Port=$Port; $script:AppVersion='0.7.18'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
 $mutexName=if($SelfTest){'Global\CodexCompanionQuotaWidget_v5_selftest'}else{'Global\CodexCompanionQuotaWidget_v5'}
 $script:Mutex=New-Object System.Threading.Mutex($false,$mutexName); if(-not $script:Mutex.WaitOne(0,$false)){exit}
 $Transparent=[Windows.Media.Brushes]::Transparent
@@ -19,6 +19,18 @@ $PlusBadgeFg=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::Fro
 $ProBadgeBg=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::FromRgb(77,57,24))
 $ProBadgeFg=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::FromRgb(255,211,112))
 function Get-Status{try{Invoke-RestMethod "http://127.0.0.1:$script:Port/api/status" -TimeoutSec 8}catch{$null}}
+function Get-ApiErrorMessage($record){
+ try{
+  $raw=[string]$record.ErrorDetails.Message
+  if(-not[string]::IsNullOrWhiteSpace($raw)){
+   $parsed=$raw|ConvertFrom-Json
+   if(-not[string]::IsNullOrWhiteSpace([string]$parsed.error)){return [string]$parsed.error}
+  }
+ }catch{}
+ $message=[string]$record.Exception.Message
+ if([string]::IsNullOrWhiteSpace($message)){return '操作没有完成，请重试。'}
+ return $message
+}
 function Get-Remaining($a,$prefix){if($null -eq $a -or $null -eq $a.usage){return $null};$used=$a.usage.($prefix+'_used_percent');if($null -eq $used){return $null};[Math]::Max(0,[Math]::Min(100,[int](100-[double]$used)))}
 function Get-Countdown($a,$prefix){try{$seconds=[int64]$a.usage.($prefix+'_resets_at')-[DateTimeOffset]::UtcNow.ToUnixTimeSeconds();if($seconds-le 0){return '已重置'};$d=[Math]::Floor($seconds/86400);$h=[Math]::Floor(($seconds%86400)/3600);$m=[Math]::Floor(($seconds%3600)/60);if($d-gt 0){return "${d}天${h}小时"};if($h-gt 0){return "${h}小时${m}分"};return "${m}分"}catch{'--'}}
 function Get-Expiry($a){try{$raw=$a.reset_credits_expires_at;if(-not $raw){return '--'};$seconds=[DateTimeOffset]::Parse([string]$raw).ToUnixTimeSeconds()-[DateTimeOffset]::UtcNow.ToUnixTimeSeconds();if($seconds-le 0){return '已到期'};('{0}天{1}小时'-f [Math]::Floor($seconds/86400),[Math]::Floor(($seconds%86400)/3600))}catch{'--'}}
@@ -130,7 +142,7 @@ function Switch-WidgetAccount($accountId,$accountName){
   Update-Widget
   [Windows.MessageBox]::Show([string]$result.message,'Codex Companion','OK','Information')|Out-Null
  }catch{
-  [Windows.MessageBox]::Show("账号切换失败：`n$($_.Exception.Message)",'Codex Companion','OK','Error')|Out-Null
+  [Windows.MessageBox]::Show("账号切换失败：`n$(Get-ApiErrorMessage $_)",'Codex Companion','OK','Error')|Out-Null
  }finally{$script:SwitchInProgress=$false;[Windows.Input.Mouse]::OverrideCursor=$null}
 }
 function Warmup-WidgetAccount($accountId,$accountName){
@@ -145,7 +157,7 @@ function Warmup-WidgetAccount($accountId,$accountName){
   Update-Widget
   [Windows.MessageBox]::Show([string]$result.message,'Codex Companion','OK','Information')|Out-Null
  }catch{
-  [Windows.MessageBox]::Show("额度预热失败：`n$($_.Exception.Message)",'Codex Companion','OK','Error')|Out-Null
+  [Windows.MessageBox]::Show("额度预热失败：`n$(Get-ApiErrorMessage $_)",'Codex Companion','OK','Error')|Out-Null
  }finally{$script:WarmupInProgress=$false;[Windows.Input.Mouse]::OverrideCursor=$null}
 }
 function Show-Detail{
