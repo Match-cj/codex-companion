@@ -45,7 +45,7 @@ function Test-PortOpen($hostName, $p) {
     }
 }
 
-Write-Log "=== Launcher starting (v0.7.18) ==="
+Write-Log "=== Launcher starting (v0.7.19) ==="
 Write-Log "Data directory: $companionDataRoot"
 
 if (-not $node -or -not (Test-Path -LiteralPath $node)) {
@@ -78,32 +78,44 @@ if (-not (Test-Path $serverPath)) {
     exit 1
 }
 
-Write-Log "Starting server (capturing output to server.stdout.log / server.stderr.log)"
-try {
-    $serverProc = Start-Process -FilePath $node -ArgumentList "`"$serverPath`"" `
-        -WorkingDirectory $root -WindowStyle Hidden `
-        -RedirectStandardOutput $serverOut -RedirectStandardError $serverErr -PassThru
-    Write-Log "Server started PID=$($serverProc.Id)"
-} catch {
-    Write-Log ("ERROR starting server: " + $_.Exception.Message)
-    Show-ErrorBox ("无法启动 server.mjs：`n" + $_.Exception.Message)
-    exit 1
-}
-
-# 3. Wait for the port to come up (TCP, proxy-proof), up to 20s
+# Windows Defender may hold a newly updated embedded node.exe briefly on its first launch.
+# Retry once without showing an error dialog; a cold scan should not look like a broken install.
 $ready = $false
-$deadline = (Get-Date).AddSeconds(20)
-while ((Get-Date) -lt $deadline) {
-    if ($serverProc.HasExited) {
-        Write-Log ("Server process exited early (code=$($serverProc.ExitCode))")
-        break
+$serverProc = $null
+for ($attempt = 1; $attempt -le 2 -and -not $ready; $attempt++) {
+    Write-Log "Starting server attempt $attempt/2 (capturing output to server.stdout.log / server.stderr.log)"
+    try {
+        $serverProc = Start-Process -FilePath $node -ArgumentList "`"$serverPath`"" `
+            -WorkingDirectory $root -WindowStyle Hidden `
+            -RedirectStandardOutput $serverOut -RedirectStandardError $serverErr -PassThru
+        Write-Log "Server attempt $attempt started PID=$($serverProc.Id)"
+    } catch {
+        Write-Log ("Server attempt $attempt could not start: " + $_.Exception.Message)
+        $serverProc = $null
     }
-    if (Test-PortOpen '127.0.0.1' $port) {
-        $ready = $true
-        Write-Log "Server port ready (TCP)"
-        break
+
+    # TCP never goes through a proxy. Allow enough time for a first-run antivirus scan.
+    $deadline = (Get-Date).AddSeconds(45)
+    while ($null -ne $serverProc -and (Get-Date) -lt $deadline) {
+        if ($serverProc.HasExited) {
+            Write-Log ("Server attempt $attempt exited early (code=$($serverProc.ExitCode))")
+            break
+        }
+        if (Test-PortOpen '127.0.0.1' $port) {
+            $ready = $true
+            Write-Log "Server port ready (TCP) on attempt $attempt"
+            break
+        }
+        Start-Sleep -Milliseconds 500
     }
-    Start-Sleep -Milliseconds 500
+
+    if (-not $ready) {
+        try { if ($null -ne $serverProc -and -not $serverProc.HasExited) { Stop-Process -Id $serverProc.Id -Force -ErrorAction SilentlyContinue } } catch {}
+        if ($attempt -lt 2) {
+            Write-Log 'First startup attempt did not become ready; retrying once.'
+            Start-Sleep -Milliseconds 1500
+        }
+    }
 }
 
 if (-not $ready) {
@@ -113,8 +125,8 @@ if (-not $ready) {
         try { $errTail = (Get-Content $serverOut -Tail 15 -ErrorAction SilentlyContinue) -join "`n" } catch {}
     }
     Write-Log ("ERROR: server not ready. Stderr tail:`n$errTail")
-    try { if (-not $serverProc.HasExited) { Stop-Process -Id $serverProc.Id -Force -ErrorAction SilentlyContinue } } catch {}
-    $msg = "Codex Companion 启动失败。`n`n端口 $port 在 20 秒内没有就绪。"
+    try { if ($null -ne $serverProc -and -not $serverProc.HasExited) { Stop-Process -Id $serverProc.Id -Force -ErrorAction SilentlyContinue } } catch {}
+    $msg = "Codex Companion 启动失败。`n`n后台已自动尝试两次，但端口 $port 仍未就绪。"
     if (-not [string]::IsNullOrWhiteSpace($errTail)) {
         $msg += "`n`n服务器日志尾部：`n$errTail"
     }
