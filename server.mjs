@@ -13,7 +13,7 @@ import * as Lark from '@larksuiteoapi/node-sdk';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.19';
+const APP_VERSION = '0.7.20';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -985,13 +985,21 @@ async function deleteNativeAccount(id) {
     const index = vault.accounts.findIndex(item => String(item.id) === String(id));
     if (index < 0) throw Error('没有找到要删除的账号。');
     if (String(vault.active_account_id || '') === String(id)) throw Error('当前正在使用的账号不能删除，请先切换到其他账号。');
-    const [removed] = vault.accounts.splice(index, 1);
-    await writeNativeVault(vault);
+    const removed = vault.accounts[index];
     const deletedKeys = new Set(Array.isArray(config.deletedAccountKeys) ? config.deletedAccountKeys.map(String) : []);
     for (const key of [removed.id, removed.account_id, removed.email && String(removed.email).toLowerCase()].filter(Boolean)) deletedKeys.add(String(key));
     config.deletedAccountKeys = [...deletedKeys].slice(-300);
+    if (config.accountAliases && typeof config.accountAliases === 'object') delete config.accountAliases[String(id)];
+    // Persist the tombstone before changing the vault. If the process is interrupted,
+    // a legacy source or recovery backup must not silently resurrect the deleted account.
     await saveConfig();
+    vault.accounts.splice(index, 1);
+    await writeNativeVault(vault);
     nativeUsageCache.delete(String(id));
+    subscriptionNotifierState.delete(String(id));
+    for (const key of [...quotaNotifierState.keys()]) {
+      if (String(key).startsWith(`${id}:`)) quotaNotifierState.delete(key);
+    }
     return { ok: true, id: String(id), name: removed.email || removed.name || '账号' };
   });
 }
@@ -1543,7 +1551,11 @@ function confirmationDetails(method, params) {
 async function checkQuotaNotices() {
   const nowSeconds = Math.floor(Date.now() / 1000);
   const restored = [];
+  const accountStillExists = account => accounts.some(current => String(current.id) === String(account.id));
   for (const account of accounts) {
+    // A prior notification can yield to the HTTP handler. Re-check membership so an
+    // account deleted while this scan is running cannot receive a later stale notice.
+    if (!accountStillExists(account)) continue;
     const expiry = Date.parse(account.reset_credits_expires_at || '') / 1000;
     if (Number.isFinite(expiry) && expiry > nowSeconds) {
       const daysLeft = (expiry - nowSeconds) / 86400;
@@ -1566,6 +1578,7 @@ async function checkQuotaNotices() {
       ['主要额度', 'primary_used_percent', 'primary_resets_at', 'primary_window_minutes'],
       ['次要额度', 'secondary_used_percent', 'secondary_resets_at', 'secondary_window_minutes'],
     ]) {
+      if (!accountStillExists(account)) break;
       const label = quotaLabel(account.usage?.[windowKey], fallbackLabel);
       const used = Number(account.usage?.[usedKey]);
       const resetAt = Number(account.usage?.[resetKey]);
