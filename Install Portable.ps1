@@ -29,6 +29,9 @@ if (-not (Test-Path -LiteralPath $payload)) { throw '安装包缺少程序数据
 $rollback = [IO.Path]::GetFullPath($destination + '.previous')
 $staging = [IO.Path]::GetFullPath($destination + '.staging-' + [guid]::NewGuid().ToString('N'))
 $hadExisting = Test-Path -LiteralPath $destination
+$desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Codex 助手.lnk'
+$startupShortcut = Join-Path ([Environment]::GetFolderPath('Startup')) 'Codex Companion.lnk'
+$uninstallRegistryPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexCompanion'
 if (-not $rollback.StartsWith($allowedPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw '回滚目录校验失败。' }
 if (-not $staging.StartsWith($allowedPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw '暂存目录校验失败。' }
 
@@ -103,12 +106,20 @@ try {
 
     $env:CODEX_COMPANION_QUIET = '1'
     & (Join-Path $destination 'Install Companion.ps1')
-    Start-ScheduledTask -TaskName 'Codex Companion'
+    # Start through the same hidden worker regardless of whether startup was
+    # registered as a scheduled task or as the policy-compatible Startup fallback.
+    & (Join-Path $env:WINDIR 'System32\wscript.exe') (Join-Path $destination 'Codex Companion Worker.vbs')
     $status = $null
-    for ($attempt = 0; $attempt -lt 15 -and -not $status; $attempt++) {
+    # The launcher can make two 45-second attempts on a cold/antivirus-scanned
+    # machine. Do not roll back while that supported recovery path is still active.
+    for ($attempt = 0; $attempt -lt 105 -and -not $status; $attempt++) {
         try { $status = Invoke-RestMethod 'http://127.0.0.1:17841/api/status' -TimeoutSec 2 } catch { Start-Sleep -Seconds 1 }
     }
-    if (-not $status -or [string]$status.version -ne [string]$manifest.version) { throw '安装后后台没有正常启动。' }
+    if (-not $status -or [string]$status.version -ne [string]$manifest.version) {
+        $launcherTail = ''
+        try { $launcherTail = (Get-Content (Join-Path $destination 'launcher.log') -Tail 20 -ErrorAction SilentlyContinue) -join "`n" } catch {}
+        throw "安装后后台没有正常启动。$([Environment]::NewLine)$launcherTail"
+    }
     if (Test-Path -LiteralPath $rollback) { Remove-Item -LiteralPath $rollback -Recurse -Force -ErrorAction SilentlyContinue }
 
     if ($env:CODEX_COMPANION_INSTALL_SILENT -ne '1') {
@@ -135,12 +146,20 @@ catch {
         if (Test-Path -LiteralPath $destination) { Remove-Item -LiteralPath $destination -Recurse -Force -ErrorAction SilentlyContinue }
         if (-not (Test-Path -LiteralPath $destination)) { Move-Item -LiteralPath $rollback -Destination $destination -ErrorAction SilentlyContinue }
         if (-not $testMode) {
+            $env:CODEX_COMPANION_QUIET = '1'
+            $oldInstall = Join-Path $destination 'Install Companion.ps1'
+            if (Test-Path -LiteralPath $oldInstall) { try { & $oldInstall } catch {} }
             $oldStart = Join-Path $destination 'Start Codex Companion.ps1'
             if (Test-Path -LiteralPath $oldStart) { & $oldStart -NoBrowser }
         }
     }
     elseif (Test-Path -LiteralPath $destination) {
         Remove-Item -LiteralPath $destination -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if (-not $hadExisting) {
+        if (Test-Path -LiteralPath $desktopShortcut) { Remove-Item -LiteralPath $desktopShortcut -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $startupShortcut) { Remove-Item -LiteralPath $startupShortcut -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $uninstallRegistryPath) { Remove-Item -LiteralPath $uninstallRegistryPath -Recurse -Force -ErrorAction SilentlyContinue }
     }
     throw $failure
 }
