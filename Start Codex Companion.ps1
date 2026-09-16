@@ -45,7 +45,7 @@ function Test-PortOpen($hostName, $p) {
     }
 }
 
-Write-Log "=== Launcher starting (v0.7.22) ==="
+Write-Log "=== Launcher starting (v0.7.23) ==="
 Write-Log "Data directory: $companionDataRoot"
 
 if (-not $node -or -not (Test-Path -LiteralPath $node)) {

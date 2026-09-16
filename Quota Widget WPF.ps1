@@ -1,8 +1,8 @@
 ﻿param([int]$Port = 17841,[switch]$SelfTest)
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
-Add-Type 'using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); }'
-$script:Port=$Port; $script:AppVersion='0.7.22'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
+Add-Type 'using System; using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags); [DllImport("user32.dll", EntryPoint="GetWindowLongW")] public static extern int GetWindowLong(IntPtr hwnd, int index); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); }'
+$script:Port=$Port; $script:AppVersion='0.7.23'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
 $mutexName=if($SelfTest){'Global\CodexCompanionQuotaWidget_v5_selftest'}else{'Global\CodexCompanionQuotaWidget_v5'}
 $script:Mutex=New-Object System.Threading.Mutex($false,$mutexName); if(-not $script:Mutex.WaitOne(0,$false)){exit}
 $Transparent=[Windows.Media.Brushes]::Transparent
@@ -103,6 +103,18 @@ function New-Quota($tag,$remaining,$countdown,$width){
  return $box
 }
 $Window=New-Object Windows.Window;$Window.Width=72;$Window.Height=72;$Window.WindowStyle='None';$Window.ResizeMode='NoResize';$Window.AllowsTransparency=$true;$Window.Background=$Transparent;$Window.Topmost=$true;$Window.ShowInTaskbar=$false;$Window.UseLayoutRounding=$true;$Window.SnapsToDevicePixels=$true
+function Ensure-WidgetTopmost{
+ foreach($floatingWindow in @($Window,$script:Detail)){
+  if($null-eq$floatingWindow-or-not$floatingWindow.IsVisible){continue}
+  $handle=(New-Object Windows.Interop.WindowInteropHelper($floatingWindow)).Handle
+  if($handle-ne[IntPtr]::Zero){
+   # Reassert native Z-order without activation, movement or resizing (0x13).
+   # WPF Topmost can stay true even after native windows reorder the window.
+   [CompanionMouse]::SetWindowPos($handle,[IntPtr]::new(-1),0,0,0,0,0x13)|Out-Null
+  }
+ }
+}
+$Window.Add_Deactivated({Ensure-WidgetTopmost})
 $Root=New-Object Windows.Controls.Grid;$Window.Content=$Root
 $Back=New-Object Windows.Shapes.Ellipse;$Back.Margin=5;$Back.Fill=$Disc;$Back.Stroke=$Muted;$Back.StrokeThickness=6;$Root.Children.Add($Back)|Out-Null
 $Arc=New-Object Windows.Shapes.Path;$Arc.Stroke=$Green;$Arc.StrokeThickness=6;$Arc.StrokeStartLineCap='Round';$Arc.StrokeEndLineCap='Round';$Root.Children.Add($Arc)|Out-Null
@@ -227,15 +239,27 @@ function Show-Detail{
 if($SelfTest){
  $Error.Clear()
  $Window.Opacity=0;$Window.Show();$Window.UpdateLayout()
+ $testHandle=(New-Object Windows.Interop.WindowInteropHelper($Window)).Handle
+ [CompanionMouse]::SetWindowPos($testHandle,[IntPtr]::new(-2),0,0,0,0,0x13)|Out-Null
+ $foregroundBefore=[CompanionMouse]::GetForegroundWindow()
+ Ensure-WidgetTopmost
+ $topmostRestored=([CompanionMouse]::GetWindowLong($testHandle,-20)-band 8)-ne 0
+ $noFocusSteal=$foregroundBefore-eq[CompanionMouse]::GetForegroundWindow()
  Update-Widget
  Show-Detail
  $stackForTest=$script:Detail.Content.Child
- [pscustomobject]@{AccountsFromApi=@($script:Status.accounts).Count;CardsBuilt=@($stackForTest.Children).Count;SwitchableCards=$script:SwitchableCardsBuilt;SwitchGestureCards=$script:SwitchGestureCardsBuilt;PanelHeight=[Math]::Round($script:Detail.Height,1);RuntimeErrors=$Error.Count;Errors=@($Error|ForEach-Object{$_.InvocationInfo.PositionMessage+' :: '+$_.Exception.Message})}|ConvertTo-Json -Compress -Depth 3
+ [pscustomobject]@{AccountsFromApi=@($script:Status.accounts).Count;CardsBuilt=@($stackForTest.Children).Count;SwitchableCards=$script:SwitchableCardsBuilt;SwitchGestureCards=$script:SwitchGestureCardsBuilt;PanelHeight=[Math]::Round($script:Detail.Height,1);TopmostRestored=$topmostRestored;NoFocusSteal=$noFocusSteal;RuntimeErrors=$Error.Count;Errors=@($Error|ForEach-Object{$_.InvocationInfo.PositionMessage+' :: '+$_.Exception.Message})}|ConvertTo-Json -Compress -Depth 3
  Close-Detail
  $Window.Close()
  try{$script:Mutex.ReleaseMutex()}catch{}
  exit
 }
+$TopmostTimer=New-Object Windows.Threading.DispatcherTimer
+$TopmostTimer.Interval=[TimeSpan]::FromSeconds(2)
+$TopmostTimer.Add_Tick({Ensure-WidgetTopmost})
+$TopmostTimer.Start()
+$Window.Add_Closed({$TopmostTimer.Stop()})
+$Window.Add_ContentRendered({Ensure-WidgetTopmost})
 $Window.Add_MouseLeftButtonDown({$hadDetail=$null-ne$script:Detail;if($hadDetail){Close-Detail};$start=[System.Windows.Forms.Cursor]::Position;try{$Window.DragMove()}catch{};$end=[System.Windows.Forms.Cursor]::Position;$distance=[Math]::Abs($end.X-$start.X)+[Math]::Abs($end.Y-$start.Y);if($distance-le 3-and-not$hadDetail){Show-Detail}})
 $Menu=New-Object Windows.Controls.ContextMenu;$Refresh=New-Object Windows.Controls.MenuItem;$Refresh.Header='立即刷新额度';$Refresh.Add_Click({Update-Widget});$Menu.Items.Add($Refresh)|Out-Null;$WarmCurrent=New-Object Windows.Controls.MenuItem;$WarmCurrent.Header='预热当前账号';$WarmCurrent.Add_Click({$script:Status=Get-Status;$active=@($script:Status.accounts|Where-Object{$_.is_active})|Select-Object -First 1;if($null-ne$active){$shown=if([string]::IsNullOrWhiteSpace([string]$active.display_name)){[string]$active.name}else{[string]$active.display_name};Warmup-WidgetAccount ([string]$active.id) $shown}else{[Windows.MessageBox]::Show('没有找到当前账号。','Codex Companion','OK','Warning')|Out-Null}});$Menu.Items.Add($WarmCurrent)|Out-Null;$Open=New-Object Windows.Controls.MenuItem;$Open.Header='打开完整页面';$Open.Add_Click({Start-Process "http://127.0.0.1:$script:Port/"});$Menu.Items.Add($Open)|Out-Null;$Version=New-Object Windows.Controls.MenuItem;$Version.Header="Codex Companion v$script:AppVersion";$Version.IsEnabled=$false;$Menu.Items.Add((New-Object Windows.Controls.Separator))|Out-Null;$Menu.Items.Add($Version)|Out-Null;$Exit=New-Object Windows.Controls.MenuItem;$Exit.Header='退出浮窗';$Exit.Add_Click({$Window.Close()});$Menu.Items.Add($Exit)|Out-Null;$Window.ContextMenu=$Menu
 $OutsideTimer=New-Object Windows.Threading.DispatcherTimer;$OutsideTimer.Interval=[TimeSpan]::FromMilliseconds(60);$script:MouseWasDown=$false;$OutsideTimer.Add_Tick({$isDown=(([CompanionMouse]::GetAsyncKeyState(1)-band 0x8000)-ne 0);if($isDown-and-not$script:MouseWasDown-and$null-ne$script:Detail){$cursor=[System.Windows.Forms.Cursor]::Position;$mainOrigin=$Window.PointToScreen([Windows.Point]::new(0,0));$detailOrigin=$script:Detail.PointToScreen([Windows.Point]::new(0,0));$insideMain=$cursor.X-ge$mainOrigin.X-and$cursor.X-le($mainOrigin.X+$Window.ActualWidth)-and$cursor.Y-ge$mainOrigin.Y-and$cursor.Y-le($mainOrigin.Y+$Window.ActualHeight);$insideDetail=$cursor.X-ge$detailOrigin.X-and$cursor.X-le($detailOrigin.X+$script:Detail.ActualWidth)-and$cursor.Y-ge$detailOrigin.Y-and$cursor.Y-le($detailOrigin.Y+$script:Detail.ActualHeight);if(-not$insideMain-and-not$insideDetail){Close-Detail}};$script:MouseWasDown=$isDown});$OutsideTimer.Start()
