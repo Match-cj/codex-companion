@@ -13,7 +13,7 @@ import * as Lark from '@larksuiteoapi/node-sdk';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.21';
+const APP_VERSION = '0.7.22';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -59,6 +59,7 @@ let codexExitNotifiedAt = 0; // dedupe Codex 后台 crashed toast: same outage s
 const quotaNotifierState = new Map(); // key=`${accountId}:${label}` → {exhausted, resetSoon, resetAt}
 const subscriptionNotifierState = new Map();
 const nativeUsageCache = new Map();
+const nativeUsageInFlight = new Map();
 let nativeVaultWriteQueue = Promise.resolve();
 const tasks = new Map();
 const pendingApprovals = new Map();
@@ -388,6 +389,10 @@ function decodeJwtPayload(token) {
     if (!part) return {};
     return JSON.parse(Buffer.from(part.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
   } catch { return {}; }
+}
+function jwtExpiry(token) {
+  const value = Number(decodeJwtPayload(token).exp);
+  return Number.isFinite(value) ? value : 0;
 }
 async function atomicJsonWrite(file, value) {
   const directory = path.dirname(file);
@@ -967,6 +972,74 @@ async function syncNativePublicMetadata(currentAccounts) {
     await writeNativeVault(vault);
   });
 }
+async function syncMatchingLiveAuthToNativeVault() {
+  if (!existsSync(liveAuthPath)) return false;
+  const liveAuth = await readJson(liveAuthPath);
+  const liveTokens = liveAuth?.tokens;
+  if (!liveTokens?.id_token || !liveTokens?.access_token || !liveTokens?.refresh_token) return false;
+  const liveClaims = decodeJwtPayload(liveTokens.id_token);
+  const liveAccountId = liveTokens.account_id || liveClaims['https://api.openai.com/auth']?.chatgpt_account_id || null;
+  const liveEmail = liveClaims.email ? String(liveClaims.email).toLowerCase() : null;
+  const vault = await readJson(nativeAccountsPath);
+  if (!Array.isArray(vault.accounts)) return false;
+  const entry = vault.accounts.find(item => (liveAccountId && String(item.account_id || '') === String(liveAccountId))
+    || (liveEmail && String(item.email || '').toLowerCase() === liveEmail));
+  if (!entry) return false;
+  const deletedKeys = new Set(Array.isArray(config.deletedAccountKeys) ? config.deletedAccountKeys.map(String) : []);
+  if ([entry.id, entry.account_id, entry.email && String(entry.email).toLowerCase()].filter(Boolean).some(key => deletedKeys.has(String(key)))) return false;
+  let storedAuth = null;
+  try { storedAuth = JSON.parse(await unprotectCredential(entry.protected_auth)); } catch {}
+  const storedTokens = storedAuth?.tokens || {};
+  const liveExpiry = jwtExpiry(liveTokens.access_token);
+  const storedExpiry = jwtExpiry(storedTokens.access_token);
+  const sameTokens = liveTokens.access_token === storedTokens.access_token && liveTokens.refresh_token === storedTokens.refresh_token;
+  if (sameTokens || (liveExpiry && storedExpiry && liveExpiry <= storedExpiry)) return false;
+  await upsertNativeAccount(liveAuth, {
+    ...entry,
+    id: entry.id,
+    is_active: String(vault.active_account_id || '') === String(entry.id),
+  });
+  nativeUsageCache.delete(String(entry.id));
+  return true;
+}
+async function syncMatchingSwitcherAuthToNativeVault() {
+  if (!existsSync(switcherAccountsPath)) return 0;
+  const source = await readJson(switcherAccountsPath);
+  if (!Array.isArray(source.accounts) || !source.accounts.length) return 0;
+  const vault = await readJson(nativeAccountsPath);
+  if (!Array.isArray(vault.accounts)) return 0;
+  const deletedKeys = new Set(Array.isArray(config.deletedAccountKeys) ? config.deletedAccountKeys.map(String) : []);
+  let updated = 0;
+  for (const sourceAccount of source.accounts) {
+    const auth = authFileFromSwitcherAccount(sourceAccount);
+    if (!auth) continue;
+    const claims = decodeJwtPayload(auth.tokens.id_token);
+    const accountId = auth.tokens.account_id || claims['https://api.openai.com/auth']?.chatgpt_account_id || sourceAccount.account_id || null;
+    const email = claims.email || sourceAccount.email || null;
+    const entry = vault.accounts.find(item => (accountId && String(item.account_id || '') === String(accountId))
+      || (email && String(item.email || '').toLowerCase() === String(email).toLowerCase()));
+    if (!entry) continue;
+    if ([entry.id, entry.account_id, entry.email && String(entry.email).toLowerCase()].filter(Boolean).some(key => deletedKeys.has(String(key)))) continue;
+    let storedAuth = null;
+    try { storedAuth = JSON.parse(await unprotectCredential(entry.protected_auth)); } catch {}
+    const sourceExpiry = jwtExpiry(auth.tokens.access_token);
+    const storedExpiry = jwtExpiry(storedAuth?.tokens?.access_token);
+    const sameTokens = auth.tokens.access_token === storedAuth?.tokens?.access_token && auth.tokens.refresh_token === storedAuth?.tokens?.refresh_token;
+    if (sameTokens || (sourceExpiry && storedExpiry && sourceExpiry <= storedExpiry)) continue;
+    await upsertNativeAccount(auth, {
+      ...entry,
+      id: entry.id,
+      is_active: String(vault.active_account_id || '') === String(entry.id),
+    });
+    nativeUsageCache.delete(String(entry.id));
+    updated += 1;
+  }
+  return updated;
+}
+async function syncExternalAuthToNativeVault() {
+  await syncMatchingLiveAuthToNativeVault();
+  await syncMatchingSwitcherAuthToNativeVault();
+}
 async function setNativeActiveAccount(id) {
   return queueNativeVaultWrite(async () => {
     const vault = await readJson(nativeAccountsPath);
@@ -1304,7 +1377,7 @@ async function warmupNativeAccount(id) {
     return { id: key, name: entry.email || entry.name || key };
   } finally { nativeWarmupsInProgress.delete(key); }
 }
-async function readNativeUsage(entry, force = false) {
+async function readNativeUsageOnce(entry, force = false) {
   const cached = nativeUsageCache.get(String(entry.id));
   if (!force && cached && Date.now() - cached.at < 4 * 60 * 1000) return cached.usage;
   const root = path.join(appDir, 'native-usage');
@@ -1341,10 +1414,22 @@ async function readNativeUsage(entry, force = false) {
     if (resolvedHome.startsWith(resolvedRoot)) await fs.rm(resolvedHome, { recursive: true, force: true }).catch(() => {});
   }
 }
+async function readNativeUsage(entry, force = false) {
+  const key = String(entry.id);
+  const running = nativeUsageInFlight.get(key);
+  if (running) return await running;
+  const operation = readNativeUsageOnce(entry, force);
+  nativeUsageInFlight.set(key, operation);
+  try { return await operation; }
+  finally { if (nativeUsageInFlight.get(key) === operation) nativeUsageInFlight.delete(key); }
+}
 async function readNativeUsages(force = false) {
   const vault = await readJson(nativeAccountsPath);
   if (!Array.isArray(vault.accounts) || !vault.accounts.length) return new Map();
-  const pairs = await Promise.all(vault.accounts.map(async entry => {
+  const deletedKeys = new Set(Array.isArray(config.deletedAccountKeys) ? config.deletedAccountKeys.map(String) : []);
+  const visibleEntries = vault.accounts.filter(entry => ![entry.id, entry.account_id, entry.email && String(entry.email).toLowerCase()]
+    .filter(Boolean).some(key => deletedKeys.has(String(key))));
+  const pairs = await Promise.all(visibleEntries.map(async entry => {
     try { return [String(entry.id), await readNativeUsage(entry, force)]; }
     catch (error) { return [String(entry.id), { error: humanError(error), usage_source: 'Companion 原生凭据' }]; }
   }));
@@ -1460,6 +1545,7 @@ async function applyNativeUsageMap(nativeUsages) {
   await checkQuotaNotices();
 }
 async function refreshAccounts({ forceNative = false, awaitNative = false } = {}) {
+  await syncExternalAuthToNativeVault().catch(error => console.error('[external auth sync]', humanError(error)));
   const nativePromise = readNativeUsages(forceNative).catch(error => { console.error('[native usage]', error.message); return new Map(); });
   const nativeSnapshot = await loadNativeAccountsSnapshot();
   accounts = nativeSnapshot;

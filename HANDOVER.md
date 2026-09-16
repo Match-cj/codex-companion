@@ -1,6 +1,6 @@
 # Codex Companion 交接文档
 
-当前稳定版本：**v0.7.21**（2026-09-15）
+当前稳定版本：**v0.7.22**（2026-09-16）
 
 ## 当前功能
 
@@ -37,7 +37,7 @@ Codex Switcher 不再是运行依赖。若机器上已有 Switcher，Companion �
 
 ## 对外分发
 
-推荐把单个 `CodexCompanion-Setup-v0.7.21.exe` 交给用户。用户只需双击一次，安装器会：
+推荐把单个 `CodexCompanion-Setup-v0.7.22.exe` 交给用户。用户只需双击一次，安装器会：
 
 1. 解压到 `%LOCALAPPDATA%\Programs\CodexCompanion`；
 2. 安装内置 Node.js 与官方 Codex CLI 运行时；
@@ -85,10 +85,11 @@ Codex Switcher 不再是运行依赖。若机器上已有 Switcher，Companion �
 
 ## 已验证基线
 
-- `/api/status`：v0.7.21，返回全部账号、`alias` / `display_name`、重置数量/最近到期时间、Codex 会话监听、飞书长连接状态及 `nativeVault` 备份状态；
+- `/api/status`：v0.7.22，返回全部账号、`alias` / `display_name`、重置数量/最近到期时间、Codex 会话监听、飞书长连接状态及 `nativeVault` 备份状态；
 - 冷启动保护：后台服务每次最多等待 45 秒，首次未就绪时静默结束并重试一次；两次均失败后才弹窗，同时保留每次尝试的进程与日志记录。
 - 删除账号先持久化 ID、账号 ID、邮箱三重墓碑，再修改账号库并清除内存提醒状态；旧来源、备份与并发额度扫描均不能重新产生该账号的提醒。
 - 企业电脑安装兼容：安装健康检查覆盖启动器最多 105 秒的冷启动恢复周期；任务计划注册被策略禁用时回退到隐藏启动项；全新安装失败会清理快捷方式、启动项和卸载登记。
+- 登录凭据自愈：刷新额度前把当前 Codex 桌面端或本机已有 Switcher 中身份相同、有效期更长的凭据同步回原生账号库；额度读取按账号 single-flight，防止并发进程竞争旋转式刷新令牌；永久删除账号不会从任何来源复活，也不参与后台额度读取。
 - 安装版数据目录固定测试：启动器显式设置 `%APPDATA%\CodexCompanion`；主账号库读取成功时 `source=primary`，主库临时失败时可回退显示有效备份。
 - 账号库回退实测：在隔离目录故意写入损坏主库并放入 4 账号有效备份，安装版后台返回 4 个账号、`source=backup`、`usingBackup=true`，测试目录已清理。
 - `/api/accounts/migrate-native`：先执行 DPAPI 往返自检，再把现有 Switcher 凭据加密复制到 `%APPDATA%\CodexCompanion\accounts.vault.json`；
