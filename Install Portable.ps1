@@ -110,15 +110,24 @@ try {
     # registered as a scheduled task or as the policy-compatible Startup fallback.
     & (Join-Path $env:WINDIR 'System32\wscript.exe') (Join-Path $destination 'Codex Companion Worker.vbs')
     $status = $null
+    $healthError = ''
     # The launcher can make two 45-second attempts on a cold/antivirus-scanned
     # machine. Do not roll back while that supported recovery path is still active.
     for ($attempt = 0; $attempt -lt 105 -and -not $status; $attempt++) {
-        try { $status = Invoke-RestMethod 'http://127.0.0.1:17841/api/status' -TimeoutSec 2 } catch { Start-Sleep -Seconds 1 }
+        # Use the bundled runtime, bypassing Windows PowerShell's system proxy.
+        # A response from an older service is not proof the new install is ready.
+        try {
+            $probe = 'const http=require("http");const r=http.get("http://127.0.0.1:17841/api/status",s=>{let b="";s.on("data",d=>b+=d);s.on("end",()=>{try{const j=JSON.parse(b);if(s.statusCode!==200||!j.version)throw Error("HTTP "+s.statusCode);console.log(JSON.stringify({version:j.version}))}catch(e){console.error(e.message);process.exitCode=1}})});r.setTimeout(2000,()=>r.destroy(Error("health timeout")));r.on("error",e=>{console.error(e.message);process.exitCode=1});' | & $node 2>&1
+            if ($LASTEXITCODE -ne 0) { throw ($probe -join ' ') }
+            $candidate = ($probe -join '') | ConvertFrom-Json
+            if ([string]$candidate.version -ne [string]$manifest.version) { throw "Expected version $($manifest.version), received $($candidate.version)" }
+            $status = $candidate
+        } catch { $healthError = $_.ToString(); Start-Sleep -Seconds 1 }
     }
     if (-not $status -or [string]$status.version -ne [string]$manifest.version) {
         $launcherTail = ''
         try { $launcherTail = (Get-Content (Join-Path $destination 'launcher.log') -Tail 20 -ErrorAction SilentlyContinue) -join "`n" } catch {}
-        throw "安装后后台没有正常启动。$([Environment]::NewLine)$launcherTail"
+        throw "安装后后台检查失败：$healthError$([Environment]::NewLine)$launcherTail"
     }
     if (Test-Path -LiteralPath $rollback) { Remove-Item -LiteralPath $rollback -Recurse -Force -ErrorAction SilentlyContinue }
 
@@ -130,6 +139,20 @@ try {
 catch {
     $failure = $_
     Write-Output ('INSTALL FAILURE: ' + $failure.ToString())
+    if (-not $testMode) {
+        # Capture diagnostics before rollback removes the failed installation.
+        try {
+            $diagnostic = @('INSTALL FAILURE: ' + $failure.ToString(), 'Expected version: ' + $manifest.version, 'Last health error: ' + $healthError)
+            foreach ($logName in @('launcher.log','server.stdout.log','server.stderr.log')) {
+                $diagnostic += "--- $logName ---"
+                $logFile = Join-Path $destination $logName
+                if (Test-Path -LiteralPath $logFile) { $diagnostic += Get-Content -LiteralPath $logFile -Tail 100 }
+            }
+            $diagnosticPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'CodexCompanion安装失败日志.txt'
+            [IO.File]::WriteAllText($diagnosticPath, ($diagnostic -join [Environment]::NewLine), [Text.UTF8Encoding]::new($true))
+            Write-Output "Diagnostic log: $diagnosticPath"
+        } catch { Write-Output ('Unable to save desktop diagnostic: ' + $_.ToString()) }
+    }
     if ($testMode -and -not [string]::IsNullOrWhiteSpace([string]$env:CODEX_COMPANION_INSTALL_TEST_LOG)) {
         $testLogPath = [IO.Path]::GetFullPath([string]$env:CODEX_COMPANION_INSTALL_TEST_LOG)
         if ($testLogPath.StartsWith($allowedPrefix, [StringComparison]::OrdinalIgnoreCase)) {

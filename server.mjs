@@ -13,7 +13,7 @@ import * as Lark from '@larksuiteoapi/node-sdk';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.24';
+const APP_VERSION = '0.7.25';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR

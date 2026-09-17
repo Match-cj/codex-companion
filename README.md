@@ -1,6 +1,8 @@
 # Codex Companion
 
-独立的 Windows Codex 伴侣程序。当前稳定基线为 v0.7.24：
+独立的 Windows Codex 伴侣程序。当前稳定基线为 v0.7.25：
+
+安装后使用内置 Node 直连本机检查服务版本，绕过系统代理；安装失败时在回滚前自动把后台及启动日志保存到桌面的 `CodexCompanion安装失败日志.txt`。
 
 额度从不足 100% 恢复到 100% 时发送通知，包括使用重置卡、官方重置和额度窗口重置。仅检查新鲜的成功读取结果；持续满额或软件重启不重复通知，多个账号同次恢复合并发送。
 
@@ -41,7 +43,7 @@
 
 推荐直接发送单个文件：
 
-`CodexCompanion-Setup-v0.7.24.exe`
+`CodexCompanion-Setup-v0.7.25.exe`
 
 用户双击一次即可安装并启动，安装器已经内置 Node.js 和官方 Codex CLI，不再要求另外安装 Node.js、Codex CLI 或 Codex Switcher。已有 Switcher 账号的用户仍可在高级设置中一次性迁移；新用户直接使用 Companion 的通用网页登录或设备码登录。Codex 桌面应用可选，但想使用切换后自动打开功能时需要安装。
 

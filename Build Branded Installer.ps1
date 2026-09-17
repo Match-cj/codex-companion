@@ -152,7 +152,7 @@ begin
   if CurStep = ssPostInstall then
   begin
     if (not Exec(ExpandConstant('{tmp}\CodexCompanionSetup\Install Branded.cmd'), '', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)) or (ResultCode <> 0) then
-      RaiseException('Codex Companion 安装失败。详细信息已保存到临时目录中的 CodexCompanion-install.log。');
+      RaiseException('Codex Companion 安装失败。请把桌面的 CodexCompanion安装失败日志.txt 发给开发者。备用日志：' + ExpandConstant('{tmp}\CodexCompanion-install.log'));
   end;
 end;
 
