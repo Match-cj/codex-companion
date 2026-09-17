@@ -13,7 +13,7 @@ import * as Lark from '@larksuiteoapi/node-sdk';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.25';
+const APP_VERSION = '0.7.26';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -868,6 +868,25 @@ async function nativeVaultStatus() {
     readError: effective.error,
     dataDirectory: appDir,
   };
+}
+// Account-storage diagnostics must never hold up the entire dashboard.
+let lastPublicVaultStatus = null;
+let publicVaultStatusPending = null;
+async function boundedNativeVaultStatus() {
+  if (!publicVaultStatusPending) {
+    publicVaultStatusPending = nativeVaultStatus().then(value => {
+      lastPublicVaultStatus = value;
+      return value;
+    }).catch(error => ({ ready: false, readError: humanError(error) }))
+      .finally(() => { publicVaultStatusPending = null; });
+  }
+  let timer;
+  try {
+    return await Promise.race([
+      publicVaultStatusPending,
+      new Promise(resolve => { timer = setTimeout(() => resolve({ ...(lastPublicVaultStatus || { ready: false }), checking: true, readError: '账号库状态查询尚未完成，请稍后刷新。' }), 1000); }),
+    ]);
+  } finally { clearTimeout(timer); }
 }
 function queueNativeVaultWrite(action) {
   const next = nativeVaultWriteQueue.then(action, action);
@@ -2009,6 +2028,7 @@ function html() { return `<!doctype html><meta charset="utf-8"><title>Codex Comp
 async function api(u,o={}){let r=await fetch(u,{headers:{'Content-Type':'application/json'},...o});let j=await r.json();if(j.error)alert(j.error);return j}function fmt(x){return x?new Date(x*1000).toLocaleString():'-'}function render(s){accounts.innerHTML=(s.accounts||[]).map(a=>{let u=a.usage||{};return '<div class=card><b>'+a.name+'</b> <span class=muted>'+ (a.plan_type||'')+'</span><br>5小时：'+(u.primary_used_percent??'-')+'%<br>重置：'+fmt(u.primary_resets_at)+'<br>周：'+(u.secondary_used_percent??'-')+'%<br>重置：'+fmt(u.secondary_resets_at)+'<br><button onclick="sw(\''+a.id+'\')">切换</button></div>'}).join('');tasks.innerHTML=Object.values(s.tasks||{}).sort((a,b)=>b.startedAt.localeCompare(a.startedAt)).map(t=>'<div class=task><b>'+t.id+'</b> '+t.status+'<br>'+t.cwd+'<br>'+((t.output||'').slice(-2400))+'<br><button onclick="cont(\''+t.id+'\')">继续/追加</button><button onclick="stop(\''+t.id+'\')">停止</button></div>').join('')||'<span class=muted>暂无任务</span>';feishu.value=s.config.feishuWebhookUrl||''}async function load(){render(await api('/api/status'))}async function refresh(){await api('/api/accounts/refresh',{method:'POST',body:'{}'});load()}async function sw(id){await api('/api/accounts/switch',{method:'POST',body:JSON.stringify({id})});load()}async function start(){await api('/api/task',{method:'POST',body:JSON.stringify({prompt:promptEl.value,cwd:cwd.value})});promptEl.value='';load()}async function cont(id){let t=window.prompt('追加给 Codex 的文字（留空表示继续）','');if(t!==null){await api('/api/task/'+id+'/continue',{method:'POST',body:JSON.stringify({text:t||'继续完成当前任务，并汇报结果。'})});load()}}async function stop(id){await api('/api/task/'+id+'/stop',{method:'POST',body:'{}'});load()}async function save(){await api('/api/config',{method:'POST',body:JSON.stringify({feishuWebhookUrl:feishu.value})});alert('已保存')}const promptEl=document.getElementById('prompt'),cwd=document.getElementById('cwd'),feishu=document.getElementById('feishu');load();setInterval(load,5000)</script>`; }
 
 async function handle(req, res) {
+  if (req.method === 'GET' && req.url === '/api/health') return send(res, 200, { ok: true, version: APP_VERSION });
   const u = new URL(req.url, `http://${req.headers.host}`); const body = await new Promise(resolve => { let s=''; req.on('data',d=>s+=d); req.on('end',()=>resolve(s)); }); let data={}; try { data=body?JSON.parse(body):{}; } catch { data={}; }
   try {
     if (req.method==='GET'&&u.pathname==='/') return send(res,200,dashboardHtml,'text/html; charset=utf-8');
@@ -2035,7 +2055,7 @@ async function handle(req, res) {
         approvals:[...pendingApprovals.values()],
         deviceLogin:deviceLogin?.publicState()||null,
         browserLogin:browserLoginPublic(),
-        nativeVault:await nativeVaultStatus(),
+        nativeVault:await boundedNativeVaultStatus(),
         network:{addresses:addrs, tailscaleIp:tailscale, port}
       });
     }

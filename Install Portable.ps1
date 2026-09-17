@@ -117,7 +117,7 @@ try {
         # Use the bundled runtime, bypassing Windows PowerShell's system proxy.
         # A response from an older service is not proof the new install is ready.
         try {
-            $probe = 'const http=require("http");const r=http.get("http://127.0.0.1:17841/api/status",s=>{let b="";s.on("data",d=>b+=d);s.on("end",()=>{try{const j=JSON.parse(b);if(s.statusCode!==200||!j.version)throw Error("HTTP "+s.statusCode);console.log(JSON.stringify({version:j.version}))}catch(e){console.error(e.message);process.exitCode=1}})});r.setTimeout(2000,()=>r.destroy(Error("health timeout")));r.on("error",e=>{console.error(e.message);process.exitCode=1});' | & $node 2>&1
+            $probe = 'const http=require("http");const r=http.get("http://127.0.0.1:17841/api/health",s=>{let b="";s.on("data",d=>b+=d);s.on("end",()=>{try{const j=JSON.parse(b);if(s.statusCode!==200||!j.ok||!j.version)throw Error("HTTP "+s.statusCode);console.log(JSON.stringify({version:j.version}))}catch(e){console.error(e.message);process.exitCode=1}})});r.setTimeout(2000,()=>r.destroy(Error("health timeout")));r.on("error",e=>{console.error(e.message);process.exitCode=1});' | & $node 2>&1
             if ($LASTEXITCODE -ne 0) { throw ($probe -join ' ') }
             $candidate = ($probe -join '') | ConvertFrom-Json
             if ([string]$candidate.version -ne [string]$manifest.version) { throw "Expected version $($manifest.version), received $($candidate.version)" }
