@@ -13,7 +13,7 @@ import * as Lark from '@larksuiteoapi/node-sdk';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.23';
+const APP_VERSION = '0.7.24';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -1634,9 +1634,17 @@ function confirmationDetails(method, params) {
   }
   return `原因：${params.reason || ''}\n命令：${Array.isArray(params.command) ? params.command.join(' ') : params.command || ''}`;
 }
+function observeQuotaRecovery(observations, key, used) {
+  if (!Number.isFinite(used) || used < 0 || used > 100) return false;
+  const previous = observations[key];
+  observations[key] = used;
+  return Number.isFinite(previous) && previous > 0 && used === 0;
+}
 async function checkQuotaNotices() {
   const nowSeconds = Math.floor(Date.now() / 1000);
   const restored = [];
+  if (!config.quotaRecoveryObservations || typeof config.quotaRecoveryObservations !== 'object' || Array.isArray(config.quotaRecoveryObservations)) config.quotaRecoveryObservations = {};
+  let recoveryObservationsChanged = false;
   const accountStillExists = account => accounts.some(current => String(current.id) === String(account.id));
   for (const account of accounts) {
     // A prior notification can yield to the HTTP handler. Re-check membership so an
@@ -1671,7 +1679,15 @@ async function checkQuotaNotices() {
       const key = `${account.id}:${label}`;
       const previous = quotaNotifierState.get(key);
       const state = previous || { state: 'normal', resetSoonNotified: false, resetCycle: resetAt || 0 };
-      if (Number.isFinite(used) && Number.isFinite(state.previousUsed) && state.previousUsed >= 99 && used <= 1) restored.push({ account: account.name, type: label });
+      // Only observe fresh successful readings. Cached snapshots and failed reads
+      // must not re-arm a recovery notice or turn a missing window into 100%.
+      if (!account.usage?.cached && !account.usage?.error && account.usage?.[usedKey] != null) {
+        const recoveryKey = `${account.id}:${Number(account.usage?.[windowKey]) || label}`;
+        if (observeQuotaRecovery(config.quotaRecoveryObservations, recoveryKey, used)) {
+          restored.push({ id: account.id, account: account.display_name || account.name, type: label });
+        }
+        recoveryObservationsChanged = true;
+      }
       state.previousUsed = Number.isFinite(used) ? used : state.previousUsed;
       quotaNotifierState.set(key, state);
 
@@ -1702,9 +1718,12 @@ async function checkQuotaNotices() {
       }
     }
   }
-  if (restored.length) {
-    const lines = restored.map(item => `账号：${item.account} · ${item.type}`).join('\n');
-    await notify(`Codex 额度已恢复\n${lines}\n\n额度已回到可用状态。`, { appName: 'Codex 额度' });
+  // Save before sending: restarting Companion must not repeat the same recovery.
+  if (recoveryObservationsChanged) await saveConfig();
+  const currentRestored = restored.filter(item => accounts.some(account => String(account.id) === String(item.id)));
+  if (currentRestored.length) {
+    const lines = currentRestored.map(item => `账号：${item.account} · ${item.type} · 剩余 100%`).join('\n');
+    await notify(`Codex 额度已恢复至 100%\n${lines}\n\n使用重置卡、官方重置或额度窗口重置都会触发此通知。`, { appName: 'Codex 额度' });
   }
 }
 

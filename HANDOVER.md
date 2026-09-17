@@ -1,6 +1,8 @@
 # Codex Companion 交接文档
 
-当前稳定版本：**v0.7.23**（2026-09-16）
+当前稳定版本：**v0.7.24**（2026-09-17）
+
+额度恢复通知：新鲜成功读取中，已观测的消耗比例从大于 0 回到 0 时通知，覆盖重置卡和正常窗口重置。观测值持久化，防止重启重复；首次读取满额不补发，多个恢复项合并通知。
 
 ## 当前功能
 
@@ -37,7 +39,7 @@ Codex Switcher 不再是运行依赖。若机器上已有 Switcher，Companion �
 
 ## 对外分发
 
-推荐把单个 `CodexCompanion-Setup-v0.7.23.exe` 交给用户。用户只需双击一次，安装器会：
+推荐把单个 `CodexCompanion-Setup-v0.7.24.exe` 交给用户。用户只需双击一次，安装器会：
 
 1. 解压到 `%LOCALAPPDATA%\Programs\CodexCompanion`；
 2. 安装内置 Node.js 与官方 Codex CLI 运行时；
@@ -85,7 +87,7 @@ Codex Switcher 不再是运行依赖。若机器上已有 Switcher，Companion �
 
 ## 已验证基线
 
-- `/api/status`：v0.7.23，返回全部账号、`alias` / `display_name`、重置数量/最近到期时间、Codex 会话监听、飞书长连接状态及 `nativeVault` 备份状态；
+- `/api/status`：v0.7.24，返回全部账号、`alias` / `display_name`、重置数量/最近到期时间、Codex 会话监听、飞书长连接状态及 `nativeVault` 备份状态；
 - 浮窗原生置顶保活：失焦及两秒定时器调用 SetWindowPos(HWND_TOPMOST, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE)，关闭窗口停止定时器；自检故意降级后确认 TopmostRestored=true、NoFocusSteal=true。
 - 冷启动保护：后台服务每次最多等待 45 秒，首次未就绪时静默结束并重试一次；两次均失败后才弹窗，同时保留每次尝试的进程与日志记录。
 - 删除账号先持久化 ID、账号 ID、邮箱三重墓碑，再修改账号库并清除内存提醒状态；旧来源、备份与并发额度扫描均不能重新产生该账号的提醒。
