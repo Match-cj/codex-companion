@@ -14,7 +14,7 @@ import { relayFinalImages, validateImageRoot } from './image-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.31';
+const APP_VERSION = '0.7.32';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -98,6 +98,7 @@ let lastAccountRefreshAt = 0;
 let officialRateLimits = null;
 let deviceLogin = null;
 let browserLogin = null;
+let browserLoginInFlight = null;
 let nativeSwitchInProgress = false;
 const nativeWarmupsInProgress = new Set();
 let taskEngineError = '';
@@ -1600,7 +1601,9 @@ async function importOrUpdateAccount(contents, requestedName) {
     plan_type: authClaims.chatgpt_plan_type || existing?.plan_type || null,
     subscription_expires_at: authClaims.chatgpt_subscription_active_until || existing?.subscription_expires_at || null,
   });
-  await refreshAccounts({ forceNative: true, awaitNative: true });
+  // Persisted login is complete even if external quota endpoints are slow.
+  accounts = await loadNativeAccountsSnapshot().catch(() => accounts);
+  refreshAccounts({ forceNative: true, awaitNative: false }).catch(() => console.error('[login quota refresh] failed'));
   return { ...imported, updated: Boolean(existing) };
 }
 function loginBusy() {
@@ -1608,6 +1611,7 @@ function loginBusy() {
 }
 function base64Url(value) { return Buffer.from(value).toString('base64url'); }
 function startBrowserLogin(name) {
+  if (browserLoginInFlight) throw Error('正在处理本次登录，请等待结果，不要重复生成链接。');
   if (loginBusy()) throw Error('还有 Companion 任务正在运行或等待确认。请先处理任务，再登录或更新账号。');
   const verifier = base64Url(randomBytes(64));
   const challenge = createHash('sha256').update(verifier).digest('base64url');
@@ -1621,50 +1625,91 @@ function startBrowserLogin(name) {
 }
 function browserLoginPublic() {
   if (!browserLogin) return { status: 'idle' };
-  const { verifier, state, redirectUri, clientId, name, ...safe } = browserLogin;
-  return safe;
+  return { status: browserLogin.status, message: browserLogin.message || '', errorCode: browserLogin.errorCode || '',
+    step: browserLogin.step || '', accountName: browserLogin.accountName || '',
+    canRetrySave: browserLogin.status === 'failed' && !!browserLogin.pendingAuth,
+    ...(browserLogin.status === 'waiting' ? { authUrl: browserLogin.authUrl } : {}) };
+}
+async function browserSystemProxy() {
+  if (process.env.HTTPS_PROXY || process.env.https_proxy || process.env.ALL_PROXY || process.env.all_proxy) return '';
+  try {
+    const script = "$ErrorActionPreference='Stop';$target=[Uri]'https://auth.openai.com';$proxy=[Net.WebRequest]::GetSystemWebProxy().GetProxy($target);if($proxy -and $proxy.AbsoluteUri -ne $target.AbsoluteUri){[Console]::Out.Write($proxy.AbsoluteUri)}";
+    const result = await execFileAsync('powershell.exe', ['-NoLogo','-NoProfile','-NonInteractive','-Command',script], { windowsHide: true, timeout: 5000, maxBuffer: 4096 });
+    const url = new URL(String(result.stdout || '').trim());
+    if (['http:','https:'].includes(url.protocol) && !url.username && !url.password) return url.toString();
+  } catch {}
+  return '';
 }
 async function postFormThroughSystemProxy(url, form) {
   if (process.platform !== 'win32' || !existsSync(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'curl.exe'))) {
-    const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form });
+    const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form, signal: AbortSignal.timeout(30000) });
     return { status: response.status, body: await response.text() };
   }
+  const proxy = await browserSystemProxy();
   return await new Promise((resolve, reject) => {
-    const curl = spawn('curl.exe', ['--silent', '--show-error', '--request', 'POST', '--header', 'Content-Type: application/x-www-form-urlencoded', '--data-binary', '@-', '--write-out', '\nCODEX_HTTP_STATUS:%{http_code}', url], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
+    const curl = spawn('curl.exe', ['--silent', '--show-error', '--connect-timeout','10','--max-time','30', ...(proxy ? ['--proxy',proxy] : []), '--request', 'POST', '--header', 'Content-Type: application/x-www-form-urlencoded', '--data-binary', '@-', '--write-out', '\nCODEX_HTTP_STATUS:%{http_code}', url], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
     let stdout = '', stderr = '';
     curl.stdout.setEncoding('utf8'); curl.stderr.setEncoding('utf8');
     curl.stdout.on('data', chunk => stdout += chunk); curl.stderr.on('data', chunk => stderr += chunk);
-    curl.on('error', reject);
-    curl.on('exit', code => {
+    const timer = setTimeout(() => { curl.kill(); reject(Error('LOGIN_NETWORK_TIMEOUT')); }, 35000);
+    curl.stdin.on('error', () => {});
+    curl.on('error', () => { clearTimeout(timer); reject(Error('LOGIN_NETWORK_ERROR')); });
+    curl.on('close', code => {
+      clearTimeout(timer);
       const marker = '\nCODEX_HTTP_STATUS:';
       const index = stdout.lastIndexOf(marker);
-      if (index < 0) return reject(Error(stderr.trim() || `代理请求没有返回状态（${code ?? '-'}）`));
+      if (code !== 0 || index < 0) return reject(Error(code === 28 ? 'LOGIN_NETWORK_TIMEOUT' : 'LOGIN_NETWORK_ERROR'));
       resolve({ status: Number(stdout.slice(index + marker.length).trim()), body: stdout.slice(0, index) });
     });
     curl.stdin.end(form.toString());
   });
 }
 async function completeBrowserLogin(callbackUrl) {
-  if (!browserLogin || browserLogin.status !== 'waiting') throw Error('这次网页登录已经失效，请重新点击“普通网页登录”。');
-  if (Date.now() - browserLogin.startedAt > 15 * 60 * 1000) throw Error('登录地址已经超过 15 分钟，请重新生成。');
+  if (browserLogin?.status === 'completed') return browserLoginPublic();
+  if (!browserLogin || !['waiting','importing','failed'].includes(browserLogin.status)) throw Error('这次网页登录已经失效，请重新点击“普通网页登录”。');
+  const login = browserLogin;
+  const fail = (code, message, terminal = true) => { login.errorCode = code; login.message = message; if (terminal) login.status = 'failed'; return Error(`[${code}] ${message}`); };
+  if (Date.now() - login.startedAt > 15 * 60 * 1000) { delete login.pendingAuth; throw fail('LOGIN_EXPIRED','本次登录已超过15分钟，请重新生成登录链接。'); }
+  if (browserLoginInFlight) return browserLoginInFlight;
+  if (login.status === 'failed' && !login.pendingAuth) throw Error(`[${login.errorCode}] ${login.message} 请重新点击“通用网页登录”。`);
+  let code = '';
+  if (!login.pendingAuth) {
   let callback;
-  try { callback = new URL(String(callbackUrl || '').trim()); } catch { throw Error('粘贴的不是完整地址。请复制以 http://localhost:1455/auth/callback 开头的整条地址。'); }
-  if (callback.hostname !== 'localhost' || callback.port !== '1455' || callback.pathname !== '/auth/callback') throw Error('地址不对。请复制登录完成后浏览器地址栏里以 localhost:1455 开头的完整地址。');
-  if (callback.searchParams.get('state') !== browserLogin.state) throw Error('这个地址不属于当前登录，请重新生成登录链接。');
-  if (callback.searchParams.get('error')) throw Error(`OpenAI 没有允许登录：${callback.searchParams.get('error_description') || callback.searchParams.get('error')}`);
-  const code = callback.searchParams.get('code');
-  if (!code) throw Error('地址里没有登录凭据，请确认已经在 OpenAI 页面点了继续。');
-  browserLogin.status = 'importing';
-  const form = new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: browserLogin.redirectUri, client_id: browserLogin.clientId, code_verifier: browserLogin.verifier });
-  const response = await postFormThroughSystemProxy('https://auth.openai.com/oauth/token', form);
-  let tokenResult = {}; try { tokenResult = JSON.parse(response.body); } catch {}
-  if (response.status < 200 || response.status >= 300) { browserLogin.status = 'failed'; throw Error(tokenResult.error_description || tokenResult.error?.message || tokenResult.error || `OpenAI 登录交换失败（${response.status}）`); }
-  const claims = decodeJwtPayload(tokenResult.id_token);
-  const accountId = claims['https://api.openai.com/auth']?.chatgpt_account_id || null;
-  const contents = JSON.stringify({ tokens: { id_token: tokenResult.id_token, access_token: tokenResult.access_token, refresh_token: tokenResult.refresh_token, account_id: accountId }, last_refresh: new Date().toISOString() });
-  const imported = await importOrUpdateAccount(contents, browserLogin.name);
-  browserLogin = { status: 'completed', accountName: imported?.name || imported?.email || '账号', message: imported?.updated ? '原有账号的登录已经更新。' : '新账号已经添加。' };
-  return browserLoginPublic();
+  try { callback = new URL(String(callbackUrl || '').trim()); } catch { throw fail('CALLBACK_INVALID','请复制最后的完整 localhost 回调地址。',false); }
+  if (callback.protocol !== 'http:' || callback.hostname !== 'localhost' || callback.port !== '1455' || callback.pathname !== '/auth/callback') throw fail('CALLBACK_INVALID','地址不对，请复制最后的完整 localhost:1455 回调地址。',false);
+  if (callback.searchParams.get('state') !== login.state) throw fail('CALLBACK_MISMATCH','该地址属于旧登录，请复制当前授权窗口最后的地址。',false);
+  if (callback.searchParams.get('error')) throw fail('AUTH_DENIED','授权未通过，请重新生成链接并确认授权。');
+  code = callback.searchParams.get('code');
+  if (!code) throw fail('CALLBACK_INCOMPLETE','地址缺少授权结果，请在授权页面完成继续操作。',false);
+  }
+  login.status = 'importing'; login.errorCode = ''; login.step = login.pendingAuth ? 'save' : 'exchange';
+  login.message = login.pendingAuth ? '授权已完成，正在加密保存账号……' : '授权地址已收到，正在连接 OpenAI 交换登录凭据（约35秒内返回结果）……';
+  browserLoginInFlight = Promise.resolve().then(async () => {
+    if (!login.pendingAuth) {
+      const form = new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: login.redirectUri, client_id: login.clientId, code_verifier: login.verifier });
+      let response;
+      try { response = await postFormThroughSystemProxy('https://auth.openai.com/oauth/token', form); }
+      catch (error) { throw fail(error.message === 'LOGIN_NETWORK_TIMEOUT' || /timeout|abort/i.test(error.name || '') ? 'LOGIN_NETWORK_TIMEOUT' : 'LOGIN_NETWORK_ERROR','后台无法完成 OpenAI 登录连接，请检查代理/网络，然后重新生成登录链接。'); }
+      let result = {}; try { result = JSON.parse(response.body); } catch {}
+      if (response.status < 200 || response.status >= 300) {
+        const remoteCode = typeof result.error === 'string' ? result.error : result.error?.code;
+        if (remoteCode === 'invalid_grant') throw fail('AUTH_CODE_REJECTED','授权结果过期或已被使用，请重新生成链接，不要重复提交旧地址。');
+        throw fail('TOKEN_HTTP_ERROR',`OpenAI 凭据交换未通过（HTTP ${Number(response.status) || 0}），请检查后台代理/网络或账号授权后重新生成链接。`);
+      }
+      if (!result.id_token || !result.access_token || !result.refresh_token) throw fail('TOKEN_INCOMPLETE','授权服务未返回完整登录凭据，请重新登录。');
+      const claims = decodeJwtPayload(result.id_token);
+      login.pendingAuth = JSON.stringify({ tokens: { id_token: result.id_token, access_token: result.access_token, refresh_token: result.refresh_token, account_id: claims['https://api.openai.com/auth']?.chatgpt_account_id || null }, last_refresh: new Date().toISOString() });
+    }
+    login.step = 'save'; login.message = '授权已完成，正在加密保存账号……';
+    let imported;
+    try { imported = await importOrUpdateAccount(login.pendingAuth, login.name); if (!imported?.id) throw Error('Missing saved account'); }
+    catch { throw fail('ACCOUNT_SAVE_FAILED','授权成功，但本机账号保存失败。可点击“重试保存”，不用再次授权；若仍失败请发送此错误编号。'); }
+    delete login.pendingAuth; delete login.verifier; delete login.authUrl;
+    login.status = 'completed'; login.step = 'done'; login.accountName = imported.name || imported.email || '账号';
+    login.message = `${imported.updated ? '原有账号登录已更新。' : '新账号已保存。'}额度正在后台读取，不影响账号录入。`;
+    return browserLoginPublic();
+  }).finally(() => { browserLoginInFlight = null; });
+  return browserLoginInFlight;
 }
 function withoutLegacyQuotaWindows(usage = {}) {
   const result = { ...usage };
@@ -2314,7 +2359,7 @@ async function handle(req, res) {
     if (req.method==='POST'&&u.pathname==='/api/device-login/cancel'){if(deviceLogin)await deviceLogin.cancel();return send(res,200,{ok:true});}
     if (req.method==='POST'&&u.pathname==='/api/browser-login/start') return send(res,200,startBrowserLogin(data.name));
     if (req.method==='POST'&&u.pathname==='/api/browser-login/complete') return send(res,200,await completeBrowserLogin(data.callbackUrl));
-    if (req.method==='POST'&&u.pathname==='/api/browser-login/cancel'){browserLogin={status:'canceled',message:'已取消这次登录。'};return send(res,200,{ok:true});}
+    if (req.method==='POST'&&u.pathname==='/api/browser-login/cancel'){if(browserLoginInFlight)throw Error('正在交换或保存账号，请等待结果后再取消。');browserLogin={status:'canceled',message:'已取消这次登录。'};return send(res,200,{ok:true});}
     if (req.method==='POST'&&u.pathname==='/api/widget/open') return send(res,200,await openQuotaWidget());
     if (req.method==='GET'&&u.pathname==='/api/codex/status') return send(res,200,{running:await isCodexDesktopRunning()});
     if (req.method==='POST'&&u.pathname==='/api/accounts/switch'){
