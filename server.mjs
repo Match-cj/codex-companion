@@ -13,7 +13,7 @@ import * as Lark from '@larksuiteoapi/node-sdk';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.29';
+const APP_VERSION = '0.7.30';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -68,13 +68,26 @@ function publicConfig() {
     publicDashboardUrl: config.publicDashboardUrl, quotaRefreshMinutes: config.quotaRefreshMinutes, resetReminderMinutes: config.resetReminderMinutes };
 }
 function publicDiagnostics() {
-  return { format: 1, appVersion: APP_VERSION, createdAt: new Date().toISOString(),
+  const report = { format: 1, appVersion: APP_VERSION, createdAt: new Date().toISOString(),
     runtime: { node: process.version, platform: process.platform, arch: process.arch },
     health: { taskEngineReady: !!codex?.proc, sessionMonitorReady: codexSessionWatcherReady,
       feishuState: publicFeishuState().state, webhookConfigured: !!config.feishuWebhookUrl,
       operatorVerified: !!config.feishuAllowedUserIds?.length, remoteEnabled: !!config.remoteAccessEnabled },
     counts: { accounts: accounts.length, activeBackendTasks: [...tasks.values()].filter(t => ['starting','running','waiting_confirmation'].includes(t.status)).length },
     privacy: '仅包含白名单状态和数量；不包含账号身份、路径、任务内容、原始日志、网络地址或任何凭据。' };
+  report.issues = diagnosticIssues(report);
+  return report;
+}
+function diagnosticIssues(report) {
+  const issues = [], add = (code, severity, message) => issues.push({ code, severity, message });
+  if (!report.counts.accounts) add('ACCOUNT_MISSING','warning','还没有添加账号：导入本机文件凭据或使用通用网页登录。');
+  if (!report.health.taskEngineReady) add('ENGINE_NOT_READY','warning','后台任务引擎尚未就绪。请稍后刷新；持续失败时导出诊断。');
+  if (!report.health.sessionMonitorReady) add('MONITOR_NOT_READY','warning','主对话记录监听尚未就绪，桌面任务完成通知可能不可用。');
+  if (!report.health.webhookConfigured && report.health.feishuState === 'not_configured') add('FEISHU_OPTIONAL','info','飞书尚未配置：不影响本机使用；需要通知或手机回复时再设置。');
+  else if (!['connected','not_configured'].includes(report.health.feishuState)) add('FEISHU_DISCONNECTED','warning','应用机器人尚未连接。检查飞书应用配置、发布状态及网络。');
+  if (report.health.feishuState === 'connected' && !report.health.operatorVerified) add('OPERATOR_UNVERIFIED','warning','飞书回复控制未验证：复制本机指令，在群里 @ 自建应用机器人后发送。');
+  if (report.health.remoteEnabled) add('REMOTE_HTTP','info','远程控制已开启。仅在可信私有网络使用；HTTP 本身不提供传输加密。');
+  return issues;
 }
 let accounts = [];
 let lastAccountRefreshAt = 0;
@@ -124,7 +137,7 @@ function publicTaskActivity() {
   const rows = new Map([...sessionActivities].filter(([, row]) => row.status === 'recorded_running'));
   for (const task of tasks.values()) {
     if (['starting', 'running', 'waiting_confirmation'].includes(task.status)) rows.set(String(task.id), {
-      id: String(task.id), title: task.prompt || '', cwd: task.cwd || '', status: task.status,
+      id: String(task.id), title: task.prompt || '', cwd: task.cwd || '', status: task.stopRequested ? 'stop_requested' : task.status,
       source: task.remoteDesktopTakeover ? 'takeover' : 'companion', lastObservedAt: task.lastEventAt,
     });
     else if ((rows.get(String(task.id))?.lastObservedAt || 0) <= (task.lastEventAt || 0)) rows.delete(String(task.id));
@@ -2095,13 +2108,27 @@ class CodexServer {
     return task;
   }
   async continueTask(task, input) {
+    if ((task.stopRequested || this.stopRequests?.has(task.id)) && ['starting','running','waiting_confirmation'].includes(task.status)) throw Error('停止请求尚未确认，请等本轮结束后再追加任务。');
+    task.stopRequested = false;
     const items = Array.isArray(input) ? input : [{ type: 'text', text: String(input || '') }];
     const active = this.turns.get(task.id);
     if (active) await this.request('turn/steer', { threadId: task.id, input: items, expectedTurnId: active });
     else await this.request('turn/start', { threadId: task.id, input: items, cwd: task.cwd });
     task.status = 'running'; task.lastEventAt = Date.now(); task.stallNotified = false;
   }
-  async stopTask(task) { const turn = this.turns.get(task.id); if (turn) await this.request('turn/interrupt', { threadId: task.id, turnId: turn }); task.status = 'interrupted'; }
+  async stopTask(task) {
+    if (!['starting','running','waiting_confirmation'].includes(task.status) || task.stopRequested) return;
+    const turn = this.turns.get(task.id);
+    if (!turn) throw Error('尚未获取本轮任务标识，不能确认停止。请稍后重试，不会直接标记为已停止。');
+    this.stopRequests ||= new Map();
+    if (this.stopRequests.has(task.id)) return this.stopRequests.get(task.id);
+    const pending = this.request('turn/interrupt', { threadId: task.id, turnId: turn }).then(() => {
+      // RPC acceptance is not proof the turn has ended; wait for completion event.
+      if (['starting','running','waiting_confirmation'].includes(task.status)) task.stopRequested = true;
+    }).finally(() => this.stopRequests.delete(task.id));
+    this.stopRequests.set(task.id, pending);
+    return pending;
+  }
   receive(line) {
     if (!line.trim()) return; let msg; try { msg = JSON.parse(line); } catch { return; }
     if (msg.id !== undefined && this.pending.has(msg.id)) { const p = this.pending.get(msg.id); clearTimeout(p.timer); this.pending.delete(msg.id); if (msg.error) p.reject(new Error(msg.error.message || JSON.stringify(msg.error))); else p.resolve(msg.result); return; }
@@ -2164,6 +2191,7 @@ async function handle(req, res) {
         accounts,
         tasks:Object.fromEntries(tasks),
         taskActivity:{ rows: publicTaskActivity(), monitorReady: codexSessionWatcherReady, note: '桌面任务依据最近本地记录显示，不是客户端实时运行保证；历史记录只用于展示，不补发通知。' },
+        diagnosticIssues:publicDiagnostics().issues,
         approvals:[...pendingApprovals.values()],
         deviceLogin:deviceLogin?.publicState()||null,
         browserLogin:browserLoginPublic(),
