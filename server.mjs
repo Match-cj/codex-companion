@@ -137,7 +137,7 @@ function publicTaskActivity() {
   const rows = new Map([...sessionActivities].filter(([, row]) => row.status === 'recorded_running'));
   for (const task of tasks.values()) {
     if (['starting', 'running', 'waiting_confirmation'].includes(task.status)) rows.set(String(task.id), {
-      id: String(task.id), title: task.prompt || '', cwd: task.cwd || '', status: task.stopRequested ? 'stop_requested' : task.status,
+      id: String(task.id), title: task.prompt || '', cwd: task.cwd || '', status: task.stopRequested && ['starting','running','waiting_confirmation'].includes(task.status) ? 'stop_requested' : task.status,
       source: task.remoteDesktopTakeover ? 'takeover' : 'companion', lastObservedAt: task.lastEventAt,
     });
     else if ((rows.get(String(task.id))?.lastObservedAt || 0) <= (task.lastEventAt || 0)) rows.delete(String(task.id));
