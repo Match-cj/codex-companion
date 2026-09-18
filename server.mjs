@@ -13,7 +13,7 @@ import * as Lark from '@larksuiteoapi/node-sdk';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.27';
+const APP_VERSION = '0.7.28';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -95,6 +95,45 @@ const codexSessionOffsets = new Map();
 const codexSessionPartials = new Map();
 const codexSessionDebounces = new Map();
 const codexSessionKinds = new Map();
+const sessionActivities = new Map();
+function observeSessionActivity(event, kind, threadId, cwd = '') {
+  if (kind !== 'user' || !threadId || event?.type !== 'event_msg') return;
+  const payload = event.payload || {};
+  const previous = sessionActivities.get(threadId) || { id: threadId, source: 'desktop', status: 'unknown', title: '', cwd };
+  const timestamp = Date.parse(event.timestamp || '');
+  if (Number.isFinite(timestamp)) previous.lastObservedAt = timestamp;
+  if (payload.type === 'user_message' && payload.message) previous.title = String(payload.message).slice(0, 100);
+  if (payload.type === 'task_started') { previous.status = 'recorded_running'; previous.turnId = String(payload.turn_id || ''); }
+  if (['task_complete', 'turn_aborted'].includes(payload.type)) {
+    // A delayed completion for an older turn must not hide a newer active turn.
+    if (!previous.turnId || !payload.turn_id || previous.turnId === String(payload.turn_id)) previous.status = payload.type === 'task_complete' ? 'completed' : 'interrupted';
+  }
+  sessionActivities.set(threadId, previous);
+  if (sessionActivities.size > 300) sessionActivities.delete(sessionActivities.keys().next().value);
+}
+function publicTaskActivity() {
+  const rows = new Map([...sessionActivities].filter(([, row]) => row.status === 'recorded_running'));
+  for (const task of tasks.values()) {
+    if (['starting', 'running', 'waiting_confirmation'].includes(task.status)) rows.set(String(task.id), {
+      id: String(task.id), title: task.prompt || '', cwd: task.cwd || '', status: task.status,
+      source: task.remoteDesktopTakeover ? 'takeover' : 'companion', lastObservedAt: task.lastEventAt,
+    });
+    else if ((rows.get(String(task.id))?.lastObservedAt || 0) <= (task.lastEventAt || 0)) rows.delete(String(task.id));
+  }
+  return [...rows.values()].sort((a, b) => (b.lastObservedAt || 0) - (a.lastObservedAt || 0));
+}
+async function seedSessionActivity(file, kind, stat) {
+  if (kind !== 'user' || Date.now() - stat.mtimeMs > 48 * 3600000) return;
+  const handle = await fs.open(file, 'r');
+  try {
+    const size = Math.min(stat.size, 1024 * 1024), start = stat.size - size;
+    const buffer = Buffer.alloc(size);
+    const { bytesRead } = await handle.read(buffer, 0, size, start);
+    const lines = buffer.subarray(0, bytesRead).toString('utf8').split(/\r?\n/);
+    if (start) lines.shift();
+    for (const line of lines) { try { observeSessionActivity(JSON.parse(line), kind, sessionThreadId(file)); } catch {} }
+  } finally { await handle.close(); }
+}
 
 const jsonHeaders = { 'content-type': 'application/json; charset=utf-8' };
 const trim = (s, n) => String(s || '').length <= n ? String(s || '') : String(s || '').slice(-n);
@@ -731,7 +770,7 @@ async function handleFeishuMessage(data) {
       feishuPairingCode = randomBytes(12).toString('hex');
       await saveConfig();
       const thread = await bindLatestFeishuThread();
-      await sendFeishuAppText(`操作者验证成功，已绑定本群。\n当前对话：${thread.name}`, { replyTo: message.message_id, taskId: thread.id });
+      await sendFeishuAppText(`操作者验证成功，已绑定本群。\n默认回复对话：${thread.name}\n\n可同时监控多个任务。回复某条任务通知会继续该通知对应的对话；不引用通知的群消息进入默认对话。`, { replyTo: message.message_id, taskId: thread.id });
       return;
     }
     if (/^绑定\s+[a-f0-9]{24}$/i.test(incomingText)) return; // Never submit a replayed pairing secret as a task.
@@ -763,7 +802,7 @@ async function handleFeishuMessage(data) {
     if (!config.feishuBoundChatId || /^(绑定|bind)$/i.test(text)) {
       config.feishuBoundChatId = chatId;
       const thread = await bindLatestFeishuThread();
-      await sendFeishuAppText(`已绑定本群\n\n当前 Codex 对话：${thread.name}\n\n以后回复机器人通知，会继续这条对话。`, { replyTo: message.message_id, taskId: thread.id });
+      await sendFeishuAppText(`已绑定本群\n\n默认回复对话：${thread.name}\n\n这不是任务数量限制。回复任务通知会继续对应对话；不引用通知的消息才进入默认对话。`, { replyTo: message.message_id, taskId: thread.id });
       return;
     }
     if (chatId !== config.feishuBoundChatId) return;
@@ -1900,6 +1939,7 @@ async function processCodexSessionAppend(file) {
         codexSessionKinds.set(file, sessionKindFromMeta(event.payload));
         continue;
       }
+      observeSessionActivity(event, codexSessionKinds.get(file) || 'unknown', sessionThreadId(file));
       if (event?.type !== 'event_msg' || event?.payload?.type !== 'task_complete') continue;
       const cachedKind = codexSessionKinds.get(file) || 'unknown';
       const freshKind = await readCodexSessionKind(file);
@@ -1928,6 +1968,7 @@ async function startCodexSessionMonitor() {
     if (stat) {
       codexSessionOffsets.set(file, stat.size);
       codexSessionKinds.set(file, await readCodexSessionKind(file));
+      await seedSessionActivity(file, codexSessionKinds.get(file), stat).catch(error => console.error('[activity seed]', error.message));
     }
   }
   try {
@@ -2107,6 +2148,7 @@ async function handle(req, res) {
         feishu:publicFeishuState(),
         accounts,
         tasks:Object.fromEntries(tasks),
+        taskActivity:{ rows: publicTaskActivity(), monitorReady: codexSessionWatcherReady, note: '桌面任务依据最近本地记录显示，不是客户端实时运行保证；历史记录只用于展示，不补发通知。' },
         approvals:[...pendingApprovals.values()],
         deviceLogin:deviceLogin?.publicState()||null,
         browserLogin:browserLoginPublic(),

@@ -1,6 +1,12 @@
 # Codex Companion
 
-独立的 Windows Codex 伴侣程序。当前稳定基线为 v0.7.27：
+独立的 Windows Codex 伴侣程序。当前稳定基线为 v0.7.28：
+
+## 活动任务
+
+网页独立显示“活动任务与默认回复”，区分 Companion 后台、后台接管和桌面主对话记录。飞书绑定提示明确为“默认回复对话”，不是任务数量限制。桌面任务依据主对话 `task_started` / `task_complete` / `turn_aborted` 记录，不能保证客户端当前仍在运行；异常退出可能留下未结束记录。启动时仅读取近 48 小时修改的主对话文件末尾最多 1MB 恢复显示，不补发历史通知；长任务的开始事件不在尾部时可能暂时无法显示。子代理、未知来源不计入活动列表。
+
+回归测试：`node --test tests/*.test.mjs`，覆盖并行主对话、子代理过滤、迟到结束事件、同一对话去重和安全控制。
 
 ## 发布前安全基础
 
@@ -53,7 +59,7 @@
 
 推荐直接发送单个文件：
 
-`CodexCompanion-Setup-v0.7.27.exe`
+`CodexCompanion-Setup-v0.7.28.exe`
 
 用户双击一次即可安装并启动，安装器已经内置 Node.js 和官方 Codex CLI，不再要求另外安装 Node.js、Codex CLI 或 Codex Switcher。已有 Switcher 账号的用户仍可在高级设置中一次性迁移；新用户直接使用 Companion 的通用网页登录或设备码登录。Codex 桌面应用可选，但想使用切换后自动打开功能时需要安装。
 
