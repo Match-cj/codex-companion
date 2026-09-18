@@ -32,6 +32,13 @@ test('remote control requires opt-in and correct token, without exposing hash', 
   assert(!publicData.includes('secret'));
   assert(!publicData.includes(config.remoteAccessTokenHash));
 });
+test('diagnostic allowlist never includes credentials, paths, identities or task content', () => {
+  const c=accessContext({feishuWebhookUrl:'sensitive-webhook',feishuAllowedUserIds:['private-user']});
+  Object.assign(c,{APP_VERSION:'test',process:{version:'test',platform:'win32',arch:'x64'},codex:{proc:{}},codexSessionWatcherReady:true,publicFeishuState:()=>({state:'connected',error:'sensitive-error'}),accounts:[{email:'sensitive-email'}],tasks:new Map([['private-id',{status:'running',prompt:'sensitive-task',cwd:'private-path'}]])});
+  const report=c.publicDiagnostics(),text=JSON.stringify(report);
+  assert.equal(report.counts.accounts,1);assert.equal(report.counts.activeBackendTasks,1);
+  for(const value of ['sensitive','private-user','private-id','private-path'])assert(!text.includes(value));
+});
 test('Feishu rejects unapproved senders and pairs only with local secret', async () => {
   let continued = 0, saved = 0;
   const config = { feishuAllowedUserIds: [], feishuBoundChatId: 'old-group', feishuBoundThreadId: 'thread-a' };

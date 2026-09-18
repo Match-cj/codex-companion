@@ -1,6 +1,8 @@
 # Codex Companion 交接文档
 
-当前版本：**v0.7.28**（2026-09-18，活动任务展示）
+当前版本：**v0.7.29**（2026-09-18，首次使用检查及诊断导出）
+
+新增顶部首次使用检查、定位配置和导入入口。本机 GET `/api/diagnostics` 导出固定字段白名单 JSON，不带日志、身份、路径、内容和凭据；远程禁止导出。图片回传、完整来源/许可审计、新电脑验收未完成。
 
 本轮新增：默认回复目标与活动列表分离；本地 user 主对话开始/完成/中止记录展示；近 48h 修改文件尾部最多 1MB 恢复活动，不发送历史通知；后台活动、接管、桌面记录分类且按对话 ID 去重。桌面记录不等同于实时执行保证，未知来源和子代理过滤。
 
@@ -49,7 +51,7 @@ Codex Switcher 不再是运行依赖。若机器上已有 Switcher，Companion �
 
 ## 对外分发
 
-推荐把单个 `CodexCompanion-Setup-v0.7.28.exe` 交给用户。用户只需双击一次，安装器会：
+推荐把单个 `CodexCompanion-Setup-v0.7.29.exe` 交给用户。用户只需双击一次，安装器会：
 
 1. 解压到 `%LOCALAPPDATA%\Programs\CodexCompanion`；
 2. 安装内置 Node.js 与官方 Codex CLI 运行时；
@@ -97,7 +99,7 @@ Codex Switcher 不再是运行依赖。若机器上已有 Switcher，Companion �
 
 ## 已验证基线
 
-- `/api/status`：v0.7.28，返回全部账号、`alias` / `display_name`、重置数量/最近到期时间、Codex 会话监听、飞书长连接状态及 `nativeVault` 备份状态；
+- `/api/status`：v0.7.29，返回全部账号、`alias` / `display_name`、重置数量/最近到期时间、Codex 会话监听、飞书长连接状态及 `nativeVault` 备份状态；
 - 浮窗原生置顶保活：失焦及两秒定时器调用 SetWindowPos(HWND_TOPMOST, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE)，关闭窗口停止定时器；自检故意降级后确认 TopmostRestored=true、NoFocusSteal=true。
 - 冷启动保护：后台服务每次最多等待 45 秒，首次未就绪时静默结束并重试一次；两次均失败后才弹窗，同时保留每次尝试的进程与日志记录。
 - 删除账号先持久化 ID、账号 ID、邮箱三重墓碑，再修改账号库并清除内存提醒状态；旧来源、备份与并发额度扫描均不能重新产生该账号的提醒。

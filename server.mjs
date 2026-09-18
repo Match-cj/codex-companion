@@ -13,7 +13,7 @@ import * as Lark from '@larksuiteoapi/node-sdk';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.28';
+const APP_VERSION = '0.7.29';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -66,6 +66,15 @@ function requestAccessError(req) {
 function publicConfig() {
   return { port: config.port, feishuAppId: config.feishuAppId, feishuWebhookConfigured: !!config.feishuWebhookUrl,
     publicDashboardUrl: config.publicDashboardUrl, quotaRefreshMinutes: config.quotaRefreshMinutes, resetReminderMinutes: config.resetReminderMinutes };
+}
+function publicDiagnostics() {
+  return { format: 1, appVersion: APP_VERSION, createdAt: new Date().toISOString(),
+    runtime: { node: process.version, platform: process.platform, arch: process.arch },
+    health: { taskEngineReady: !!codex?.proc, sessionMonitorReady: codexSessionWatcherReady,
+      feishuState: publicFeishuState().state, webhookConfigured: !!config.feishuWebhookUrl,
+      operatorVerified: !!config.feishuAllowedUserIds?.length, remoteEnabled: !!config.remoteAccessEnabled },
+    counts: { accounts: accounts.length, activeBackendTasks: [...tasks.values()].filter(t => ['starting','running','waiting_confirmation'].includes(t.status)).length },
+    privacy: '仅包含白名单状态和数量；不包含账号身份、路径、任务内容、原始日志、网络地址或任何凭据。' };
 }
 let accounts = [];
 let lastAccountRefreshAt = 0;
@@ -2126,6 +2135,12 @@ async function handle(req, res) {
   } catch(error) { return send(res, 413, { error: error.message }); }
   let data={}; try { data=body?JSON.parse(body):{}; } catch { return send(res,400,{error:'请求内容不是有效 JSON'}); }
   try {
+    if (req.method==='GET'&&u.pathname==='/api/diagnostics') {
+      if(!isLoopback(req.socket.remoteAddress))return send(res,403,{error:'诊断导出仅允许本机操作'});
+      const bytes=Buffer.from(JSON.stringify(publicDiagnostics(),null,2));
+      res.writeHead(200,{'content-type':'application/json; charset=utf-8','content-length':bytes.length,'cache-control':'no-store','content-disposition':'attachment; filename="CodexCompanion-diagnostics.json"'});
+      return res.end(bytes);
+    }
     if (req.method==='GET'&&u.pathname==='/') return send(res,200,dashboardHtml,'text/html; charset=utf-8');
     if (req.method==='GET'&&u.pathname==='/api/status'){
       const nets = os.networkInterfaces();
