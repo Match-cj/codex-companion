@@ -1,6 +1,6 @@
 # Codex Companion
 
-独立的 Windows Codex 伴侣程序。当前稳定基线为 v0.7.30：
+独立的 Windows Codex 伴侣程序。当前开发基线为 v0.7.31（图片回传待真实飞书验收）：
 
 状态诊断提供固定代码和处理建议，区分缺少账号、引擎未就绪、主对话监听未就绪、机器人连接/操作者验证等状态。未配置飞书仅为可选提示，不影响本机使用；分类不是错误根因判定。
 
@@ -67,7 +67,7 @@
 
 推荐直接发送单个文件：
 
-`CodexCompanion-Setup-v0.7.30.exe`
+`CodexCompanion-Setup-v0.7.31.exe`
 
 用户双击一次即可安装并启动，安装器已经内置 Node.js 和官方 Codex CLI，不再要求另外安装 Node.js、Codex CLI 或 Codex Switcher。已有 Switcher 账号的用户仍可在高级设置中一次性迁移；新用户直接使用 Companion 的通用网页登录或设备码登录。Codex 桌面应用可选，但想使用切换后自动打开功能时需要安装。
 

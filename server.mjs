@@ -10,10 +10,11 @@ import { createHash, createCipheriv, createDecipheriv, randomBytes, randomUUID, 
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import * as Lark from '@larksuiteoapi/node-sdk';
+import { relayFinalImages, validateImageRoot } from './image-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.30';
+const APP_VERSION = '0.7.31';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -38,6 +39,8 @@ const defaultConfig = {
   feishuAppSecretProtected: '',
   feishuBoundChatId: '',
   feishuBoundThreadId: '',
+  feishuImageRelayEnabled: false,
+  feishuImageRelayRoot: '',
   stallMinutes: 3,
   quotaRefreshMinutes: 5,
   resetReminderMinutes: 15,
@@ -65,7 +68,8 @@ function requestAccessError(req) {
 }
 function publicConfig() {
   return { port: config.port, feishuAppId: config.feishuAppId, feishuWebhookConfigured: !!config.feishuWebhookUrl,
-    publicDashboardUrl: config.publicDashboardUrl, quotaRefreshMinutes: config.quotaRefreshMinutes, resetReminderMinutes: config.resetReminderMinutes };
+    publicDashboardUrl: config.publicDashboardUrl, quotaRefreshMinutes: config.quotaRefreshMinutes, resetReminderMinutes: config.resetReminderMinutes,
+    feishuImageRelayEnabled: !!config.feishuImageRelayEnabled, feishuImageRelayRoot: config.feishuImageRelayRoot || '' };
 }
 function publicDiagnostics() {
   const report = { format: 1, appVersion: APP_VERSION, createdAt: new Date().toISOString(),
@@ -710,6 +714,31 @@ async function downloadFeishuImage(messageId, imageKey) {
   const cleanup = setTimeout(() => fs.unlink(imagePath).catch(() => {}), 60 * 60 * 1000);
   cleanup.unref?.();
   return imagePath;
+}
+
+async function sendFeishuResultImage(bytes, replyTo, taskId) {
+  if (!feishuClient || !replyTo) throw Error('应用机器人或本轮通知未就绪。');
+  const uploaded = await feishuClient.im.v1.image.create({ data: { image_type: 'message', image: bytes } });
+  const imageKey = uploaded?.image_key || uploaded?.data?.image_key;
+  if (uploaded?.code || !imageKey) throw Error('图片上传失败，请检查机器人资源权限。');
+  const response = await feishuClient.im.v1.message.reply({ path: { message_id: replyTo }, data: { msg_type: 'image', content: JSON.stringify({ image_key: imageKey }) } });
+  if (response?.code || !response?.data?.message_id) throw Error('图片消息发送失败。');
+  const links = config.feishuMessageThreads || {};
+  links[response.data.message_id] = taskId;
+  config.feishuMessageThreads = Object.fromEntries(Object.entries(links).slice(-100));
+  await saveConfig();
+}
+
+async function notifyTurnResult(text, { taskId, turnId, finalText }) {
+  if (!await markCodexTurnComplete(turnId)) return;
+  const notice = await notify(text, { appName: 'Codex 任务', taskId });
+  if (!notice.ok || !notice.messageId) return;
+  await relayFinalImages({ text: finalText, enabled: config.feishuImageRelayEnabled === true, root: config.feishuImageRelayRoot || '',
+    send: bytes => sendFeishuResultImage(bytes, notice.messageId, taskId),
+    report: async body => {
+      pushHistory({ at: Date.now(), appName: 'Codex 图片', body, sent: false, reason: 'image-relay-failed' });
+      await saveConfig();
+    } });
 }
 
 function wrapFeishuText(value, maxLength = 110) {
@@ -1715,8 +1744,9 @@ async function notify(text, opts = {}) {
   }
   try {
     const embeddedTaskId = await inferNotificationTaskId(text, opts.taskId);
+    let messageId = '';
     if (feishuClient && config.feishuBoundChatId) {
-      await sendFeishuAppText(text, { taskId: embeddedTaskId });
+      messageId = (await sendFeishuAppText(text, { taskId: embeddedTaskId })).messageId || '';
     } else {
       const response = await fetch(config.feishuWebhookUrl, { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ msg_type: 'post', content: { post: buildFeishuPost(text) } }) });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1725,7 +1755,7 @@ async function notify(text, opts = {}) {
     }
     pushHistory({ at: Date.now(), appName, body: trim(text, 3800), sent: true });
     saveConfig().catch(() => {});
-    return { ok: true };
+    return { ok: true, messageId };
   } catch (e) {
     pushHistory({ at: Date.now(), appName, body: trim(text, 3800), sent: false, reason: e.message });
     saveConfig().catch(() => {});
@@ -1975,9 +2005,8 @@ async function processCodexSessionAppend(file) {
       const threadId = sessionThreadId(file);
       const message = String(event.payload.last_agent_message || '').trim();
       if (!message) continue;
-      if (!await markCodexTurnComplete(turnId)) continue;
       await finishDesktopTakeover(threadId);
-      await notify(`Codex 本轮回复完成\n对话：${threadId || '-'}\n\n${message}`, { appName: 'Codex 任务', taskId: threadId });
+      await notifyTurnResult(`Codex 本轮回复完成\n对话：${threadId || '-'}\n\n${message}`, { taskId: threadId, turnId, finalText: message });
     }
   } catch (error) { console.error('[codex session monitor]', error.message); }
 }
@@ -2133,7 +2162,20 @@ class CodexServer {
     if (!line.trim()) return; let msg; try { msg = JSON.parse(line); } catch { return; }
     if (msg.id !== undefined && this.pending.has(msg.id)) { const p = this.pending.get(msg.id); clearTimeout(p.timer); this.pending.delete(msg.id); if (msg.error) p.reject(new Error(msg.error.message || JSON.stringify(msg.error))); else p.resolve(msg.result); return; }
     const p = msg.params || {}; const id = p.threadId;
-    if (id && tasks.has(id)) { const task = tasks.get(id); task.lastEventAt = Date.now(); if (msg.method?.includes('agentMessage/delta')) task.output += p.delta || ''; if (msg.method === 'turn/started' && p.turn?.id) this.turns.set(id, p.turn.id); if (msg.method === 'turn/completed') { this.turns.delete(id); task.status = p.turn?.status === 'completed' ? 'completed' : p.turn?.status === 'interrupted' ? 'interrupted' : 'failed'; markCodexTurnComplete(p.turn?.id).then(fresh => { if (fresh) return notify(`Codex 本轮${task.status === 'completed' ? '回复完成' : '已结束'}\n对话：${id}\n状态：${task.status}\n\n${trim(task.output, 3000)}\n\n${dashboardLink(`#task=${encodeURIComponent(id)}`)}`, { appName: 'Codex 任务', taskId: id }); }).catch(error => console.error('[task notification]', error.message)); finishDesktopTakeover(id).catch(error => console.error('[desktop relaunch]', error.message)); refreshQuotaAfterTask(task).catch(error => console.error('[task quota]', error.message)); } }
+    if (id && tasks.has(id)) {
+      const task = tasks.get(id); task.lastEventAt = Date.now();
+      if (msg.method === 'turn/started' && p.turn?.id) { this.turns.set(id, p.turn.id); task.turnOutput = ''; task.turnFinalText = ''; }
+      if (msg.method?.includes('agentMessage/delta')) { task.output += p.delta || ''; task.turnOutput = (task.turnOutput || '') + (p.delta || ''); }
+      if (msg.method === 'item/completed' && p.item?.type === 'agentMessage' && p.item.phase !== 'commentary') task.turnFinalText = String(p.item.text || '');
+      if (msg.method === 'turn/completed') {
+        this.turns.delete(id); task.stopRequested = false;
+        task.status = p.turn?.status === 'completed' ? 'completed' : p.turn?.status === 'interrupted' ? 'interrupted' : 'failed';
+        const finalText = task.turnFinalText || task.turnOutput || '';
+        notifyTurnResult(`Codex 本轮${task.status === 'completed' ? '回复完成' : '已结束'}\n对话：${id}\n状态：${task.status}\n\n${trim(finalText, 3000)}\n\n${dashboardLink(`#task=${encodeURIComponent(id)}`)}`, { taskId: id, turnId: p.turn?.id, finalText: task.status === 'completed' ? task.turnFinalText || '' : '' }).catch(error => console.error('[task notification]', error.message));
+        finishDesktopTakeover(id).catch(error => console.error('[desktop relaunch]', error.message));
+        refreshQuotaAfterTask(task).catch(error => console.error('[task quota]', error.message));
+      }
+    }
     if (msg.id !== undefined && (msg.method?.includes('requestApproval') || msg.method?.includes('requestUserInput'))) { const task = id ? tasks.get(id) : null; if (task) { task.status = 'waiting_confirmation'; task.lastEventAt = Date.now(); } pendingApprovals.set(String(msg.id), { id: String(msg.id), method: msg.method, params: p, taskId: id }); notify(`Codex 等待确认\n任务：${id || '-'}\n类型：${msg.method}\n${confirmationDetails(msg.method, p)}\n\n${trim(task?.output, 1800)}\n\n请打开控制台：${dashboardLink(`#approval=${msg.id}`)}`, { appName: 'Codex 任务', taskId: id }); }
   }
   respondApproval(requestId, decision, answers = {}) { const request = pendingApprovals.get(String(requestId)); if (!request) throw new Error('确认请求已经失效'); const result = request.method.includes('requestUserInput') ? { answers } : { decision }; this.send({ id: Number(requestId), result }); pendingApprovals.delete(String(requestId)); const task = request.taskId ? tasks.get(request.taskId) : null; if (task) task.status = 'running'; }
@@ -2318,6 +2360,14 @@ async function handle(req, res) {
       if (typeof data.remoteEnabled === 'boolean') config.remoteAccessEnabled = data.remoteEnabled;
       if (data.resetFeishuOperator === true) { config.feishuAllowedUserIds = []; feishuPairingCode = randomBytes(12).toString('hex'); }
       await saveConfig();return send(res,200,{ok:true,message:'安全设置已保存。远程访问开关需重启软件后生效。'});
+    }
+    if (req.method==='POST'&&u.pathname==='/api/images/settings') {
+      if (!isLoopback(req.socket.remoteAddress)) return send(res,403,{ok:false,error:'图片授权仅允许在本机修改。'});
+      if (typeof data.enabled !== 'boolean') throw Error('请选择开启或关闭。');
+      if (data.enabled && data.confirm !== true) throw Error('需要明确确认图片上传授权。');
+      const root = data.enabled ? await validateImageRoot(String(data.root || '').trim()) : '';
+      config.feishuImageRelayEnabled = data.enabled; config.feishuImageRelayRoot = root;
+      await saveConfig(); return send(res,200,{ok:true});
     }
     if (req.method==='POST'&&u.pathname==='/api/config'){if(data.feishuWebhookUrl)config.feishuWebhookUrl=String(data.feishuWebhookUrl);config.publicDashboardUrl=String(data.publicDashboardUrl||'');await saveConfig();return send(res,200,{ok:true});}
     if (req.method==='POST'&&u.pathname==='/api/feishu/setup'){const webhook=String(data.feishuWebhookUrl||'').trim();if(!validFeishuWebhook(webhook))throw Error('Webhook 地址格式不对。请复制飞书自定义机器人提供的完整 HTTPS 地址。');const previous=config.feishuWebhookUrl;config.feishuWebhookUrl=webhook;const result=await notify(`Codex Companion 通知测试成功\n\n以后任务完成、失败、等待确认、长时间无进展或额度不足时，我会通知到这个群。\n\n时间：${new Date().toLocaleString('zh-CN')}`, { appName: 'Codex Companion' });if(!result.ok){config.feishuWebhookUrl=previous;throw Error('飞书没有接收测试消息。请检查 Webhook 是否完整，以及机器人安全设置是否允许发送。')}await saveConfig();return send(res,200,{ok:true,message:'已经保存，测试消息也发送成功了。'});}
