@@ -6,14 +6,14 @@ import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { createHash, createCipheriv, createDecipheriv, randomBytes, randomUUID, scrypt as scryptCallback } from 'node:crypto';
+import { createHash, createCipheriv, createDecipheriv, randomBytes, randomUUID, timingSafeEqual, scrypt as scryptCallback } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import * as Lark from '@larksuiteoapi/node-sdk';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.26';
+const APP_VERSION = '0.7.27';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -30,6 +30,9 @@ const widgetLauncherPath = path.join(sourceDir, 'Launch Quota Widget.vbs');
 const dashboardHtml = await fs.readFile(new URL('./dashboard.html', import.meta.url), 'utf8');
 const defaultConfig = {
   port: 17841,
+  remoteAccessEnabled: false,
+  remoteAccessTokenHash: '',
+  feishuAllowedUserIds: [],
   feishuWebhookUrl: '',
   feishuAppId: '',
   feishuAppSecretProtected: '',
@@ -44,6 +47,26 @@ const defaultConfig = {
   codexDesktopTakeoverThreadIds: [],
 };
 let config = { ...defaultConfig };
+let feishuPairingCode = randomBytes(12).toString('hex');
+const isLoopback = address => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(address);
+function requestAccessError(req) {
+  const local = isLoopback(req.socket.remoteAddress);
+  let host;
+  try { host = new URL(`http://${req.headers.host}`); } catch { return '请求地址不合法'; }
+  if (local && !['127.0.0.1', 'localhost', '[::1]'].includes(host.hostname)) return '仅允许使用本机地址访问';
+  if (req.headers.origin && req.headers.origin !== `http://${req.headers.host}`) return '禁止跨站请求';
+  if (!local) {
+    if (!config.remoteAccessEnabled) return '远程访问未开启';
+    const token = String(req.headers.authorization || '').replace(/^Bearer /, '');
+    const hash = createHash('sha256').update(token).digest('hex');
+    if (!token || !/^[a-f0-9]{64}$/.test(config.remoteAccessTokenHash) || !timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(config.remoteAccessTokenHash, 'hex'))) return '请提供有效的远程访问口令';
+  }
+  return '';
+}
+function publicConfig() {
+  return { port: config.port, feishuAppId: config.feishuAppId, feishuWebhookConfigured: !!config.feishuWebhookUrl,
+    publicDashboardUrl: config.publicDashboardUrl, quotaRefreshMinutes: config.quotaRefreshMinutes, resetReminderMinutes: config.resetReminderMinutes };
+}
 let accounts = [];
 let lastAccountRefreshAt = 0;
 let officialRateLimits = null;
@@ -695,6 +718,23 @@ async function handleFeishuMessage(data) {
   try {
     const message = data?.message || {};
     if (data?.sender?.sender_type === 'app') return;
+    const senderId = String(data?.sender?.sender_id?.open_id || '');
+    const allow = Array.isArray(config.feishuAllowedUserIds) ? config.feishuAllowedUserIds : [];
+    let incomingText = '';
+    try { incomingText = String(JSON.parse(message.content || '{}').text || '').replace(/@_user_\d+/g, '').trim(); } catch {}
+    if (!senderId) return;
+    // First pairing requires a code shown only on this PC, never first-sender trust.
+    if (!allow.includes(senderId)) {
+      if (allow.length || incomingText !== `绑定 ${feishuPairingCode}`) return;
+      config.feishuAllowedUserIds = [senderId];
+      config.feishuBoundChatId = String(message.chat_id || '');
+      feishuPairingCode = randomBytes(12).toString('hex');
+      await saveConfig();
+      const thread = await bindLatestFeishuThread();
+      await sendFeishuAppText(`操作者验证成功，已绑定本群。\n当前对话：${thread.name}`, { replyTo: message.message_id, taskId: thread.id });
+      return;
+    }
+    if (/^绑定\s+[a-f0-9]{24}$/i.test(incomingText)) return; // Never submit a replayed pairing secret as a task.
     const messageId = String(message.message_id || '');
     const received = Array.isArray(config.feishuReceivedMessageIds) ? config.feishuReceivedMessageIds.map(String) : [];
     if (messageId && received.includes(messageId)) return;
@@ -2029,7 +2069,21 @@ async function api(u,o={}){let r=await fetch(u,{headers:{'Content-Type':'applica
 
 async function handle(req, res) {
   if (req.method === 'GET' && req.url === '/api/health') return send(res, 200, { ok: true, version: APP_VERSION });
-  const u = new URL(req.url, `http://${req.headers.host}`); const body = await new Promise(resolve => { let s=''; req.on('data',d=>s+=d); req.on('end',()=>resolve(s)); }); let data={}; try { data=body?JSON.parse(body):{}; } catch { data={}; }
+  // Static login page contains no account data; every data/control API is gated.
+  if (req.method === 'GET' && req.url === '/') return send(res, 200, dashboardHtml, 'text/html; charset=utf-8');
+  const accessError = requestAccessError(req);
+  if (accessError) return send(res, 401, { error: accessError });
+  const u = new URL(req.url, `http://${req.headers.host}`);
+  let body;
+  try {
+    body = await new Promise((resolve, reject) => {
+      let size = 0; const chunks = []; const timer = setTimeout(() => reject(Error('请求读取超时')), 15000);
+      req.on('data', chunk => { size += chunk.length; if (size > 2 * 1024 * 1024) { clearTimeout(timer); reject(Error('请求内容超过 2MB 限制')); } else chunks.push(chunk); });
+      req.on('end', () => { clearTimeout(timer); resolve(Buffer.concat(chunks).toString('utf8')); });
+      req.on('error', error => { clearTimeout(timer); reject(error); });
+    });
+  } catch(error) { return send(res, 413, { error: error.message }); }
+  let data={}; try { data=body?JSON.parse(body):{}; } catch { return send(res,400,{error:'请求内容不是有效 JSON'}); }
   try {
     if (req.method==='GET'&&u.pathname==='/') return send(res,200,dashboardHtml,'text/html; charset=utf-8');
     if (req.method==='GET'&&u.pathname==='/api/status'){
@@ -2048,7 +2102,8 @@ async function handle(req, res) {
         codexSessionMonitorReady: codexSessionWatcherReady,
         taskEngineError,
         lastQuotaDelta,
-        config:{...config,accounts:undefined,deletedAccountKeys:undefined,feishuAppSecretProtected:undefined,feishuBoundChatId:undefined,feishuMessageThreads:undefined,feishuReceivedMessageIds:undefined,codexDesktopTakeoverThreadIds:undefined},
+        config:publicConfig(),
+        security:{ remoteEnabled: !!config.remoteAccessEnabled, local: isLoopback(req.socket.remoteAddress), allowedUserCount: (config.feishuAllowedUserIds || []).length, pairingCommand: isLoopback(req.socket.remoteAddress) && !(config.feishuAllowedUserIds || []).length ? `绑定 ${feishuPairingCode}` : null },
         feishu:publicFeishuState(),
         accounts,
         tasks:Object.fromEntries(tasks),
@@ -2056,7 +2111,7 @@ async function handle(req, res) {
         deviceLogin:deviceLogin?.publicState()||null,
         browserLogin:browserLoginPublic(),
         nativeVault:await boundedNativeVaultStatus(),
-        network:{addresses:addrs, tailscaleIp:tailscale, port}
+        network:{addresses:config.remoteAccessEnabled?addrs:[], tailscaleIp:config.remoteAccessEnabled?tailscale:null, port}
       });
     }
     if (req.method==='POST'&&u.pathname==='/api/task'){if(!codex?.proc)throw Error('任务引擎正在重连，请稍等十几秒再试；账号、额度和切换功能不受影响。');const prompt=String(data.prompt||'').trim();if(!prompt)throw Error('请填写任务内容');const cwd=String(data.cwd||'').trim()||process.cwd();try{await refreshAccounts()}catch{}const baseline=activeQuotaSnapshot();const t=await codex.startTask(prompt,cwd);t.quotaBaseline=baseline;await notify(`Codex 任务已启动\n任务：${t.id}\n目录：${t.cwd}`, { appName: 'Codex 任务', taskId: t.id });return send(res,200,{ok:true,id:t.id});}
@@ -2076,6 +2131,17 @@ async function handle(req, res) {
       return send(res,200,{ok:true,id:task.id,message:'已在原对话中继续，不会新建对话。'});
     }
     if (req.method==='POST'&&u.pathname==='/api/accounts/refresh'){await refreshAccounts({forceNative:true,awaitNative:true});return send(res,200,{ok:true,accounts});}
+    if (req.method==='POST'&&u.pathname==='/api/accounts/import-local'){
+      if (!isLoopback(req.socket.remoteAddress)) return send(res,403,{error:'导入本机账号只能在本机操作'});
+      if(data.confirm!==true)throw Error('请确认将本机登录保存到 Companion 加密账号库');
+      const auth=await readJson(liveAuthPath);
+      if(!auth?.tokens?.id_token||!auth?.tokens?.access_token||!auth?.tokens?.refresh_token)throw Error('没有找到可导入的本机文件凭据，请使用通用网页登录。客户端已登录不代表凭据存储在文件中。');
+      const account=await upsertNativeAccount(auth,{is_active:true});
+      if(!account)throw Error('该账号已被删除。若确实需要恢复，请重新登录后添加。');
+      nativeUsageCache.delete(String(account.id));
+      await refreshAccounts({forceNative:true,awaitNative:false});
+      return send(res,200,{ok:true,message:'已导入本机账号，额度正在后台刷新。'});
+    }
     if (req.method==='POST'&&u.pathname==='/api/accounts/migrate-native'){
       if(!await verifyNativeVaultRoundTrip())throw Error('Windows 凭据加密自检失败，已停止迁移。');
       return send(res,200,await migrateSwitcherAccountsToNativeVault());
@@ -2157,7 +2223,18 @@ async function handle(req, res) {
       const succeeded=results.filter(item=>item.ok).length;
       return send(res,200,{ok:succeeded>0,total:results.length,succeeded,failedCount:results.length-succeeded,results,message:`已预热 ${succeeded}/${results.length} 个账号。`});
     }
-    if (req.method==='POST'&&u.pathname==='/api/config'){config.feishuWebhookUrl=String(data.feishuWebhookUrl||'');config.publicDashboardUrl=String(data.publicDashboardUrl||'');await saveConfig();return send(res,200,{ok:true});}
+    if (req.method==='POST'&&u.pathname==='/api/security'){
+      if (!isLoopback(req.socket.remoteAddress)) return send(res,403,{error:'安全设置只能在本机修改'});
+      if (data.remoteEnabled === true && !config.remoteAccessTokenHash && !data.remoteToken) throw Error('开启远程访问前需要设置口令');
+      if (data.remoteToken) {
+        if (String(data.remoteToken).length < 24) throw Error('远程口令至少 24 个字符，建议使用随机口令');
+        config.remoteAccessTokenHash = createHash('sha256').update(String(data.remoteToken)).digest('hex');
+      }
+      if (typeof data.remoteEnabled === 'boolean') config.remoteAccessEnabled = data.remoteEnabled;
+      if (data.resetFeishuOperator === true) { config.feishuAllowedUserIds = []; feishuPairingCode = randomBytes(12).toString('hex'); }
+      await saveConfig();return send(res,200,{ok:true,message:'安全设置已保存。远程访问开关需重启软件后生效。'});
+    }
+    if (req.method==='POST'&&u.pathname==='/api/config'){if(data.feishuWebhookUrl)config.feishuWebhookUrl=String(data.feishuWebhookUrl);config.publicDashboardUrl=String(data.publicDashboardUrl||'');await saveConfig();return send(res,200,{ok:true});}
     if (req.method==='POST'&&u.pathname==='/api/feishu/setup'){const webhook=String(data.feishuWebhookUrl||'').trim();if(!validFeishuWebhook(webhook))throw Error('Webhook 地址格式不对。请复制飞书自定义机器人提供的完整 HTTPS 地址。');const previous=config.feishuWebhookUrl;config.feishuWebhookUrl=webhook;const result=await notify(`Codex Companion 通知测试成功\n\n以后任务完成、失败、等待确认、长时间无进展或额度不足时，我会通知到这个群。\n\n时间：${new Date().toLocaleString('zh-CN')}`, { appName: 'Codex Companion' });if(!result.ok){config.feishuWebhookUrl=previous;throw Error('飞书没有接收测试消息。请检查 Webhook 是否完整，以及机器人安全设置是否允许发送。')}await saveConfig();return send(res,200,{ok:true,message:'已经保存，测试消息也发送成功了。'});}
     if (req.method==='POST'&&u.pathname==='/api/feishu/test'){if(!config.feishuWebhookUrl&&!(feishuClient&&config.feishuBoundChatId))throw Error('请先配置 Webhook，或连接并绑定应用机器人');const result=await notify(`Codex Companion 飞书通知测试成功\n时间：${new Date().toLocaleString('zh-CN')}\n${dashboardLink()}`, { appName: 'Codex Companion' });if(!result.ok)throw Error('飞书没有接收测试消息，请检查机器人配置和连接状态');return send(res,200,{ok:true});}
     if (req.method==='GET'&&u.pathname==='/api/feishu/app/status') return send(res,200,{ok:true,...publicFeishuState()});
@@ -2233,7 +2310,7 @@ async function main() {
   });
   // Listen on all interfaces so Tailscale / LAN phones can reach the dashboard.
   // Tailscale gives 100.x addresses that route through the user's private mesh.
-  server.listen(config.port, '0.0.0.0', () => {
+  server.listen(config.port, config.remoteAccessEnabled ? '0.0.0.0' : '127.0.0.1', () => {
     const nets = os.networkInterfaces();
     const urls = [];
     for (const name of Object.keys(nets)) {
