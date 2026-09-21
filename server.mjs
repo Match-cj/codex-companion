@@ -14,7 +14,7 @@ import { relayFinalImages, validateImageRoot } from './image-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.33';
+const APP_VERSION = '0.7.34';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -2374,7 +2374,10 @@ async function handle(req, res) {
       try{
         const result=await switchNativeAccount(String(data.id));
         console.log(`[account switch] completed: ${target.name}; already active=${result.alreadyActive}`);
-        return send(res,200,{ok:true,message:result.alreadyActive?'已经是当前账号，ChatGPT/Codex 正在打开。':'账号已由 Companion 安全切换，ChatGPT/Codex 正在重新打开。'});
+        const activeSnapshot = await loadNativeAccountsSnapshot();
+        const activeAccountId = activeSnapshot.find(account => account.is_active)?.id || '';
+        if (String(activeAccountId) !== String(data.id)) throw Error('账号切换写入后校验失败，当前账号没有改变；原账号仍保持不变。');
+        return send(res,200,{ok:true,activeAccountId:String(activeAccountId),message:result.alreadyActive?'已经是当前账号，ChatGPT/Codex 正在打开。':'账号已由 Companion 安全切换，ChatGPT/Codex 正在重新打开。'});
       }finally{
         launchCodexDesktop();
       }

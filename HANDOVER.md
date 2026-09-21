@@ -57,7 +57,7 @@ Codex Switcher 不再是运行依赖。若机器上已有 Switcher，Companion �
 
 ## 对外分发
 
-开发测试包为 `CodexCompanion-Setup-v0.7.33.exe`。用户只需双击一次，安装器会：
+开发测试包为 `CodexCompanion-Setup-v0.7.34.exe`。用户只需双击一次，安装器会：
 
 1. 解压到 `%LOCALAPPDATA%\Programs\CodexCompanion`；
 2. 安装内置 Node.js 与官方 Codex CLI 运行时；
