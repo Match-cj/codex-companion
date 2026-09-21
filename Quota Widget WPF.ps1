@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 Add-Type 'using System; using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags); [DllImport("user32.dll", EntryPoint="GetWindowLongW")] public static extern int GetWindowLong(IntPtr hwnd, int index); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); }'
-$script:Port=$Port; $script:AppVersion='0.7.32'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
+$script:Port=$Port; $script:AppVersion='0.7.33'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
 $mutexName=if($SelfTest){'Global\CodexCompanionQuotaWidget_v5_selftest'}else{'Global\CodexCompanionQuotaWidget_v5'}
 $script:Mutex=New-Object System.Threading.Mutex($false,$mutexName); if(-not $script:Mutex.WaitOne(0,$false)){exit}
 $Transparent=[Windows.Media.Brushes]::Transparent
@@ -32,6 +32,11 @@ function Get-ApiErrorMessage($record){
  return $message
 }
 function Get-Remaining($a,$prefix){if($null -eq $a -or $null -eq $a.usage){return $null};$used=$a.usage.($prefix+'_used_percent');if($null -eq $used){return $null};[Math]::Max(0,[Math]::Min(100,[int](100-[double]$used)))}
+function Test-LoginExpired($a){
+ if($null-eq$a-or$null-eq$a.usage){return $false}
+ $message=[string]$a.usage.error
+ return (-not[string]::IsNullOrWhiteSpace($message))-and($message-match'登录.*失效|重新登录|invalid refresh token|refresh token|token.{0,30}expired|token_expired')
+}
 function Get-Countdown($a,$prefix){try{$seconds=[int64]$a.usage.($prefix+'_resets_at')-[DateTimeOffset]::UtcNow.ToUnixTimeSeconds();if($seconds-le 0){return '已重置'};$d=[Math]::Floor($seconds/86400);$h=[Math]::Floor(($seconds%86400)/3600);$m=[Math]::Floor(($seconds%3600)/60);if($d-gt 0){return "${d}天${h}小时"};if($h-gt 0){return "${h}小时${m}分"};return "${m}分"}catch{'--'}}
 function Get-Expiry($a){try{$raw=$a.reset_credits_expires_at;if(-not $raw){return '--'};$seconds=[DateTimeOffset]::Parse([string]$raw).ToUnixTimeSeconds()-[DateTimeOffset]::UtcNow.ToUnixTimeSeconds();if($seconds-le 0){return '已到期'};('{0}天{1}小时'-f [Math]::Floor($seconds/86400),[Math]::Floor(($seconds%86400)/3600))}catch{'--'}}
 function Get-Color($r){if($r-le 15){$Red}elseif($r-le 35){$Yellow}else{$Green}}
@@ -120,7 +125,7 @@ $Back=New-Object Windows.Shapes.Ellipse;$Back.Margin=5;$Back.Fill=$Disc;$Back.St
 $Arc=New-Object Windows.Shapes.Path;$Arc.Stroke=$Green;$Arc.StrokeThickness=6;$Arc.StrokeStartLineCap='Round';$Arc.StrokeEndLineCap='Round';$Root.Children.Add($Arc)|Out-Null
 $Number=New-Text '--' 22 $Green -bold;$Number.HorizontalAlignment='Center';$Number.VerticalAlignment='Center';$Root.Children.Add($Number)|Out-Null
 function Set-Arc($r){if($r-le 0){$Arc.Data=$null;return};$c=36;$radius=28;$start=-90;$end=$start+(3.599*[Math]::Min(99.9,$r));$a1=$start*[Math]::PI/180;$a2=$end*[Math]::PI/180;$p1=New-Object Windows.Point -ArgumentList ($c+$radius*[Math]::Cos($a1)),($c+$radius*[Math]::Sin($a1));$p2=New-Object Windows.Point -ArgumentList ($c+$radius*[Math]::Cos($a2)),($c+$radius*[Math]::Sin($a2));$g=New-Object Windows.Media.StreamGeometry;$ctx=$g.Open();$ctx.BeginFigure($p1,$false,$false);$ctx.ArcTo($p2,(New-Object Windows.Size -ArgumentList $radius,$radius),0,(($end-$start)-gt 180),[Windows.Media.SweepDirection]::Clockwise,$true,$false);$ctx.Close();$g.Freeze();$Arc.Data=$g}
-function Update-Widget{$script:Status=Get-Status;$a=$script:Status.accounts|Where-Object{$_.is_active}|Select-Object -First 1;$r=Get-Remaining $a 'primary';if($null-eq$r){$r=Get-Remaining $a 'secondary'};if($null-eq$r){$Number.Text='--';$Arc.Data=$null;return};$color=Get-Color $r;$Number.Text=[string]$r;$Number.Foreground=$color;$Arc.Stroke=$color;Set-Arc $r}
+function Update-Widget{$script:Status=Get-Status;$a=$script:Status.accounts|Where-Object{$_.is_active}|Select-Object -First 1;if(Test-LoginExpired $a){$Number.Text='!';$Number.Foreground=$Red;$Arc.Data=$null;return};$r=Get-Remaining $a 'primary';if($null-eq$r){$r=Get-Remaining $a 'secondary'};if($null-eq$r){$Number.Text='--';$Arc.Data=$null;return};$color=Get-Color $r;$Number.Text=[string]$r;$Number.Foreground=$color;$Arc.Stroke=$color;Set-Arc $r}
 function Close-Detail{if($null-ne$script:Detail){$d=$script:Detail;$script:Detail=$null;$script:DetailClosedAt=[DateTime]::UtcNow;try{$d.Close()}catch{}}}
 function Get-WidgetMonitorWorkArea{
  try{
@@ -183,7 +188,9 @@ function Show-Detail{
   $badge=New-PlanBadge $a.plan_type;$head.Children.Add($badge)|Out-Null
   $shownName=if([string]::IsNullOrWhiteSpace([string]$a.display_name)){[string]$a.name}else{[string]$a.display_name}
   $nc=if($a.is_active){$Green}else{$White};$prefix=if($a.is_active){'● '}else{''};$name=New-Text ($prefix+$shownName) 12 $nc -bold;if(-not[string]::IsNullOrWhiteSpace([string]$a.alias)){$name.ToolTip=[string]$a.name};$head.Children.Add($name)|Out-Null;$content.Children.Add($head)|Out-Null
-  $five=Get-Remaining $a 'primary';$week=Get-Remaining $a 'secondary'
+  $loginExpired=Test-LoginExpired $a
+  if($loginExpired){$warning=New-Text '登录已失效 · 请在网页重新登录' 11 $Red -bold;$warning.Margin='0,5,0,2';$content.Children.Add($warning)|Out-Null;$script:LoginExpiredCardsBuilt++}
+  $five=if($loginExpired){$null}else{Get-Remaining $a 'primary'};$week=if($loginExpired){$null}else{Get-Remaining $a 'secondary'}
   $quotaGrid=New-Object Windows.Controls.Grid;$quotaGrid.Width=390;$quotaGrid.Margin='0,2,0,0'
   $col1=New-Object Windows.Controls.ColumnDefinition;$col1.Width=195
   $col2=New-Object Windows.Controls.ColumnDefinition;$col2.Width=195
@@ -205,12 +212,13 @@ function Show-Detail{
   $reset=New-Object Windows.Controls.StackPanel;$reset.Orientation='Horizontal';$reset.Margin='0,5,0,0'
   $reset.Children.Add((New-QuotaIcon 'reset'))|Out-Null
   $reset.Children.Add((New-Text "$count  ·  到期 $(Get-Expiry $a)" 10 $Muted))|Out-Null
-  $content.Children.Add($reset)|Out-Null
+  if(-not$loginExpired){$content.Children.Add($reset)|Out-Null}
   $cardMenu=New-Object Windows.Controls.ContextMenu
   $warmItem=New-Object Windows.Controls.MenuItem;$warmItem.Header='预热 5 小时额度';$warmItem.Tag=@{Id=[string]$a.id;Name=[string]$shownName}
+  if($loginExpired){$warmItem.IsEnabled=$false;$warmItem.Header='登录已失效，请先在网页重新登录'}
   $warmItem.Add_Click({param($sender,$eventArgs) Warmup-WidgetAccount ([string]$sender.Tag.Id) ([string]$sender.Tag.Name)})
   $cardMenu.Items.Add($warmItem)|Out-Null;$card.ContextMenu=$cardMenu
-  if(-not$a.is_active){
+  if((-not$a.is_active)-and(-not$loginExpired)){
     $card.Cursor=[Windows.Input.Cursors]::Hand;$card.ToolTip="双击切换到 $shownName"
     $card.Tag=@{Id=[string]$a.id;Name=[string]$shownName;LastClick=[DateTime]::MinValue}
    $switchHandler={
@@ -248,7 +256,7 @@ if($SelfTest){
  Update-Widget
  Show-Detail
  $stackForTest=$script:Detail.Content.Child
- [pscustomobject]@{AccountsFromApi=@($script:Status.accounts).Count;CardsBuilt=@($stackForTest.Children).Count;SwitchableCards=$script:SwitchableCardsBuilt;SwitchGestureCards=$script:SwitchGestureCardsBuilt;PanelHeight=[Math]::Round($script:Detail.Height,1);TopmostRestored=$topmostRestored;NoFocusSteal=$noFocusSteal;RuntimeErrors=$Error.Count;Errors=@($Error|ForEach-Object{$_.InvocationInfo.PositionMessage+' :: '+$_.Exception.Message})}|ConvertTo-Json -Compress -Depth 3
+ [pscustomobject]@{AccountsFromApi=@($script:Status.accounts).Count;CardsBuilt=@($stackForTest.Children).Count;LoginExpiredCards=$script:LoginExpiredCardsBuilt;SwitchableCards=$script:SwitchableCardsBuilt;SwitchGestureCards=$script:SwitchGestureCardsBuilt;PanelHeight=[Math]::Round($script:Detail.Height,1);TopmostRestored=$topmostRestored;NoFocusSteal=$noFocusSteal;RuntimeErrors=$Error.Count;Errors=@($Error|ForEach-Object{$_.InvocationInfo.PositionMessage+' :: '+$_.Exception.Message})}|ConvertTo-Json -Compress -Depth 3
  Close-Detail
  $Window.Close()
  try{$script:Mutex.ReleaseMutex()}catch{}
