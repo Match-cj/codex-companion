@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 Add-Type 'using System; using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags); [DllImport("user32.dll", EntryPoint="GetWindowLongW")] public static extern int GetWindowLong(IntPtr hwnd, int index); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); }'
-$script:Port=$Port; $script:AppVersion='0.7.34'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
+$script:Port=$Port; $script:AppVersion='0.7.35'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
 $mutexName=if($SelfTest){'Global\CodexCompanionQuotaWidget_v5_selftest'}else{'Global\CodexCompanionQuotaWidget_v5'}
 $script:Mutex=New-Object System.Threading.Mutex($false,$mutexName); if(-not $script:Mutex.WaitOne(0,$false)){exit}
 $Transparent=[Windows.Media.Brushes]::Transparent
@@ -143,18 +143,19 @@ function Get-WidgetMonitorWorkArea{
  return [pscustomobject]@{Left=$fallback.Left;Top=$fallback.Top;Right=$fallback.Right;Bottom=$fallback.Bottom}
 }
 function Switch-WidgetAccount($accountId,$accountName){
+ if($SelfTest){$script:SwitchButtonInvocations++;return}
  if($script:SwitchInProgress){return}
  try{
-  $validationPayload=@{id=$accountId;validateOnly=$true}|ConvertTo-Json -Compress
-  Invoke-RestMethod "http://127.0.0.1:$script:Port/api/accounts/switch" -Method Post -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($validationPayload)) -TimeoutSec 15|Out-Null
+  $ErrorActionPreference='Stop'
   $state=Invoke-RestMethod "http://127.0.0.1:$script:Port/api/codex/status" -TimeoutSec 8
   $desktopText=if($state.running){'检测到 ChatGPT/Codex 正在运行；确认后会先将它关闭，切换成功再自动重新打开。'}else{'确认后会切换账号，并自动打开 ChatGPT/Codex。'}
   $choice=[Windows.MessageBox]::Show("确定切换到【${accountName}】吗？`n`n$desktopText`n`n正在运行的桌面端任务可能中断。",'确认切换账号','YesNo','Warning')
   if($choice-ne[Windows.MessageBoxResult]::Yes){return}
   $script:SwitchInProgress=$true
   [Windows.Input.Mouse]::OverrideCursor=[Windows.Input.Cursors]::Wait
-  $payload=@{id=$accountId;closeCodex=$true}|ConvertTo-Json -Compress
+  $payload=@{id=$accountId;closeCodex=$true;source='widget'}|ConvertTo-Json -Compress
   $result=Invoke-RestMethod "http://127.0.0.1:$script:Port/api/accounts/switch" -Method Post -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($payload)) -TimeoutSec 90
+  if($result.ok -ne $true){throw '后台没有确认账号切换成功。'}
   if([string]$result.activeAccountId -ne [string]$accountId){throw "切换后校验失败：当前账号没有改变。请打开网页查看详细状态。"}
   Close-Detail
   Update-Widget
@@ -224,6 +225,11 @@ function Show-Detail{
     $card.Tag=@{Id=[string]$a.id;Name=[string]$shownName;LastClick=[DateTime]::MinValue}
    $switchHandler={
     param($sender,$eventArgs)
+    $source=$eventArgs.OriginalSource
+    while($null-ne$source-and$source-ne$sender){
+     if($source -is [Windows.Controls.Button]){return}
+     $source=[Windows.Media.VisualTreeHelper]::GetParent($source)
+    }
     $now=[DateTime]::UtcNow
     $elapsed=($now-$sender.Tag.LastClick).TotalMilliseconds
     $sender.Tag.LastClick=$now
@@ -234,8 +240,17 @@ function Show-Detail{
     }
    }
    $card.Add_PreviewMouseLeftButtonDown($switchHandler)
+   $switchButton=New-Object Windows.Controls.Button
+   $switchButton.Content='切换账号'
+   $switchButton.FontFamily='Microsoft YaHei UI';$switchButton.FontSize=11
+   $switchButton.Margin='0,6,0,0';$switchButton.Padding='9,3';$switchButton.HorizontalAlignment='Left'
+   $switchButton.Background=$Disc;$switchButton.Foreground=$White;$switchButton.BorderBrush=$Muted;$switchButton.BorderThickness=1
+   $switchButton.Tag=@{Id=[string]$a.id;Name=[string]$shownName}
+   $switchButton.Add_Click({param($sender,$eventArgs) $eventArgs.Handled=$true;Switch-WidgetAccount ([string]$sender.Tag.Id) ([string]$sender.Tag.Name)})
+   $content.Children.Add($switchButton)|Out-Null
    $script:SwitchableCardsBuilt++
    $script:SwitchGestureCardsBuilt++
+   $script:SwitchButtonCardsBuilt++
   }
   $stack.Children.Add($card)|Out-Null
  }
@@ -257,7 +272,14 @@ if($SelfTest){
  Update-Widget
  Show-Detail
  $stackForTest=$script:Detail.Content.Child
- [pscustomobject]@{AccountsFromApi=@($script:Status.accounts).Count;CardsBuilt=@($stackForTest.Children).Count;LoginExpiredCards=$script:LoginExpiredCardsBuilt;SwitchableCards=$script:SwitchableCardsBuilt;SwitchGestureCards=$script:SwitchGestureCardsBuilt;PanelHeight=[Math]::Round($script:Detail.Height,1);TopmostRestored=$topmostRestored;NoFocusSteal=$noFocusSteal;RuntimeErrors=$Error.Count;Errors=@($Error|ForEach-Object{$_.InvocationInfo.PositionMessage+' :: '+$_.Exception.Message})}|ConvertTo-Json -Compress -Depth 3
+ foreach($testCard in @($stackForTest.Children)){
+  foreach($testChild in @($testCard.Child.Children)){
+   if($testChild -is [Windows.Controls.Button] -and [string]$testChild.Content -eq '切换账号'){
+    $testChild.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent,$testChild))
+   }
+  }
+ }
+ [pscustomobject]@{AccountsFromApi=@($script:Status.accounts).Count;CardsBuilt=@($stackForTest.Children).Count;LoginExpiredCards=$script:LoginExpiredCardsBuilt;SwitchableCards=$script:SwitchableCardsBuilt;SwitchGestureCards=$script:SwitchGestureCardsBuilt;SwitchButtonCards=$script:SwitchButtonCardsBuilt;SwitchButtonInvocations=$script:SwitchButtonInvocations;PanelHeight=[Math]::Round($script:Detail.Height,1);TopmostRestored=$topmostRestored;NoFocusSteal=$noFocusSteal;RuntimeErrors=$Error.Count;Errors=@($Error|ForEach-Object{$_.InvocationInfo.PositionMessage+' :: '+$_.Exception.Message})}|ConvertTo-Json -Compress -Depth 3
  Close-Detail
  $Window.Close()
  try{$script:Mutex.ReleaseMutex()}catch{}

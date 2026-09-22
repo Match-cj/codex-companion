@@ -14,7 +14,7 @@ import { relayFinalImages, validateImageRoot } from './image-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.34';
+const APP_VERSION = '0.7.35';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -2367,7 +2367,7 @@ async function handle(req, res) {
       if(data.validateOnly===true)return send(res,200,{...target,validated:true});
       if([...tasks.values()].some(t=>t.status==='running'||t.status==='waiting_confirmation'))throw Error('有任务正在运行或等待确认，请结束后再切换账号。');
       const closeCodex=data.closeCodex===true;
-      console.log(`[account switch] requested: ${target.name}; close desktop=${closeCodex}`);
+      console.log(`[account switch] requested via ${data.source==='widget'?'widget':'web'}; close desktop=${closeCodex}`);
       const closed=closeCodex?await closeCodexDesktop():{stopped:0};
       if(closeCodex)console.log(`[account switch] desktop closed: ${closed.stopped} process(es)`);
       if(!(await nativeVaultStatus()).ready)throw Error('还没有可切换的 Companion 原生账号。请先登录账号。');
