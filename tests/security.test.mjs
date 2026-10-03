@@ -42,7 +42,7 @@ test('diagnostic allowlist never includes credentials, paths, identities or task
 test('Feishu rejects unapproved senders and pairs only with local secret', async () => {
   let continued = 0, saved = 0;
   const config = { feishuAllowedUserIds: [], feishuBoundChatId: 'old-group', feishuBoundThreadId: 'thread-a' };
-  const c = { config, feishuPairingCode: '123456789012345678901234', randomBytes, console, saveConfig: async () => saved++, bindLatestFeishuThread: async () => ({ id: 'thread-a', name: 'Task A' }), sendFeishuAppText: async () => {}, continueThreadFromFeishu: async () => { continued++; return { id: 'thread-a', prompt: 'Task A' }; }, humanError: String };
+  const c = { config, feishuPairingCode: '123456789012345678901234', randomBytes, console, isQuotaCommand: () => false, saveConfig: async () => saved++, bindLatestFeishuThread: async () => ({ id: 'thread-a', name: 'Task A' }), sendFeishuAppText: async () => {}, continueThreadFromFeishu: async () => { continued++; return { id: 'thread-a', prompt: 'Task A' }; }, humanError: String };
   vm.createContext(c);
   vm.runInContext(source.slice(source.indexOf('async function handleFeishuMessage('), source.indexOf('function isActiveWriterError(')), c);
   const event = (sender, text, group = 'old-group') => ({ sender: { sender_type: 'user', sender_id: { open_id: sender } }, message: { message_type: 'text', chat_id: group, content: JSON.stringify({ text }) } });

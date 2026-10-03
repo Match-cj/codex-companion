@@ -57,7 +57,7 @@ test('Feishu SDK upload shape and reply mapping preserve originating thread',asy
 });
 test('image relay is gated by successful mapped notice and completed-turn dedupe',async()=>{
   const source=await fs.readFile(new URL('../server.mjs',import.meta.url),'utf8');let relays=0,fresh=true,notice={ok:true,messageId:'notice'};
-  const c={config:{feishuImageRelayEnabled:true,feishuImageRelayRoot:'root'},markCodexTurnComplete:async()=>fresh,notify:async()=>notice,relayFinalImages:async opts=>{relays++;assert.equal(opts.text,'final');assert.equal(opts.enabled,true)},sendFeishuResultImage:async()=>{},pushHistory:()=>{},saveConfig:async()=>{}};
+  const c={config:{feishuImageRelayEnabled:true,feishuImageRelayRoot:'root'},markCodexTurnComplete:async()=>fresh,currentQuotaText:async()=> '额度：剩余 90%',notify:async(text)=>{assert.match(text,/额度：剩余 90%/);return notice},relayFinalImages:async opts=>{relays++;assert.equal(opts.text,'final');assert.equal(opts.enabled,true)},sendFeishuResultImage:async()=>{},pushHistory:()=>{},saveConfig:async()=>{}};
   vm.createContext(c);vm.runInContext(source.slice(source.indexOf('async function notifyTurnResult('),source.indexOf('\n}',source.indexOf('async function notifyTurnResult('))+2),c);
   const options={taskId:'A',turnId:'turn',finalText:'final'};
   await c.notifyTurnResult('text',options);assert.equal(relays,1);

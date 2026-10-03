@@ -14,7 +14,7 @@ import { relayFinalImages, validateImageRoot } from './image-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.35';
+const APP_VERSION = '0.7.36';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -732,7 +732,8 @@ async function sendFeishuResultImage(bytes, replyTo, taskId) {
 
 async function notifyTurnResult(text, { taskId, turnId, finalText }) {
   if (!await markCodexTurnComplete(turnId)) return;
-  const notice = await notify(text, { appName: 'Codex 任务', taskId });
+  const quota = await currentQuotaText();
+  const notice = await notify(`${text}\n\n${quota}`, { appName: 'Codex 任务', taskId });
   if (!notice.ok || !notice.messageId) return;
   await relayFinalImages({ text: finalText, enabled: config.feishuImageRelayEnabled === true, root: config.feishuImageRelayRoot || '',
     send: bytes => sendFeishuResultImage(bytes, notice.messageId, taskId),
@@ -858,6 +859,10 @@ async function handleFeishuMessage(data) {
       return;
     }
     if (chatId !== config.feishuBoundChatId) return;
+    if (message.message_type === 'text' && isQuotaCommand(text)) {
+      await sendFeishuAppText(await currentQuotaText(), { replyTo: message.message_id });
+      return;
+    }
     const links = config.feishuMessageThreads && typeof config.feishuMessageThreads === 'object' ? config.feishuMessageThreads : {};
     const threadId = links[message.parent_id] || links[message.root_id] || config.feishuBoundThreadId;
     if (!threadId) {
@@ -1815,6 +1820,45 @@ function quotaLabel(windowMinutes, fallback) {
   if (minutes === 43200) return '月额度';
   if (Number.isFinite(minutes) && minutes > 0) return `${minutes} 分钟额度`;
   return fallback;
+}
+function isQuotaCommand(value) {
+  return /^(额度|查询额度|查额度|quota)$/i.test(String(value || '').replace(/\s+/g, ''));
+}
+function formatQuotaReset(value) {
+  if (value == null || value === '') return '';
+  const numeric = Number(value);
+  const date = Number.isFinite(numeric) ? new Date(numeric * 1000) : new Date(String(value));
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN');
+}
+function formatQuotaStatus(account) {
+  if (!account) return '当前没有可用账号，暂时无法读取额度。';
+  const name = String(account.display_name || account.alias || account.name || account.email || '当前账号');
+  const lines = [`当前账号：${name}`];
+  if (account.usage?.error) {
+    lines.push(`状态：${humanError(account.usage.error)}`);
+    return lines.join('\n');
+  }
+  let found = false;
+  for (const [slot, fallback] of [['primary', '5 小时额度'], ['secondary', '周额度']]) {
+    const used = Number(account.usage?.[`${slot}_used_percent`]);
+    if (!Number.isFinite(used)) continue;
+    found = true;
+    const remaining = Math.max(0, Math.min(100, Math.round(100 - used)));
+    const label = quotaLabel(account.usage?.[`${slot}_window_minutes`], fallback);
+    const reset = formatQuotaReset(account.usage?.[`${slot}_resets_at`]);
+    lines.push(`${label}：剩余 ${remaining}%${reset ? ` · 重置 ${reset}` : ''}`);
+  }
+  if (!found) lines.push('额度：暂未读取到，请稍后再试。');
+  return lines.join('\n');
+}
+async function currentQuotaText() {
+  try {
+    await refreshAccounts({ forceNative: true, awaitNative: true });
+    return formatQuotaStatus(accounts.find(account => account.is_active));
+  } catch (error) {
+    console.error('[quota query]', error.message);
+    return '额度：本次读取失败，请稍后再试。';
+  }
 }
 function dashboardLink(fragment = '') {
   const base = String(config.publicDashboardUrl || '').trim().replace(/\/$/, '') || `http://127.0.0.1:${config.port}`;
