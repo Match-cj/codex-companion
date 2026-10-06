@@ -31,6 +31,7 @@ test('bounded reading, directory containment, disabled relay, duplicate content 
   assert.deepEqual(await relayFinalImages({...options,enabled:false}),{sent:0,failed:0});assert.equal(sent,0);
   assert.deepEqual(await relayFinalImages({...options,enabled:true}),{sent:1,failed:1});assert.equal(sent,1);assert.equal(reports,1);
   assert.deepEqual(await relayFinalImages({...options,text:markdown(one),enabled:true,send:async()=>{throw Error('API denied')}}),{sent:0,failed:1});
+  assert.equal((await readRelayImage(outside, allowed, { trusted: true })).bytes.length, png.length);
 });
 test('backend relay uses current completed final message, not commentary or previous turns',async()=>{
   const source=await fs.readFile(new URL('../server.mjs',import.meta.url),'utf8');const notices=[];

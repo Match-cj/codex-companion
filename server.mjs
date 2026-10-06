@@ -14,7 +14,7 @@ import { relayFinalImages, validateImageRoot } from './image-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.37';
+const APP_VERSION = '0.7.38';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -159,7 +159,14 @@ async function seedSessionActivity(file, kind, stat) {
     const { bytesRead } = await handle.read(buffer, 0, size, start);
     const lines = buffer.subarray(0, bytesRead).toString('utf8').split(/\r?\n/);
     if (start) lines.shift();
-    for (const line of lines) { try { observeSessionActivity(JSON.parse(line), kind, sessionThreadId(file)); } catch {} }
+    for (const line of lines) {
+      try {
+        const event = JSON.parse(line);
+        if (event?.type === 'session_meta') observeSessionMeta(event.payload, sessionThreadId(file));
+        observeSessionPrompt(event, sessionThreadId(file));
+        observeSessionActivity(event, kind, sessionThreadId(file));
+      } catch {}
+    }
   } finally { await handle.close(); }
 }
 
@@ -736,7 +743,7 @@ async function notifyTurnResult(text, { taskId, turnId, finalText, imagePaths = 
   const quota = await currentQuotaText();
   const notice = await notify(`${text}\n\n${quota}`, { appName: 'Codex 任务', taskId });
   if (!notice.ok || !notice.messageId) return;
-  await relayFinalImages({ text: finalText, paths: imagePaths, enabled: config.feishuImageRelayEnabled === true, root: config.feishuImageRelayRoot || '',
+  await relayFinalImages({ text: finalText, paths: imagePaths, trustedPaths: imagePaths, enabled: config.feishuImageRelayEnabled === true, root: config.feishuImageRelayRoot || '',
     send: bytes => sendFeishuResultImage(bytes, notice.messageId, taskId),
     report: async body => {
       pushHistory({ at: Date.now(), appName: 'Codex 图片', body, sent: false, reason: 'image-relay-failed' });
@@ -2035,6 +2042,23 @@ function sessionKindFromMeta(payload) {
   if (payload?.thread_source === 'subagent' || payload?.source?.subagent) return 'subagent';
   return String(payload?.thread_source || 'unknown');
 }
+function observeSessionPrompt(event, threadId) {
+  if (event?.type !== 'response_item' || event.payload?.type !== 'message') return;
+  const parts = Array.isArray(event.payload.content) ? event.payload.content.filter(item => item?.type === 'input_text').map(item => String(item.text || '')) : [];
+  const raw = parts.join('\n');
+  const request = raw.split(/##\s*My request\s*:/i)[1] || raw;
+  const title = request.replace(/# Files mentioned by the user:[\s\S]*?(?=##\s*My request\s*:|$)/i, '').split(/\r?\n/).map(line => line.trim()).find(line => line && !/^<image\b/i.test(line)) || '';
+  if (!title) return;
+  const previous = sessionActivities.get(threadId) || { id: threadId, source: 'desktop', status: 'unknown', title: '', cwd: '' };
+  if (!previous.title || previous.title === 'Codex') previous.title = title.slice(0, 100);
+  sessionActivities.set(threadId, previous);
+}
+function observeSessionMeta(payload, threadId) {
+  if (!payload || !threadId) return;
+  const previous = sessionActivities.get(threadId) || { id: threadId, source: 'desktop', status: 'unknown', title: '', cwd: '' };
+  if (payload.cwd) previous.cwd = String(payload.cwd);
+  sessionActivities.set(threadId, previous);
+}
 function projectLabel(cwd = '') {
   const value = String(cwd || '').replace(/[\\/]+$/, '');
   return value ? path.basename(value) : 'Codex';
@@ -2102,8 +2126,10 @@ async function processCodexSessionAppend(file) {
       try { event = JSON.parse(line); } catch { continue; }
       if (event?.type === 'session_meta') {
         codexSessionKinds.set(file, sessionKindFromMeta(event.payload));
+        observeSessionMeta(event.payload, sessionThreadId(file));
         continue;
       }
+      observeSessionPrompt(event, sessionThreadId(file));
       observeSessionActivity(event, codexSessionKinds.get(file) || 'unknown', sessionThreadId(file));
       if (event?.type === 'event_msg' && event?.payload?.type === 'item_completed' && event.payload.item?.type === 'imageGeneration') {
         const savedPath = String(event.payload.item.savedPath || '').trim();

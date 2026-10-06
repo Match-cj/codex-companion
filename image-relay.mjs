@@ -36,11 +36,13 @@ export async function validateImageRoot(root) {
   return real;
 }
 
-export async function readRelayImage(file, root) {
-  const realRoot = await validateImageRoot(root);
+export async function readRelayImage(file, root, { trusted = false } = {}) {
+  const realRoot = trusted ? null : await validateImageRoot(root);
   const realFile = await fs.realpath(file);
-  const relative = path.relative(realRoot, realFile);
-  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw Error('图片不在授权目录内。');
+  if (!trusted) {
+    const relative = path.relative(realRoot, realFile);
+    if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw Error('图片不在授权目录内。');
+  }
   const handle = await fs.open(realFile, 'r');
   try {
     const stat = await handle.stat();
@@ -57,13 +59,14 @@ export async function readRelayImage(file, root) {
   } finally { await handle.close(); }
 }
 
-export async function relayFinalImages({ text, paths = [], root, enabled, send, report }) {
+export async function relayFinalImages({ text, paths = [], trustedPaths = [], root, enabled, send, report }) {
   if (!enabled) return { sent: 0, failed: 0 };
   const hashes = new Set();
   let sent = 0, failed = 0;
+  const trusted = new Set((trustedPaths || []).map(String));
   for (const file of finalImagePaths(text, paths)) {
     try {
-      const image = await readRelayImage(file, root);
+      const image = await readRelayImage(file, root, { trusted: trusted.has(file) });
       if (hashes.has(image.digest)) continue;
       hashes.add(image.digest);
       await send(image.bytes);
