@@ -3,7 +3,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 
 export const IMAGE_LIMIT = 10 * 1024 * 1024;
-export function finalImagePaths(text) {
+export function finalImagePaths(text, extraPaths = []) {
   const paths = [];
   // Only explicit Markdown images, never plain links, tool input or remote URLs.
   for (const match of String(text || '').matchAll(/!\[[^\]\r\n]*\]\(\s*(<[^>\r\n]+>|[^\s)]+)\s*\)/g)) {
@@ -12,6 +12,10 @@ export function finalImagePaths(text) {
     if (process.platform === 'win32' && /^\/[a-z]:\//i.test(target)) target = target.slice(1);
     if (!path.isAbsolute(target) || /^[/\\]{2}/.test(target) || !/\.(png|jpe?g|webp|gif)$/i.test(target)) continue;
     if (!paths.includes(target)) paths.push(target);
+  }
+  for (const candidate of extraPaths || []) {
+    const target = String(candidate || '').trim();
+    if (target && !paths.includes(target)) paths.push(target);
   }
   return paths.slice(0, 6);
 }
@@ -53,11 +57,11 @@ export async function readRelayImage(file, root) {
   } finally { await handle.close(); }
 }
 
-export async function relayFinalImages({ text, root, enabled, send, report }) {
+export async function relayFinalImages({ text, paths = [], root, enabled, send, report }) {
   if (!enabled) return { sent: 0, failed: 0 };
   const hashes = new Set();
   let sent = 0, failed = 0;
-  for (const file of finalImagePaths(text)) {
+  for (const file of finalImagePaths(text, paths)) {
     try {
       const image = await readRelayImage(file, root);
       if (hashes.has(image.digest)) continue;

@@ -10,6 +10,7 @@ const markdown = file => `![result](<${file}>)`;
 test('only explicit absolute Markdown images; no URLs, relative links, SVG or UNC', () => {
   const file = path.join(os.tmpdir(), 'result one.png');
   assert.deepEqual(finalImagePaths(`${markdown(file)} ${markdown(file)} ![x](https://example.com/a.png) ![x](a.png) ![x](//server/a.png) [x](${file}) ![x](${file}.svg)`), [file]);
+  assert.deepEqual(finalImagePaths('generated image', [file]), [file]);
   assert.equal(finalImagePaths(Array.from({length:9},(_,i)=>markdown(path.join(os.tmpdir(),`${i}.png`))).join('\n')).length,6);
 });
 test('magic-byte checks reject renamed non-images', () => {
@@ -34,19 +35,22 @@ test('bounded reading, directory containment, disabled relay, duplicate content 
 test('backend relay uses current completed final message, not commentary or previous turns',async()=>{
   const source=await fs.readFile(new URL('../server.mjs',import.meta.url),'utf8');const notices=[];
   const task={id:'A',status:'running',output:'old output',turnFinalText:'old image',stopRequested:true};
-  const c={Date,tasks:new Map([['A',task]]),pendingApprovals:new Map(),trim:s=>s,dashboardLink:()=>'',notifyTurnResult:async(text,options)=>notices.push(options),finishDesktopTakeover:async()=>{},refreshQuotaAfterTask:async()=>{},console};
+  const c={Date,tasks:new Map([['A',task]]),pendingApprovals:new Map(),trim:s=>s,dashboardLink:()=>'',completionNotice:async({body})=>body,notifyTurnResult:async(text,options)=>notices.push(options),finishDesktopTakeover:async()=>{},refreshQuotaAfterTask:async()=>{},console};
   vm.createContext(c);vm.runInContext('this.Engine=class {'+source.slice(source.indexOf('  receive(line) {',source.indexOf('class CodexServer {')),source.indexOf('  respondApproval('))+'}',c);
   const engine=new c.Engine();engine.pending=new Map();engine.turns=new Map();
   const emit=(method,params)=>engine.receive(JSON.stringify({method,params:{threadId:'A',...params}}));
   emit('turn/started',{turn:{id:'turn-1'}});
   emit('item/agentMessage/delta',{delta:'intermediate image'});
+  emit('item/completed',{item:{type:'imageGeneration',status:'completed',savedPath:'C:\\Images\\generated.png'}});
   emit('item/completed',{item:{type:'agentMessage',phase:'commentary',text:'not final'}});
   emit('item/completed',{item:{type:'agentMessage',phase:'final_answer',text:'new final'}});
   emit('turn/completed',{turn:{id:'turn-1',status:'completed'}});
-  assert.equal(notices[0].finalText,'new final');assert.equal(task.stopRequested,false);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(notices[0].finalText,'new final');assert.equal(notices[0].imagePaths.length,1);assert.equal(notices[0].imagePaths[0],'C:\\Images\\generated.png');assert.equal(task.stopRequested,false);
   emit('turn/started',{turn:{id:'turn-2'}});
   emit('item/agentMessage/delta',{delta:'another intermediate image'});
   emit('turn/completed',{turn:{id:'turn-2',status:'completed'}});
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(notices[1].finalText,'');
 });
 test('Feishu SDK upload shape and reply mapping preserve originating thread',async()=>{

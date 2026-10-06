@@ -38,7 +38,7 @@
     <div class="row"><input id="feishuAppId" class="grow" placeholder="飞书 App ID（cli_ 开头）"><input id="feishuAppSecret" type="password" class="grow" placeholder="App Secret（已保存可留空）"><button class="good" onclick="setupFeishuApp(this)">保存并连接</button></div>
     <div class="row"><button class="small" onclick="bindLatestThread(this)">一键绑定最近任务</button><span id="feishuAppState" class="muted">尚未配置</span></div>
     <p class="muted">连接后，在机器人所在群里 @机器人发送“绑定”。以后回复机器人通知并 @机器人，内容会追加到绑定的原 Codex 对话，不会新建对话；私聊机器人时可直接回复。</p>
-    <details><summary>本轮结果图片回传（默认关闭）</summary><p class="muted">只回传主对话本轮最终回复中明确嵌入的本机 Markdown 图片，必须位于你授权的具体目录内。每轮最多6张，单张不超过10MB，支持 PNG/JPEG/WebP/GIF；不扫描文件夹，不下载网络图片。需要自建应用机器人及图片上传资源权限；Webhook 不支持此功能。无法保证所有图片生成工具都返回兼容路径。</p><div class="row"><input id="imageRelayRoot" class="grow" placeholder="允许回传的图片目录完整路径"><button onclick="saveImageRelay(true)">授权并开启</button><button class="danger" onclick="saveImageRelay(false)">关闭</button><span id="imageRelayState" class="muted"></span></div></details>
+    <details><summary>本轮结果图片回传（默认关闭）</summary><p class="muted">回传主对话本轮最终回复中的 Markdown 图片，以及 Codex 图片生成结果的 savedPath；图片必须位于你授权的具体目录内。每轮最多6张，单张不超过10MB，支持 PNG/JPEG/WebP/GIF；不扫描文件夹，不下载网络图片。需要自建应用机器人及图片上传资源权限；Webhook 不支持此功能。</p><div class="row"><input id="imageRelayRoot" class="grow" placeholder="允许回传的图片目录完整路径"><button onclick="saveImageRelay(true)">授权并开启</button><button class="danger" onclick="saveImageRelay(false)">关闭</button><span id="imageRelayState" class="muted"></span></div></details>
   </section>
   <section><details>
     <summary><b style="font-size:17px;color:var(--text)">通知管理</b> <span class="muted">（点击展开）</span></summary>

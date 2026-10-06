@@ -14,7 +14,7 @@ import { relayFinalImages, validateImageRoot } from './image-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.36';
+const APP_VERSION = '0.7.37';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -122,6 +122,7 @@ const codexSessionOffsets = new Map();
 const codexSessionPartials = new Map();
 const codexSessionDebounces = new Map();
 const codexSessionKinds = new Map();
+const codexSessionImagePaths = new Map();
 const sessionActivities = new Map();
 function observeSessionActivity(event, kind, threadId, cwd = '') {
   if (kind !== 'user' || !threadId || event?.type !== 'event_msg') return;
@@ -730,12 +731,12 @@ async function sendFeishuResultImage(bytes, replyTo, taskId) {
   await saveConfig();
 }
 
-async function notifyTurnResult(text, { taskId, turnId, finalText }) {
+async function notifyTurnResult(text, { taskId, turnId, finalText, imagePaths = [] }) {
   if (!await markCodexTurnComplete(turnId)) return;
   const quota = await currentQuotaText();
   const notice = await notify(`${text}\n\n${quota}`, { appName: 'Codex 任务', taskId });
   if (!notice.ok || !notice.messageId) return;
-  await relayFinalImages({ text: finalText, enabled: config.feishuImageRelayEnabled === true, root: config.feishuImageRelayRoot || '',
+  await relayFinalImages({ text: finalText, paths: imagePaths, enabled: config.feishuImageRelayEnabled === true, root: config.feishuImageRelayRoot || '',
     send: bytes => sendFeishuResultImage(bytes, notice.messageId, taskId),
     report: async body => {
       pushHistory({ at: Date.now(), appName: 'Codex 图片', body, sent: false, reason: 'image-relay-failed' });
@@ -2034,6 +2035,29 @@ function sessionKindFromMeta(payload) {
   if (payload?.thread_source === 'subagent' || payload?.source?.subagent) return 'subagent';
   return String(payload?.thread_source || 'unknown');
 }
+function projectLabel(cwd = '') {
+  const value = String(cwd || '').replace(/[\\/]+$/, '');
+  return value ? path.basename(value) : 'Codex';
+}
+async function taskConversationLabel(taskId, fallback = '', cwd = '') {
+  const activity = sessionActivities.get(String(taskId));
+  let project = projectLabel(cwd || activity?.cwd || tasks.get(String(taskId))?.cwd);
+  let conversation = String(fallback || activity?.title || tasks.get(String(taskId))?.prompt || '').trim();
+  if (codex?.proc) {
+    try {
+      const thread = (await codex.listThreads(50, '')).find(item => String(item.id) === String(taskId));
+      if (thread) {
+        project = projectLabel(thread.cwd || cwd || activity?.cwd);
+        conversation = String(thread.name || thread.preview || conversation).trim();
+      }
+    } catch {}
+  }
+  return `${project || 'Codex'}｜${conversation || String(taskId || '当前对话')}`;
+}
+async function completionNotice({ taskId, status, body, cwd = '' }) {
+  const label = await taskConversationLabel(taskId, '', cwd);
+  return `${label}\n\n${String(body || '').trim()}\n\n${dashboardLink(`#task=${encodeURIComponent(taskId || '')}`)}\n\n状态：${status}`;
+}
 
 async function readCodexSessionKind(file) {
   try {
@@ -2081,6 +2105,12 @@ async function processCodexSessionAppend(file) {
         continue;
       }
       observeSessionActivity(event, codexSessionKinds.get(file) || 'unknown', sessionThreadId(file));
+      if (event?.type === 'event_msg' && event?.payload?.type === 'item_completed' && event.payload.item?.type === 'imageGeneration') {
+        const savedPath = String(event.payload.item.savedPath || '').trim();
+        const key = `${file}:${String(event.payload.turn_id || '')}`;
+        if (savedPath) codexSessionImagePaths.set(key, [...new Set([...(codexSessionImagePaths.get(key) || []), savedPath])].slice(0, 6));
+        continue;
+      }
       if (event?.type !== 'event_msg' || event?.payload?.type !== 'task_complete') continue;
       const cachedKind = codexSessionKinds.get(file) || 'unknown';
       const freshKind = await readCodexSessionKind(file);
@@ -2094,8 +2124,10 @@ async function processCodexSessionAppend(file) {
       const threadId = sessionThreadId(file);
       const message = String(event.payload.last_agent_message || '').trim();
       if (!message) continue;
+      const imagePaths = codexSessionImagePaths.get(`${file}:${turnId}`) || [];
+      codexSessionImagePaths.delete(`${file}:${turnId}`);
       await finishDesktopTakeover(threadId);
-      await notifyTurnResult(`Codex 本轮回复完成\n对话：${threadId || '-'}\n\n${message}`, { taskId: threadId, turnId, finalText: message });
+      await notifyTurnResult(await completionNotice({ taskId: threadId, status: 'completed', body: message, cwd: sessionActivities.get(threadId)?.cwd }), { taskId: threadId, turnId, finalText: message, imagePaths });
     }
   } catch (error) { console.error('[codex session monitor]', error.message); }
 }
@@ -2185,7 +2217,7 @@ class CodexServer {
   request(method, params) { const id = ++this.nextId; return new Promise((resolve, reject) => { const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`${method} 超时`)); }, 120000); this.pending.set(id, { resolve, reject, timer }); this.send({ method, id, params }); }); }
   async startTask(prompt, cwd) {
     const r = await this.request('thread/start', { cwd, serviceName: 'codex_companion' });
-    const id = r.thread.id; const task = { id, cwd, prompt, status: 'starting', output: '', startedAt: new Date().toISOString(), lastEventAt: Date.now(), stallNotified: false };
+    const id = r.thread.id; const task = { id, cwd, prompt, status: 'starting', output: '', startedAt: new Date().toISOString(), lastEventAt: Date.now(), stallNotified: false, turnImagePaths: [] };
     tasks.set(id, task);
     await this.request('turn/start', { threadId: id, input: [{ type: 'text', text: prompt }], cwd });
     task.status = 'running'; return task;
@@ -2231,7 +2263,7 @@ class CodexServer {
     const items = Array.isArray(input) ? input : [{ type: 'text', text: String(input || '') }];
     const active = this.turns.get(task.id);
     if (active) await this.request('turn/steer', { threadId: task.id, input: items, expectedTurnId: active });
-    else await this.request('turn/start', { threadId: task.id, input: items, cwd: task.cwd });
+    else { task.turnImagePaths = []; await this.request('turn/start', { threadId: task.id, input: items, cwd: task.cwd }); }
     task.status = 'running'; task.lastEventAt = Date.now(); task.stallNotified = false;
   }
   async stopTask(task) {
@@ -2253,14 +2285,15 @@ class CodexServer {
     const p = msg.params || {}; const id = p.threadId;
     if (id && tasks.has(id)) {
       const task = tasks.get(id); task.lastEventAt = Date.now();
-      if (msg.method === 'turn/started' && p.turn?.id) { this.turns.set(id, p.turn.id); task.turnOutput = ''; task.turnFinalText = ''; }
+      if (msg.method === 'turn/started' && p.turn?.id) { this.turns.set(id, p.turn.id); task.turnOutput = ''; task.turnFinalText = ''; task.turnImagePaths = []; }
       if (msg.method?.includes('agentMessage/delta')) { task.output += p.delta || ''; task.turnOutput = (task.turnOutput || '') + (p.delta || ''); }
+      if (msg.method === 'item/completed' && p.item?.type === 'imageGeneration' && p.item.savedPath) task.turnImagePaths = [...new Set([...(task.turnImagePaths || []), String(p.item.savedPath)])].slice(0, 6);
       if (msg.method === 'item/completed' && p.item?.type === 'agentMessage' && p.item.phase !== 'commentary') task.turnFinalText = String(p.item.text || '');
       if (msg.method === 'turn/completed') {
         this.turns.delete(id); task.stopRequested = false;
         task.status = p.turn?.status === 'completed' ? 'completed' : p.turn?.status === 'interrupted' ? 'interrupted' : 'failed';
         const finalText = task.turnFinalText || task.turnOutput || '';
-        notifyTurnResult(`Codex 本轮${task.status === 'completed' ? '回复完成' : '已结束'}\n对话：${id}\n状态：${task.status}\n\n${trim(finalText, 3000)}\n\n${dashboardLink(`#task=${encodeURIComponent(id)}`)}`, { taskId: id, turnId: p.turn?.id, finalText: task.status === 'completed' ? task.turnFinalText || '' : '' }).catch(error => console.error('[task notification]', error.message));
+        completionNotice({ taskId: id, status: task.status, body: trim(finalText, 3000), cwd: task.cwd }).then(notice => notifyTurnResult(notice, { taskId: id, turnId: p.turn?.id, finalText: task.status === 'completed' ? task.turnFinalText || '' : '', imagePaths: task.turnImagePaths || [] })).catch(error => console.error('[task notification]', error.message));
         finishDesktopTakeover(id).catch(error => console.error('[desktop relaunch]', error.message));
         refreshQuotaAfterTask(task).catch(error => console.error('[task quota]', error.message));
       }
