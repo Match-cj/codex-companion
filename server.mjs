@@ -14,7 +14,7 @@ import { relayFinalImages, validateImageRoot } from './image-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.44';
+const APP_VERSION = '0.7.45';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -987,7 +987,7 @@ async function handleFeishuReaction(data) {
     const messageId = String(event.message_id || event.messageId || '').trim();
     if (!messageId || !config.feishuBoundChatId) return;
     const links = config.feishuMessageThreads && typeof config.feishuMessageThreads === 'object' ? config.feishuMessageThreads : {};
-    const threadId = String(links[messageId] || config.feishuBoundThreadId || '').trim();
+    const threadId = String(links[messageId] || '').trim();
     if (!threadId) return;
     const task = await continueThreadFromFeishu(threadId, [{ type: 'text', text: '继续往下推进' }]);
     await sendFeishuAppText('已收到表情，继续推进这个 Codex 对话。', { replyTo: messageId, taskId: task.id });
