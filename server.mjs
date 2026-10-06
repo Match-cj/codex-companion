@@ -14,7 +14,7 @@ import { relayFinalImages, validateImageRoot } from './image-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.38';
+const APP_VERSION = '0.7.39';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -39,7 +39,7 @@ const defaultConfig = {
   feishuAppSecretProtected: '',
   feishuBoundChatId: '',
   feishuBoundThreadId: '',
-  feishuImageRelayEnabled: false,
+  feishuImageRelayEnabled: true,
   feishuImageRelayRoot: '',
   stallMinutes: 3,
   quotaRefreshMinutes: 5,
@@ -2516,7 +2516,8 @@ async function handle(req, res) {
       if (!isLoopback(req.socket.remoteAddress)) return send(res,403,{ok:false,error:'图片授权仅允许在本机修改。'});
       if (typeof data.enabled !== 'boolean') throw Error('请选择开启或关闭。');
       if (data.enabled && data.confirm !== true) throw Error('需要明确确认图片上传授权。');
-      const root = data.enabled ? await validateImageRoot(String(data.root || '').trim()) : '';
+      const requestedRoot = String(data.root || '').trim();
+      const root = data.enabled && requestedRoot ? await validateImageRoot(requestedRoot) : '';
       config.feishuImageRelayEnabled = data.enabled; config.feishuImageRelayRoot = root;
       await saveConfig(); return send(res,200,{ok:true});
     }
@@ -2585,6 +2586,11 @@ function send(res,status,value,type='application/json; charset=utf-8'){const b=B
 async function startTaskEngine(){if(codex?.proc)return;codex=new CodexServer();try{await codex.start()}catch(e){taskEngineError=humanError(e);console.error('[task engine]',e.message);codex.close();codex.proc=null;}}
 async function main() {
   config = { ...defaultConfig, ...await readJson(configPath) };
+  if (config.imageRelayDefaultVersion !== 1) {
+    config.feishuImageRelayEnabled = true;
+    config.imageRelayDefaultVersion = 1;
+    await saveConfig();
+  }
   config.accountBackend = 'native';
   await recoverInterruptedDesktopTakeovers();
   accounts = await loadNativeAccountsSnapshot();

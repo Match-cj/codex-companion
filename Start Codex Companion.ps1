@@ -1,4 +1,4 @@
-﻿param([switch]$NoBrowser)
+param([switch]$NoBrowser)
 
 $ErrorActionPreference = 'Continue'
 $InformationPreference = 'Continue'
@@ -45,7 +45,7 @@ function Test-PortOpen($hostName, $p) {
     }
 }
 
-Write-Log "=== Launcher starting (v0.7.38) ==="
+Write-Log "=== Launcher starting (v0.7.39) ==="
 Write-Log "Data directory: $companionDataRoot"
 
 if (-not $node -or -not (Test-Path -LiteralPath $node)) {
