@@ -14,7 +14,7 @@ import { relayFinalImages, validateImageRoot } from './image-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.42';
+const APP_VERSION = '0.7.43';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -696,7 +696,7 @@ async function sendFeishuAppText(text, { replyTo = '', taskId = '' } = {}) {
   if (!feishuClient || !config.feishuBoundChatId) return { ok: false, reason: 'app-bot-not-ready' };
   const data = { content: JSON.stringify(buildFeishuPost(text)), msg_type: 'post' };
   const response = replyTo
-    ? await feishuClient.im.v1.message.reply({ path: { message_id: replyTo }, data })
+    ? await feishuClient.im.v1.message.reply({ path: { message_id: replyTo }, data: { ...data, reply_in_thread: true } })
     : await feishuClient.im.v1.message.create({ params: { receive_id_type: 'chat_id' }, data: { ...data, receive_id: config.feishuBoundChatId } });
   if (response?.code) throw Error(response.msg || `飞书消息发送失败（${response.code}）`);
   const messageId = response?.data?.message_id;
@@ -732,7 +732,7 @@ async function sendFeishuResultImage(bytes, replyTo, taskId) {
   const uploaded = await feishuClient.im.v1.image.create({ data: { image_type: 'message', image: bytes } });
   const imageKey = uploaded?.image_key || uploaded?.data?.image_key;
   if (uploaded?.code || !imageKey) throw Error('图片上传失败，请检查机器人资源权限。');
-  const response = await feishuClient.im.v1.message.reply({ path: { message_id: replyTo }, data: { msg_type: 'image', content: JSON.stringify({ image_key: imageKey }) } });
+  const response = await feishuClient.im.v1.message.reply({ path: { message_id: replyTo }, data: { msg_type: 'image', content: JSON.stringify({ image_key: imageKey }), reply_in_thread: true } });
   if (response?.code || !response?.data?.message_id) throw Error('图片消息发送失败。');
   const links = config.feishuMessageThreads || {};
   links[response.data.message_id] = taskId;
@@ -884,7 +884,23 @@ async function handleFeishuMessage(data) {
     config.feishuBoundThreadName = String(task.prompt || task.id);
     await saveConfig();
     const backgroundNote = task.remoteDesktopTakeover ? '\n\nCodex 正在后台处理；本轮结束后会自动重新打开桌面端。' : '';
-    await sendFeishuAppText(`${message.message_type === 'image' ? '图片已发送' : '已发送'}到原 Codex 对话：${task.prompt || task.id}${backgroundNote}`, { replyTo: message.message_id, taskId: task.id });
+    const incomingLinks = config.feishuMessageThreads && typeof config.feishuMessageThreads === 'object' ? config.feishuMessageThreads : {};
+    incomingLinks[String(message.message_id)] = String(task.id);
+    config.feishuMessageThreads = Object.fromEntries(Object.entries(incomingLinks).slice(-100));
+    await saveConfig();
+    if (task.remoteDesktopTakeover) {
+      let reacted = false;
+      try {
+        const reaction = await feishuClient?.im?.v1?.messageReaction?.create({
+          path: { message_id: String(message.message_id) },
+          data: { reaction_type: { emoji_type: 'OK' } },
+        });
+        reacted = !reaction?.code;
+      } catch (error) { console.warn('[feishu reaction]', error.message); }
+      if (!reacted) await sendFeishuAppText('Codex 正在后台处理；本轮结束后会自动重新打开桌面端。', { replyTo: message.message_id, taskId: task.id });
+    } else {
+      await sendFeishuAppText(`${message.message_type === 'image' ? '图片已发送' : '已发送'}到原 Codex 对话：${task.prompt || task.id}`, { replyTo: message.message_id, taskId: task.id });
+    }
   } catch (error) {
     console.error('[feishu reply]', error.message);
     try { await sendFeishuAppText(`没有成功继续 Codex 对话：${humanError(error)}`, { replyTo: data?.message?.message_id || '' }); } catch {}
