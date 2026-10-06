@@ -14,7 +14,7 @@ import { relayFinalImages, validateImageRoot } from './image-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.39';
+const APP_VERSION = '0.7.41';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -39,6 +39,7 @@ const defaultConfig = {
   feishuAppSecretProtected: '',
   feishuBoundChatId: '',
   feishuBoundThreadId: '',
+  feishuNotificationThreadMode: 'task',
   feishuImageRelayEnabled: true,
   feishuImageRelayRoot: '',
   stallMinutes: 3,
@@ -69,6 +70,7 @@ function requestAccessError(req) {
 function publicConfig() {
   return { port: config.port, feishuAppId: config.feishuAppId, feishuWebhookConfigured: !!config.feishuWebhookUrl,
     publicDashboardUrl: config.publicDashboardUrl, quotaRefreshMinutes: config.quotaRefreshMinutes, resetReminderMinutes: config.resetReminderMinutes,
+    feishuNotificationThreadMode: config.feishuNotificationThreadMode === 'task' ? 'task' : 'flat',
     feishuImageRelayEnabled: !!config.feishuImageRelayEnabled, feishuImageRelayRoot: config.feishuImageRelayRoot || '' };
 }
 function publicDiagnostics() {
@@ -1804,7 +1806,19 @@ async function notify(text, opts = {}) {
     const embeddedTaskId = await inferNotificationTaskId(text, opts.taskId);
     let messageId = '';
     if (feishuClient && config.feishuBoundChatId) {
-      messageId = (await sendFeishuAppText(text, { taskId: embeddedTaskId })).messageId || '';
+      const topicMode = config.feishuNotificationThreadMode === 'task';
+      const roots = config.feishuTaskTopicRoots && typeof config.feishuTaskTopicRoots === 'object' ? config.feishuTaskTopicRoots : {};
+      const replyTo = topicMode && embeddedTaskId ? String(roots[embeddedTaskId] || '') : '';
+      const compactText = replyTo
+        ? String(text).replace(/^\s*(?:任务|对话)：[0-9a-f-]{20,}\s*$/gmi, '').replace(/\n{3,}/g, '\n\n').trim()
+        : text;
+      const sent = await sendFeishuAppText(compactText, { replyTo, taskId: embeddedTaskId });
+      messageId = sent.messageId || '';
+      if (topicMode && embeddedTaskId && messageId && !replyTo) {
+        roots[embeddedTaskId] = messageId;
+        config.feishuTaskTopicRoots = Object.fromEntries(Object.entries(roots).slice(-100));
+        saveConfig().catch(() => {});
+      }
     } else {
       const response = await fetch(config.feishuWebhookUrl, { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ msg_type: 'post', content: { post: buildFeishuPost(text) } }) });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -2521,7 +2535,12 @@ async function handle(req, res) {
       config.feishuImageRelayEnabled = data.enabled; config.feishuImageRelayRoot = root;
       await saveConfig(); return send(res,200,{ok:true});
     }
-    if (req.method==='POST'&&u.pathname==='/api/config'){if(data.feishuWebhookUrl)config.feishuWebhookUrl=String(data.feishuWebhookUrl);config.publicDashboardUrl=String(data.publicDashboardUrl||'');await saveConfig();return send(res,200,{ok:true});}
+    if (req.method==='POST'&&u.pathname==='/api/config'){
+      if(data.feishuWebhookUrl)config.feishuWebhookUrl=String(data.feishuWebhookUrl);
+      config.publicDashboardUrl=String(data.publicDashboardUrl||'');
+      if(data.feishuNotificationThreadMode==='task'||data.feishuNotificationThreadMode==='flat') config.feishuNotificationThreadMode=data.feishuNotificationThreadMode;
+      await saveConfig();return send(res,200,{ok:true});
+    }
     if (req.method==='POST'&&u.pathname==='/api/feishu/setup'){const webhook=String(data.feishuWebhookUrl||'').trim();if(!validFeishuWebhook(webhook))throw Error('Webhook 地址格式不对。请复制飞书自定义机器人提供的完整 HTTPS 地址。');const previous=config.feishuWebhookUrl;config.feishuWebhookUrl=webhook;const result=await notify(`Codex Companion 通知测试成功\n\n以后任务完成、失败、等待确认、长时间无进展或额度不足时，我会通知到这个群。\n\n时间：${new Date().toLocaleString('zh-CN')}`, { appName: 'Codex Companion' });if(!result.ok){config.feishuWebhookUrl=previous;throw Error('飞书没有接收测试消息。请检查 Webhook 是否完整，以及机器人安全设置是否允许发送。')}await saveConfig();return send(res,200,{ok:true,message:'已经保存，测试消息也发送成功了。'});}
     if (req.method==='POST'&&u.pathname==='/api/feishu/test'){if(!config.feishuWebhookUrl&&!(feishuClient&&config.feishuBoundChatId))throw Error('请先配置 Webhook，或连接并绑定应用机器人');const result=await notify(`Codex Companion 飞书通知测试成功\n时间：${new Date().toLocaleString('zh-CN')}\n${dashboardLink()}`, { appName: 'Codex Companion' });if(!result.ok)throw Error('飞书没有接收测试消息，请检查机器人配置和连接状态');return send(res,200,{ok:true});}
     if (req.method==='GET'&&u.pathname==='/api/feishu/app/status') return send(res,200,{ok:true,...publicFeishuState()});
