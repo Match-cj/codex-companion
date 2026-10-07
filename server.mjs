@@ -14,7 +14,7 @@ import { relayFinalImages, validateImageRoot } from './image-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.47';
+const APP_VERSION = '0.7.48';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -801,8 +801,10 @@ async function inferNotificationTaskId(text, preferred = '') {
       if (match) return String(match.id);
     } catch {}
   }
-  if (config.feishuBoundThreadName && body.includes(config.feishuBoundThreadName)) return String(config.feishuBoundThreadId || '');
-  return String(config.feishuBoundThreadId || '');
+  // Generic notifications (for example Windows system notifications and quota
+  // alerts) must remain top-level messages.  Falling back to the bound Codex
+  // conversation here incorrectly attached unrelated notices to that topic.
+  return '';
 }
 
 async function chooseLatestThread() {
