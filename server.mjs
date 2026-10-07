@@ -14,7 +14,7 @@ import { relayFinalImages, validateImageRoot } from './image-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.45';
+const APP_VERSION = '0.7.46';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -46,6 +46,8 @@ const defaultConfig = {
   stallMinutes: 3,
   quotaRefreshMinutes: 5,
   resetReminderMinutes: 15,
+  autoContinue429: true,
+  autoContinue429MaxAttempts: 3,
   publicDashboardUrl: '',
   accountAliases: {},
   accountBackend: 'native',
@@ -2271,7 +2273,7 @@ async function monitorWindowsNotifications() {
 }
 
 class CodexServer {
-  constructor() { this.pending = new Map(); this.nextId = 0; this.turns = new Map(); this.proc = null; this.intentionalClose = false; }
+  constructor() { this.pending = new Map(); this.nextId = 0; this.turns = new Map(); this.retryTimers = new Map(); this.proc = null; this.intentionalClose = false; }
   async start() {
     const { command, args } = codexLaunch();
     this.proc = spawn(command, args, { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -2374,7 +2376,28 @@ class CodexServer {
         this.turns.delete(id); task.stopRequested = false;
         task.status = p.turn?.status === 'completed' ? 'completed' : p.turn?.status === 'interrupted' ? 'interrupted' : 'failed';
         const finalText = task.turnFinalText || task.turnOutput || '';
-        completionNotice({ taskId: id, status: task.status, body: trim(finalText, 3000), cwd: task.cwd }).then(notice => notifyTurnResult(notice, { taskId: id, turnId: p.turn?.id, finalText: task.status === 'completed' ? task.turnFinalText || '' : '', imagePaths: task.turnImagePaths || [] })).catch(error => console.error('[task notification]', error.message));
+        const turnError = String(p.turn?.error?.message || p.turn?.error || p.turn?.lastError || '');
+        const rateLimited = /(?:\b429\b|too many requests|exceeded retry limit)/i.test(`${turnError}\n${finalText}`);
+        if (task.status === 'failed' && rateLimited && config.autoContinue429 !== false) {
+          const maxAttempts = Math.min(Math.max(Number(config.autoContinue429MaxAttempts) || 3, 1), 10);
+          task.autoRetry429Count = Number(task.autoRetry429Count || 0) + 1;
+          if (task.autoRetry429Count <= maxAttempts) {
+            const delayMs = Math.min(120000, 15000 * task.autoRetry429Count);
+            task.status = 'retry_waiting';
+            task.output = `Codex 遇到 429 限流，${Math.round(delayMs / 1000)} 秒后自动继续（第 ${task.autoRetry429Count}/${maxAttempts} 次）。`;
+            notify(`Codex 遇到 429 限流，正在自动重试\n任务：${id}\n${Math.round(delayMs / 1000)} 秒后自动发送“继续”\n第 ${task.autoRetry429Count}/${maxAttempts} 次`, { appName: 'Codex 任务', taskId: id });
+            clearTimeout(this.retryTimers.get(id));
+            this.retryTimers.set(id, setTimeout(async () => {
+              this.retryTimers.delete(id);
+              try { await this.continueTask(task, [{ type: 'text', text: '继续往下推进，恢复本轮任务并完成剩余工作。' }]); }
+              catch (error) { task.status = 'failed'; task.turnFinalText = `自动继续失败：${humanError(error)}`; completionNotice({ taskId: id, status: task.status, body: task.turnFinalText, cwd: task.cwd }).then(notice => notifyTurnResult(notice, { taskId: id, turnId: `retry-${Date.now()}`, finalText: '', imagePaths: [] })).catch(e => console.error('[task retry notification]', e.message)); }
+            }, delayMs));
+            return;
+          }
+          task.turnFinalText = `429 Too Many Requests，已自动继续 ${maxAttempts} 次仍未恢复。请稍后重试或在飞书回复“继续”。`;
+        }
+        const noticeBody = task.turnFinalText || finalText;
+        completionNotice({ taskId: id, status: task.status, body: trim(noticeBody, 3000), cwd: task.cwd }).then(notice => notifyTurnResult(notice, { taskId: id, turnId: p.turn?.id, finalText: task.status === 'completed' ? task.turnFinalText || '' : '', imagePaths: task.turnImagePaths || [] })).catch(error => console.error('[task notification]', error.message));
         finishDesktopTakeover(id).catch(error => console.error('[desktop relaunch]', error.message));
         refreshQuotaAfterTask(task).catch(error => console.error('[task quota]', error.message));
       }
@@ -2382,7 +2405,7 @@ class CodexServer {
     if (msg.id !== undefined && (msg.method?.includes('requestApproval') || msg.method?.includes('requestUserInput'))) { const task = id ? tasks.get(id) : null; if (task) { task.status = 'waiting_confirmation'; task.lastEventAt = Date.now(); } pendingApprovals.set(String(msg.id), { id: String(msg.id), method: msg.method, params: p, taskId: id }); notify(`Codex 等待确认\n任务：${id || '-'}\n类型：${msg.method}\n${confirmationDetails(msg.method, p)}\n\n${trim(task?.output, 1800)}\n\n请打开控制台：${dashboardLink(`#approval=${msg.id}`)}`, { appName: 'Codex 任务', taskId: id }); }
   }
   respondApproval(requestId, decision, answers = {}) { const request = pendingApprovals.get(String(requestId)); if (!request) throw new Error('确认请求已经失效'); const result = request.method.includes('requestUserInput') ? { answers } : { decision }; this.send({ id: Number(requestId), result }); pendingApprovals.delete(String(requestId)); const task = request.taskId ? tasks.get(request.taskId) : null; if (task) task.status = 'running'; }
-  close() { this.intentionalClose = true; try { this.proc?.kill(); } catch {} }
+  close() { this.intentionalClose = true; for (const timer of this.retryTimers.values()) clearTimeout(timer); this.retryTimers.clear(); try { this.proc?.kill(); } catch {} }
 }
 let codex;
 
