@@ -11,10 +11,11 @@ import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import * as Lark from '@larksuiteoapi/node-sdk';
 import { relayFinalImages, validateImageRoot } from './image-relay.mjs';
+import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.48';
+const APP_VERSION = '0.7.49';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -129,6 +130,7 @@ const codexSessionPartials = new Map();
 const codexSessionDebounces = new Map();
 const codexSessionKinds = new Map();
 const codexSessionImagePaths = new Map();
+const codexSessionHtmlPaths = new Map();
 const sessionActivities = new Map();
 function observeSessionActivity(event, kind, threadId, cwd = '') {
   if (kind !== 'user' || !threadId || event?.type !== 'event_msg') return;
@@ -744,7 +746,20 @@ async function sendFeishuResultImage(bytes, replyTo, taskId) {
   await saveConfig();
 }
 
-async function notifyTurnResult(text, { taskId, turnId, finalText, imagePaths = [] }) {
+async function sendFeishuResultFile(file, replyTo, taskId) {
+  if (!feishuClient || !replyTo) throw Error('应用机器人或本轮通知未就绪。');
+  const uploaded = await feishuClient.im.v1.file.create({ data: { file_type: 'stream', file_name: file.name, file: file.bytes } });
+  const fileKey = uploaded?.file_key || uploaded?.data?.file_key;
+  if (uploaded?.code || !fileKey) throw Error('文件上传失败，请检查机器人资源权限。');
+  const response = await feishuClient.im.v1.message.reply({ path: { message_id: replyTo }, data: { msg_type: 'file', content: JSON.stringify({ file_key: fileKey }), reply_in_thread: true } });
+  if (response?.code || !response?.data?.message_id) throw Error('文件消息发送失败。');
+  const links = config.feishuMessageThreads || {};
+  links[response.data.message_id] = taskId;
+  config.feishuMessageThreads = Object.fromEntries(Object.entries(links).slice(-100));
+  await saveConfig();
+}
+
+async function notifyTurnResult(text, { taskId, turnId, finalText, imagePaths = [], htmlPaths = [], cwd = '' }) {
   if (!await markCodexTurnComplete(turnId)) return;
   const quota = await currentQuotaText();
   const notice = await notify(`${text}\n\n${quota}`, { appName: 'Codex 任务', taskId });
@@ -755,6 +770,16 @@ async function notifyTurnResult(text, { taskId, turnId, finalText, imagePaths = 
       pushHistory({ at: Date.now(), appName: 'Codex 图片', body, sent: false, reason: 'image-relay-failed' });
       await saveConfig();
     } });
+  const htmlCandidates = typeof finalHtmlPaths === 'function' ? finalHtmlPaths(finalText, htmlPaths) : htmlPaths;
+  for (const filePath of htmlCandidates) {
+    try {
+      const file = await readRelayHtml(filePath, { trusted: htmlPaths.map(String).includes(filePath) || Boolean(cwd && path.relative(cwd, filePath) && !path.isAbsolute(path.relative(cwd, filePath))), root: cwd });
+      await sendFeishuResultFile(file, notice.messageId, taskId);
+    } catch (error) {
+      pushHistory({ at: Date.now(), appName: 'Codex 文件', body: `HTML 未回传：${path.basename(filePath)}`, sent: false, reason: error.message });
+      await saveConfig();
+    }
+  }
 }
 
 function wrapFeishuText(value, maxLength = 110) {
@@ -2196,6 +2221,12 @@ async function processCodexSessionAppend(file) {
         if (savedPath) codexSessionImagePaths.set(key, [...new Set([...(codexSessionImagePaths.get(key) || []), savedPath])].slice(0, 6));
         continue;
       }
+      if (event?.type === 'event_msg' && event?.payload?.type === 'item_completed' && event.payload.item?.savedPath && /\.html?$/i.test(String(event.payload.item.savedPath))) {
+        const key = `${file}:${String(event.payload.turn_id || '')}`;
+        const savedPath = String(event.payload.item.savedPath);
+        codexSessionHtmlPaths.set(key, [...new Set([...(codexSessionHtmlPaths.get(key) || []), savedPath])].slice(0, 6));
+        continue;
+      }
       if (event?.type !== 'event_msg' || event?.payload?.type !== 'task_complete') continue;
       const cachedKind = codexSessionKinds.get(file) || 'unknown';
       const freshKind = await readCodexSessionKind(file);
@@ -2215,9 +2246,12 @@ async function processCodexSessionAppend(file) {
       }
       if (!message) continue;
       const imagePaths = codexSessionImagePaths.get(`${file}:${turnId}`) || [];
+      const htmlPaths = codexSessionHtmlPaths.get(`${file}:${turnId}`) || [];
       codexSessionImagePaths.delete(`${file}:${turnId}`);
+      codexSessionHtmlPaths.delete(`${file}:${turnId}`);
       await finishDesktopTakeover(threadId);
-      await notifyTurnResult(await completionNotice({ taskId: threadId, status: 'completed', body: message, cwd: sessionActivities.get(threadId)?.cwd }), { taskId: threadId, turnId, finalText: message, imagePaths });
+      const cwd = sessionActivities.get(threadId)?.cwd || '';
+      await notifyTurnResult(await completionNotice({ taskId: threadId, status: 'completed', body: message, cwd }), { taskId: threadId, turnId, finalText: message, imagePaths, htmlPaths, cwd });
     }
   } catch (error) { console.error('[codex session monitor]', error.message); }
 }
@@ -2307,7 +2341,7 @@ class CodexServer {
   request(method, params) { const id = ++this.nextId; return new Promise((resolve, reject) => { const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`${method} 超时`)); }, 120000); this.pending.set(id, { resolve, reject, timer }); this.send({ method, id, params }); }); }
   async startTask(prompt, cwd) {
     const r = await this.request('thread/start', { cwd, serviceName: 'codex_companion' });
-    const id = r.thread.id; const task = { id, cwd, prompt, status: 'starting', output: '', startedAt: new Date().toISOString(), lastEventAt: Date.now(), stallNotified: false, turnImagePaths: [] };
+    const id = r.thread.id; const task = { id, cwd, prompt, status: 'starting', output: '', startedAt: new Date().toISOString(), lastEventAt: Date.now(), stallNotified: false, turnImagePaths: [], turnHtmlPaths: [] };
     tasks.set(id, task);
     await this.request('turn/start', { threadId: id, input: [{ type: 'text', text: prompt }], cwd });
     task.status = 'running'; return task;
@@ -2375,9 +2409,10 @@ class CodexServer {
     const p = msg.params || {}; const id = p.threadId;
     if (id && tasks.has(id)) {
       const task = tasks.get(id); task.lastEventAt = Date.now();
-      if (msg.method === 'turn/started' && p.turn?.id) { this.turns.set(id, p.turn.id); task.turnOutput = ''; task.turnFinalText = ''; task.turnImagePaths = []; }
+      if (msg.method === 'turn/started' && p.turn?.id) { this.turns.set(id, p.turn.id); task.turnOutput = ''; task.turnFinalText = ''; task.turnImagePaths = []; task.turnHtmlPaths = []; }
       if (msg.method?.includes('agentMessage/delta')) { task.output += p.delta || ''; task.turnOutput = (task.turnOutput || '') + (p.delta || ''); }
       if (msg.method === 'item/completed' && p.item?.type === 'imageGeneration' && p.item.savedPath) task.turnImagePaths = [...new Set([...(task.turnImagePaths || []), String(p.item.savedPath)])].slice(0, 6);
+      if (msg.method === 'item/completed' && p.item?.savedPath && /\.html?$/i.test(String(p.item.savedPath))) task.turnHtmlPaths = [...new Set([...(task.turnHtmlPaths || []), String(p.item.savedPath)])].slice(0, 6);
       if (msg.method === 'item/completed' && p.item?.type === 'agentMessage' && p.item.phase !== 'commentary') task.turnFinalText = String(p.item.text || '');
       if (msg.method === 'turn/completed') {
         this.turns.delete(id); task.stopRequested = false;
@@ -2404,7 +2439,7 @@ class CodexServer {
           task.turnFinalText = `429 Too Many Requests，已自动继续 ${maxAttempts} 次仍未恢复。请稍后重试或在飞书回复“继续”。`;
         }
         const noticeBody = task.turnFinalText || finalText;
-        completionNotice({ taskId: id, status: task.status, body: trim(noticeBody, 3000), cwd: task.cwd }).then(notice => notifyTurnResult(notice, { taskId: id, turnId: p.turn?.id, finalText: task.status === 'completed' ? task.turnFinalText || '' : '', imagePaths: task.turnImagePaths || [] })).catch(error => console.error('[task notification]', error.message));
+        completionNotice({ taskId: id, status: task.status, body: trim(noticeBody, 3000), cwd: task.cwd }).then(notice => notifyTurnResult(notice, { taskId: id, turnId: p.turn?.id, finalText: task.status === 'completed' ? task.turnFinalText || '' : '', imagePaths: task.turnImagePaths || [], htmlPaths: task.turnHtmlPaths || [], cwd: task.cwd })).catch(error => console.error('[task notification]', error.message));
         finishDesktopTakeover(id).catch(error => console.error('[desktop relaunch]', error.message));
         refreshQuotaAfterTask(task).catch(error => console.error('[task quota]', error.message));
       }
