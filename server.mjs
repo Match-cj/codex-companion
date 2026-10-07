@@ -14,7 +14,7 @@ import { relayFinalImages, validateImageRoot } from './image-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.46';
+const APP_VERSION = '0.7.47';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -2206,6 +2206,11 @@ async function processCodexSessionAppend(file) {
       const turnId = String(event.payload.turn_id || '');
       const threadId = sessionThreadId(file);
       const message = String(event.payload.last_agent_message || '').trim();
+      const rateLimited = /(?:\b429\b|too many requests|exceeded retry limit)/i.test(JSON.stringify(event.payload));
+      if (rateLimited) {
+        await notify(`Codex 任务因 429 限流中断\n对话：${threadId}\n请在这条通知下添加快捷表情继续，或稍后在 Codex 中重试。\n${dashboardLink(`#task=${encodeURIComponent(threadId)}`)}`, { appName: 'Codex 任务', taskId: threadId });
+        continue;
+      }
       if (!message) continue;
       const imagePaths = codexSessionImagePaths.get(`${file}:${turnId}`) || [];
       codexSessionImagePaths.delete(`${file}:${turnId}`);
