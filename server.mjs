@@ -15,7 +15,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.52';
+const APP_VERSION = '0.7.53';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -917,7 +917,10 @@ async function handleFeishuMessage(data) {
       return;
     }
     const links = config.feishuMessageThreads && typeof config.feishuMessageThreads === 'object' ? config.feishuMessageThreads : {};
-    const threadId = links[message.parent_id] || links[message.root_id] || config.feishuBoundThreadId;
+    // In a topic, root_id identifies the Codex task. Prefer it over the
+    // immediate parent: older releases mapped an unrelated Windows-notice
+    // reply to the default conversation, which misrouted “继续”.
+    const threadId = links[message.root_id] || links[message.parent_id] || config.feishuBoundThreadId;
     if (!threadId) {
       await sendFeishuAppText('还没有绑定 Codex 对话，请先发送“绑定”。', { replyTo: message.message_id });
       return;

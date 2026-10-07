@@ -1,6 +1,6 @@
 # Codex Companion
 
-独立的 Windows Codex 伴侣程序。当前开发基线为 v0.7.52（所有对话图片回传与项目/对话完成通知）：
+独立的 Windows Codex 伴侣程序。当前开发基线为 v0.7.53（所有对话图片回传与项目/对话完成通知）：
 
 浮窗非当前账号卡片增加“切换账号”按钮；单击按钮后二次确认才正式切换。原双击卡片仍保留。浮窗不再额外发送网页没有的预验证请求，正式切换与网页走同一 `/api/accounts/switch`；服务端与浮窗均核对切换后的当前账号 ID。自检会模拟按下按钮，确认事件处理函数确实被调用。
 
@@ -73,7 +73,7 @@
 
 推荐直接发送单个文件：
 
-`CodexCompanion-Setup-v0.7.52.exe`
+`CodexCompanion-Setup-v0.7.53.exe`
 
 用户双击一次即可安装并启动，安装器已经内置 Node.js 和官方 Codex CLI，不再要求另外安装 Node.js、Codex CLI 或 Codex Switcher。已有 Switcher 账号的用户仍可在高级设置中一次性迁移；新用户直接使用 Companion 的通用网页登录或设备码登录。Codex 桌面应用可选，但想使用切换后自动打开功能时需要安装。
 
