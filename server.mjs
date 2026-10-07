@@ -15,7 +15,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.49';
+const APP_VERSION = '0.7.50';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -131,6 +131,7 @@ const codexSessionDebounces = new Map();
 const codexSessionKinds = new Map();
 const codexSessionImagePaths = new Map();
 const codexSessionHtmlPaths = new Map();
+const codexSessionTopicsAnnounced = new Set();
 const sessionActivities = new Map();
 function observeSessionActivity(event, kind, threadId, cwd = '') {
   if (kind !== 'user' || !threadId || event?.type !== 'event_msg') return;
@@ -780,6 +781,17 @@ async function notifyTurnResult(text, { taskId, turnId, finalText, imagePaths = 
       await saveConfig();
     }
   }
+}
+
+async function announceDesktopConversation(threadId) {
+  const id = String(threadId || '').trim();
+  if (!id || codexSessionTopicsAnnounced.has(id)) return;
+  const roots = config.feishuTaskTopicRoots && typeof config.feishuTaskTopicRoots === 'object' ? config.feishuTaskTopicRoots : {};
+  if (roots[id]) { codexSessionTopicsAnnounced.add(id); return; }
+  codexSessionTopicsAnnounced.add(id);
+  const activity = sessionActivities.get(id);
+  const label = await taskConversationLabel(id, activity?.title || '', activity?.cwd || '');
+  await notify(`Codex 对话已开始\n${label}\n任务：${id}\n后续完成、图片、HTML 和 429 通知都会进入这个话题。`, { appName: 'Codex 任务', taskId: id });
 }
 
 function wrapFeishuText(value, maxLength = 110) {
@@ -1888,6 +1900,10 @@ async function notify(text, opts = {}) {
         roots[embeddedTaskId] = messageId;
         config.feishuTaskTopicRoots = Object.fromEntries(Object.entries(roots).slice(-100));
         saveConfig().catch(() => {});
+        // Feishu only exposes a dedicated topic window after the root has a
+        // reply. Create one short marker so every task is immediately findable
+        // as a topic, even before its first completion/image reply.
+        await sendFeishuAppText('已建立此 Codex 任务话题。', { replyTo: messageId, taskId: embeddedTaskId });
       }
     } else {
       const response = await fetch(config.feishuWebhookUrl, { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ msg_type: 'post', content: { post: buildFeishuPost(text) } }) });
@@ -2215,6 +2231,9 @@ async function processCodexSessionAppend(file) {
       }
       observeSessionPrompt(event, sessionThreadId(file));
       observeSessionActivity(event, codexSessionKinds.get(file) || 'unknown', sessionThreadId(file));
+      if ((codexSessionKinds.get(file) || 'unknown') === 'user' && event?.type === 'response_item' && event.payload?.type === 'message') {
+        announceDesktopConversation(sessionThreadId(file)).catch(error => console.error('[codex topic]', error.message));
+      }
       if (event?.type === 'event_msg' && event?.payload?.type === 'item_completed' && event.payload.item?.type === 'imageGeneration') {
         const savedPath = String(event.payload.item.savedPath || '').trim();
         const key = `${file}:${String(event.payload.turn_id || '')}`;
