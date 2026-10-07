@@ -15,7 +15,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.50';
+const APP_VERSION = '0.7.52';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -2251,7 +2251,10 @@ async function processCodexSessionAppend(file) {
       const freshKind = await readCodexSessionKind(file);
       const sessionKind = freshKind !== 'unknown' ? freshKind : cachedKind;
       codexSessionKinds.set(file, sessionKind);
-      if (sessionKind !== 'user') {
+      // Ignore unknown/system logs, but keep the final completion of subagent
+      // conversations. Their intermediate events are never forwarded because
+      // this monitor only handles task_complete below.
+      if (!['user', 'subagent'].includes(sessionKind)) {
         console.log(`[codex session monitor] ignored ${sessionKind} completion: ${sessionThreadId(file) || path.basename(file)}`);
         continue;
       }
