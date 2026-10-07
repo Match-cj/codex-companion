@@ -151,6 +151,10 @@ var
 begin
   if CurStep = ssPostInstall then
   begin
+    WizardForm.ProgressGauge.Style := npbstMarquee;
+    WizardForm.StatusLabel.Caption := '正在解压、校验并启动后台服务，请稍候……';
+    WizardForm.FilenameLabel.Caption := '最后步骤可能需要几十秒，安装窗口请保持打开。';
+    WizardForm.Refresh;
     if (not Exec(ExpandConstant('{tmp}\CodexCompanionSetup\Install Branded.cmd'), '', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)) or (ResultCode <> 0) then
       RaiseException('Codex Companion 安装失败。请把桌面的 CodexCompanion安装失败日志.txt 发给开发者。备用日志：' + ExpandConstant('{tmp}\CodexCompanion-install.log'));
   end;
