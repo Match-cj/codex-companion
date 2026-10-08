@@ -15,7 +15,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.56';
+const APP_VERSION = '0.7.57';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -50,7 +50,7 @@ const defaultConfig = {
   autoContinue429: true,
   autoContinue429MaxAttempts: 3,
   autoContinueTransient: true,
-  autoContinueTransientMaxAttempts: 2,
+  autoContinueTransientMaxAttempts: 3,
   feishuIncludeDashboardLink: false,
   publicDashboardUrl: '',
   accountAliases: {},
@@ -802,6 +802,14 @@ async function announceDesktopConversation(threadId) {
   await notify(`Codex 对话已开始\n${label}\n任务：${id}\n后续完成、图片、HTML 和 429 通知都会进入这个话题。`, { appName: 'Codex 任务', taskId: id });
 }
 
+async function ensureFeishuTaskTopic(threadId) {
+  const id = String(threadId || '').trim();
+  if (!id || config.feishuNotificationThreadMode !== 'task' || !feishuClient || !config.feishuBoundChatId) return;
+  const roots = config.feishuTaskTopicRoots && typeof config.feishuTaskTopicRoots === 'object' ? config.feishuTaskTopicRoots : {};
+  if (roots[id]) return;
+  await announceDesktopConversation(id);
+}
+
 function wrapFeishuText(value, maxLength = 110) {
   const source = String(value || '').trim();
   if (!source) return [];
@@ -939,7 +947,8 @@ async function handleFeishuMessage(data) {
       await sendFeishuAppText('还没有绑定 Codex 对话，请先发送“绑定”。', { replyTo: message.message_id });
       return;
     }
-    const task = await continueThreadFromFeishu(String(threadId), input);
+    if (typeof ensureFeishuTaskTopic === 'function') await ensureFeishuTaskTopic(String(threadId));
+    const task = await continueThreadFromFeishu(String(threadId), input, { manual: true });
     config.feishuBoundThreadId = task.id;
     config.feishuBoundThreadName = String(task.prompt || task.id);
     await saveConfig();
@@ -971,9 +980,10 @@ function isActiveWriterError(error) {
   return /already has an active writer|thread-store conflict/i.test(String(error?.message || error || ''));
 }
 
-async function continueThreadFromFeishu(threadId, input) {
+async function continueThreadFromFeishu(threadId, input, { manual = false } = {}) {
   try {
     const task = await codex.resumeTask(threadId);
+    if (manual) { task.autoRetryTransientCount = 0; task.autoRetry429Count = 0; }
     await codex.continueTask(task, input);
     return task;
   } catch (error) {
@@ -995,6 +1005,7 @@ async function continueThreadFromFeishu(threadId, input) {
       }
     }
     if (!task) throw lastError || Error('Codex 桌面端仍在占用这个对话。');
+    if (manual) { task.autoRetryTransientCount = 0; task.autoRetry429Count = 0; }
     await codex.continueTask(task, input);
     task.remoteDesktopTakeover = true;
     await rememberDesktopTakeover(threadId);
@@ -1056,7 +1067,7 @@ async function handleFeishuReaction(data) {
       return;
     }
     feishuContinueRequests.set(threadId, now);
-    const task = await continueThreadFromFeishu(threadId, [{ type: 'text', text: '继续往下推进' }]);
+    const task = await continueThreadFromFeishu(threadId, [{ type: 'text', text: '继续往下推进' }], { manual: true });
     await sendFeishuAppText('已收到表情，继续推进这个 Codex 对话。', { replyTo: messageId, taskId: task.id });
     setTimeout(() => { if (feishuContinueRequests.get(threadId) === now) feishuContinueRequests.delete(threadId); }, 45000).unref?.();
   } catch (error) {
@@ -2493,7 +2504,7 @@ class CodexServer {
         }
         const transientFailure = /selected model is at capacity|model is temporarily unavailable|service unavailable|stream disconnected|stream closed before response\.completed|connection reset|socket hang up/i.test(`${turnError}\n${finalText}`);
         if (task.status === 'failed' && transientFailure && config.autoContinueTransient !== false) {
-          const maxAttempts = Math.min(Math.max(Number(config.autoContinueTransientMaxAttempts) || 2, 1), 5);
+          const maxAttempts = Math.min(Math.max(Number(config.autoContinueTransientMaxAttempts) || 3, 1), 5);
           task.autoRetryTransientCount = Number(task.autoRetryTransientCount || 0) + 1;
           if (task.autoRetryTransientCount <= maxAttempts) {
             const delayMs = Math.min(90000, 20000 * task.autoRetryTransientCount);
@@ -2601,6 +2612,7 @@ async function handle(req, res) {
       try{await refreshAccounts()}catch{}
       const task=await codex.resumeTask(decodeURIComponent(threadContinue[1]));
       task.quotaBaseline=activeQuotaSnapshot();
+      task.autoRetryTransientCount=0;task.autoRetry429Count=0;
       await codex.continueTask(task,text);
       return send(res,200,{ok:true,id:task.id,message:'已在原对话中继续，不会新建对话。'});
     }
