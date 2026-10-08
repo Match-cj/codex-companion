@@ -15,7 +15,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.57';
+const APP_VERSION = '0.7.58';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -2507,7 +2507,7 @@ class CodexServer {
           const maxAttempts = Math.min(Math.max(Number(config.autoContinueTransientMaxAttempts) || 3, 1), 5);
           task.autoRetryTransientCount = Number(task.autoRetryTransientCount || 0) + 1;
           if (task.autoRetryTransientCount <= maxAttempts) {
-            const delayMs = Math.min(90000, 20000 * task.autoRetryTransientCount);
+            const delayMs = 20000;
             task.status = 'retry_waiting';
             task.output = `Codex 暂时不可用，${Math.round(delayMs / 1000)} 秒后自动重试（第 ${task.autoRetryTransientCount}/${maxAttempts} 次）。`;
             notify(`Codex 暂时不可用，正在自动重试\n任务：${id}\n${Math.round(delayMs / 1000)} 秒后重试\n第 ${task.autoRetryTransientCount}/${maxAttempts} 次`, { appName: 'Codex 任务', taskId: id });
