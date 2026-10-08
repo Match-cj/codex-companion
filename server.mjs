@@ -15,7 +15,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.55';
+const APP_VERSION = '0.7.56';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -927,10 +927,14 @@ async function handleFeishuMessage(data) {
       return;
     }
     const links = config.feishuMessageThreads && typeof config.feishuMessageThreads === 'object' ? config.feishuMessageThreads : {};
+    const topicRoots = config.feishuTaskTopicRoots && typeof config.feishuTaskTopicRoots === 'object' ? config.feishuTaskTopicRoots : {};
+    const rootId = String(message.root_id || message.rootId || '').trim();
+    const parentId = String(message.parent_id || message.parentId || '').trim();
+    const topicRootTask = Object.entries(topicRoots).find(([_, value]) => String(value) === rootId || String(value) === parentId)?.[0] || '';
     // In a topic, root_id identifies the Codex task. Prefer it over the
     // immediate parent: older releases mapped an unrelated Windows-notice
     // reply to the default conversation, which misrouted “继续”.
-    const threadId = links[message.root_id] || links[message.parent_id] || config.feishuBoundThreadId;
+    const threadId = links[rootId] || links[parentId] || topicRootTask || config.feishuBoundThreadId;
     if (!threadId) {
       await sendFeishuAppText('还没有绑定 Codex 对话，请先发送“绑定”。', { replyTo: message.message_id });
       return;
