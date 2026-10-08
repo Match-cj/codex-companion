@@ -5,8 +5,12 @@ import { createHash } from 'node:crypto';
 export const IMAGE_LIMIT = 10 * 1024 * 1024;
 export function finalImagePaths(text, extraPaths = []) {
   const paths = [];
-  // Only explicit Markdown images, never plain links, tool input or remote URLs.
-  for (const match of String(text || '').matchAll(/!\[[^\]\r\n]*\]\(\s*(<[^>\r\n]+>|[^\s)]+)\s*\)/g)) {
+  // Accept both Markdown images and local Markdown links. Codex commonly
+  // renders generated images as `[draft.png](C:/.../draft.png)` rather than
+  // `![draft.png](...)`; the latter used to make the Feishu relay silently
+  // skip an otherwise valid generated image. Remote/relative links remain
+  // excluded.
+  for (const match of String(text || '').matchAll(/!?\[[^\]\r\n]*\]\(\s*(<[^>\r\n]+>|[^\s)]+)\s*\)/g)) {
     let target = match[1].replace(/^<|>$/g, '').replace(/^sandbox:/, '');
     try { target = decodeURIComponent(target); } catch { continue; }
     if (process.platform === 'win32' && /^\/[a-z]:\//i.test(target)) target = target.slice(1);

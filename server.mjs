@@ -10,12 +10,12 @@ import { createHash, createCipheriv, createDecipheriv, randomBytes, randomUUID, 
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import * as Lark from '@larksuiteoapi/node-sdk';
-import { relayFinalImages, validateImageRoot } from './image-relay.mjs';
+import { finalImagePaths, relayFinalImages, validateImageRoot } from './image-relay.mjs';
 import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.8.4';
+const APP_VERSION = '0.8.5';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -813,7 +813,12 @@ async function notifyTurnResult(text, { taskId, turnId, finalText, imagePaths = 
   const quota = await currentQuotaText();
   const notice = await notify(`${text}\n\n${quota}`, { appName: 'Codex 任务', taskId });
   if (!notice.ok || !notice.messageId) return;
-  await relayFinalImages({ text: finalText, paths: imagePaths, trustedPaths: imagePaths, enabled: config.feishuImageRelayEnabled === true, root: config.feishuImageRelayRoot || '',
+  // Codex often returns generated images as ordinary Markdown links rather
+  // than image syntax. Include those paths here so they are relayed even when
+  // the session event did not expose an `imageGeneration` item.
+  const textImagePaths = finalImagePaths(finalText, []);
+  const allImagePaths = [...new Set([...(imagePaths || []), ...textImagePaths])].slice(0, 6);
+  await relayFinalImages({ text: finalText, paths: allImagePaths, trustedPaths: allImagePaths, enabled: config.feishuImageRelayEnabled === true, root: config.feishuImageRelayRoot || '',
     send: bytes => sendFeishuResultImage(bytes, notice.messageId, taskId),
     report: async body => {
       pushHistory({ at: Date.now(), appName: 'Codex 图片', body, sent: false, reason: 'image-relay-failed' });
