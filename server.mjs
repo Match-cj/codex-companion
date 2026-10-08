@@ -15,7 +15,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.8.0';
+const APP_VERSION = '0.8.1';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -53,6 +53,7 @@ const defaultConfig = {
   autoContinue429MaxAttempts: 3,
   autoContinueTransient: true,
   autoContinueTransientMaxAttempts: 3,
+  autoFallbackModel: 'gpt-6-luna',
   feishuIncludeDashboardLink: false,
   publicDashboardUrl: '',
   accountAliases: {},
@@ -98,6 +99,29 @@ function publicDiagnostics() {
     privacy: '仅包含白名单状态和数量；不包含账号身份、路径、任务内容、原始日志、网络地址或任何凭据。' };
   report.issues = diagnosticIssues(report);
   return report;
+}
+function publicDiagnosticBundle() {
+  const history = Array.isArray(config.notificationHistory) ? config.notificationHistory : [];
+  return {
+    format: 2,
+    diagnostics: publicDiagnostics(),
+    notificationDelivery: history.slice(0, 30).map(item => ({ at: item.at, appName: normalizeAppName(item.appName), sent: !!item.sent, reason: item.reason || '' })),
+    recovery: {
+      retry429: config.autoContinue429 !== false,
+      retry429MaxAttempts: Number(config.autoContinue429MaxAttempts || 3),
+      retryTransient: config.autoContinueTransient !== false,
+      retryTransientMaxAttempts: Number(config.autoContinueTransientMaxAttempts || 3),
+      fallbackModel: String(config.autoFallbackModel || ''),
+    },
+    feishu: {
+      configured: !!(config.feishuAppId && config.feishuAppSecretProtected),
+      state: publicFeishuState().state,
+      boundChat: !!config.feishuBoundChatId,
+      topicMode: config.feishuNotificationThreadMode === 'task',
+      topicRootCount: Object.keys(config.feishuTaskTopicRoots || {}).length,
+    },
+    privacy: '不包含账号身份、凭据、文件路径、任务内容、对话内容、群聊 ID、消息 ID 或原始日志。',
+  };
 }
 function diagnosticIssues(report) {
   const issues = [], add = (code, severity, message) => issues.push({ code, severity, message });
@@ -2525,12 +2549,19 @@ class CodexServer {
     return task;
   }
   async continueTask(task, input) {
+    const model = arguments[2]?.model || '';
     if ((task.stopRequested || this.stopRequests?.has(task.id)) && ['starting','running','waiting_confirmation'].includes(task.status)) throw Error('停止请求尚未确认，请等本轮结束后再追加任务。');
     task.stopRequested = false;
     const items = Array.isArray(input) ? input : [{ type: 'text', text: String(input || '') }];
     const active = this.turns.get(task.id);
     if (active) await this.request('turn/steer', { threadId: task.id, input: items, expectedTurnId: active });
-    else { task.turnImagePaths = []; await this.request('turn/start', { threadId: task.id, input: items, cwd: task.cwd }); }
+    else {
+      task.turnImagePaths = [];
+      const params = { threadId: task.id, input: items, cwd: task.cwd };
+      if (model) params.model = model;
+      await this.request('turn/start', params);
+      task.retryModel = model || '';
+    }
     task.status = 'running'; task.lastEventAt = Date.now(); task.stallNotified = false;
   }
   async stopTask(task) {
@@ -2581,19 +2612,23 @@ class CodexServer {
           }
           task.turnFinalText = `429 Too Many Requests，已自动继续 ${maxAttempts} 次仍未恢复。请稍后重试或在飞书回复“继续”。`;
         }
-        const transientFailure = /selected model is at capacity|model is temporarily unavailable|service unavailable|stream disconnected|stream closed before response\.completed|connection reset|socket hang up/i.test(`${turnError}\n${finalText}`);
+        const capacityFailure = /selected model is at capacity|model is temporarily unavailable/i.test(`${turnError}\n${finalText}`);
+        const transientFailure = capacityFailure || /service unavailable|stream disconnected|stream closed before response\.completed|connection reset|socket hang up/i.test(`${turnError}\n${finalText}`);
         if (task.status === 'failed' && transientFailure && config.autoContinueTransient !== false) {
           const maxAttempts = Math.min(Math.max(Number(config.autoContinueTransientMaxAttempts) || 3, 1), 5);
           task.autoRetryTransientCount = Number(task.autoRetryTransientCount || 0) + 1;
           if (task.autoRetryTransientCount <= maxAttempts) {
             const delayMs = 20000;
             task.status = 'retry_waiting';
-            task.output = `Codex 暂时不可用，${Math.round(delayMs / 1000)} 秒后自动重试（第 ${task.autoRetryTransientCount}/${maxAttempts} 次）。`;
-            notify(`Codex 暂时不可用，正在自动重试\n任务：${id}\n${Math.round(delayMs / 1000)} 秒后重试\n第 ${task.autoRetryTransientCount}/${maxAttempts} 次`, { appName: 'Codex 任务', taskId: id });
+            const fallbackModel = capacityFailure && task.autoRetryTransientCount === 1 ? String(config.autoFallbackModel || '').trim() : '';
+            task.output = fallbackModel
+              ? `当前模型繁忙，${Math.round(delayMs / 1000)} 秒后自动改用 ${fallbackModel} 重试。`
+              : `Codex 暂时不可用，${Math.round(delayMs / 1000)} 秒后自动重试（第 ${task.autoRetryTransientCount}/${maxAttempts} 次）。`;
+            notify(`${fallbackModel ? `当前模型繁忙，将自动切换到 ${fallbackModel}` : 'Codex 暂时不可用，正在自动重试'}\n任务：${id}\n${Math.round(delayMs / 1000)} 秒后重试\n第 ${task.autoRetryTransientCount}/${maxAttempts} 次`, { appName: 'Codex 任务', taskId: id });
             clearTimeout(this.retryTimers.get(id));
             this.retryTimers.set(id, setTimeout(async () => {
               this.retryTimers.delete(id);
-              try { await this.continueTask(task, [{ type: 'text', text: '继续往下推进，恢复本轮任务并完成剩余工作。' }]); }
+              try { await this.continueTask(task, [{ type: 'text', text: '继续往下推进，恢复本轮任务并完成剩余工作。' }], { model: fallbackModel }); }
               catch (error) { task.status = 'failed'; task.turnFinalText = `自动继续失败：${humanError(error)}`; completionNotice({ taskId: id, status: task.status, body: task.turnFinalText, cwd: task.cwd }).then(notice => notifyTurnResult(notice, { taskId: id, turnId: `retry-${Date.now()}`, finalText: '', imagePaths: [] })).catch(e => console.error('[task retry notification]', e.message)); }
             }, delayMs));
             return;
@@ -2643,8 +2678,9 @@ async function handle(req, res) {
   try {
     if (req.method==='GET'&&u.pathname==='/api/diagnostics') {
       if(!isLoopback(req.socket.remoteAddress))return send(res,403,{error:'诊断导出仅允许本机操作'});
-      const bytes=Buffer.from(JSON.stringify(publicDiagnostics(),null,2));
-      res.writeHead(200,{'content-type':'application/json; charset=utf-8','content-length':bytes.length,'cache-control':'no-store','content-disposition':'attachment; filename="CodexCompanion-diagnostics.json"'});
+      const bytes=Buffer.from(JSON.stringify(publicDiagnosticBundle(),null,2));
+      const stamp=new Date().toISOString().replace(/[-:]/g,'').slice(0,13).replace('T','-');
+      res.writeHead(200,{'content-type':'application/json; charset=utf-8','content-length':bytes.length,'cache-control':'no-store','content-disposition':`attachment; filename="CodexCompanion-diagnostics-${stamp}.json"`});
       return res.end(bytes);
     }
     if (req.method==='POST'&&u.pathname==='/api/diagnostics/repair') {
@@ -2869,6 +2905,17 @@ async function handle(req, res) {
       ensureHistory();
       const limit = Math.min(Math.max(Number(u.searchParams.get('limit')) || 50, 1), 200);
       return send(res, 200, { history: config.notificationHistory.slice(0, limit) });
+    }
+    if (req.method==='POST'&&u.pathname==='/api/notifications/retry'){
+      ensureHistory();
+      const at=Number(data.at);
+      const target=config.notificationHistory.find(item=>Number(item.at)===at);
+      if(!target)throw Error('这条通知记录已经不存在，请刷新后重试。');
+      if(target.sent)throw Error('这条通知已经发送成功，无需重发。');
+      if(target.reason==='muted')throw Error('这类通知当前处于静音状态，请先恢复通知。');
+      const result=await notify(String(target.body||''),{appName:target.appName,taskId:target.taskId||''});
+      if(!result.ok)throw Error(result.reason||'飞书仍未接收，请检查连接状态。');
+      return send(res,200,{ok:true,message:'通知已经重新发送。'});
     }
     if (req.method==='POST'&&u.pathname==='/api/notifications/blacklist'){
       const name = normalizeAppName(data.name);
