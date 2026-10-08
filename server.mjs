@@ -15,7 +15,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.58';
+const APP_VERSION = '0.7.59';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
