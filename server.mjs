@@ -15,7 +15,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.8.5';
+const APP_VERSION = '0.8.6';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -821,7 +821,7 @@ async function notifyTurnResult(text, { taskId, turnId, finalText, imagePaths = 
   await relayFinalImages({ text: finalText, paths: allImagePaths, trustedPaths: allImagePaths, enabled: config.feishuImageRelayEnabled === true, root: config.feishuImageRelayRoot || '',
     send: bytes => sendFeishuResultImage(bytes, notice.messageId, taskId),
     report: async body => {
-      pushHistory({ at: Date.now(), appName: 'Codex 图片', body, sent: false, reason: 'image-relay-failed' });
+      pushHistory({ at: Date.now(), appName: 'Codex 图片', body, sent: false, reason: 'image-relay-failed', retryKind: 'image', replyTo: notice.messageId, taskId, imagePaths: allImagePaths });
       await saveConfig();
     } });
   const htmlCandidates = typeof finalHtmlPaths === 'function' ? finalHtmlPaths(finalText, htmlPaths) : htmlPaths;
@@ -2970,6 +2970,15 @@ async function handle(req, res) {
       if(!target)throw Error('这条通知记录已经不存在，请刷新后重试。');
       if(target.sent)throw Error('这条通知已经发送成功，无需重发。');
       if(target.reason==='muted')throw Error('这类通知当前处于静音状态，请先恢复通知。');
+      if (target.retryKind === 'image') {
+        if (!target.replyTo || !Array.isArray(target.imagePaths) || !target.imagePaths.length) throw Error('图片重试信息不完整，请重新执行任务。');
+        const result = await relayFinalImages({ text: '', paths: target.imagePaths, trustedPaths: target.imagePaths, enabled: true, root: config.feishuImageRelayRoot || '',
+          send: bytes => sendFeishuResultImage(bytes, target.replyTo, target.taskId || ''), report: async () => {} });
+        if (!result.sent) throw Error('图片仍未发送，请确认文件没有被删除且机器人具备图片权限。');
+        target.sent = true; target.reason = 'retried'; target.retryKind = '';
+        await saveConfig();
+        return send(res, 200, { ok: true, message: `图片已重新发送（${result.sent} 张）。` });
+      }
       const result=await notify(String(target.body||''),{appName:target.appName,taskId:target.taskId||''});
       if(!result.ok)throw Error(result.reason||'飞书仍未接收，请检查连接状态。');
       return send(res,200,{ok:true,message:'通知已经重新发送。'});
