@@ -15,7 +15,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.8.1';
+const APP_VERSION = '0.8.2';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -44,6 +44,7 @@ const defaultConfig = {
   feishuTopicRootSchemaVersion: 2,
   feishuTaskTopicChats: {},
   feishuContinueEmoji: 'OK',
+  feishuMentionOperator: true,
   feishuImageRelayEnabled: true,
   feishuImageRelayRoot: '',
   stallMinutes: 3,
@@ -82,6 +83,7 @@ function publicConfig() {
     publicDashboardUrl: config.publicDashboardUrl, quotaRefreshMinutes: config.quotaRefreshMinutes, resetReminderMinutes: config.resetReminderMinutes,
     feishuNotificationThreadMode: config.feishuNotificationThreadMode === 'task' ? 'task' : 'flat',
     feishuContinueEmoji: ['OK','THUMBSUP','DONE','CHECK'].includes(config.feishuContinueEmoji) ? config.feishuContinueEmoji : 'OK',
+    feishuMentionOperator: config.feishuMentionOperator !== false,
     feishuImageRelayEnabled: !!config.feishuImageRelayEnabled, feishuImageRelayRoot: config.feishuImageRelayRoot || '' };
 }
 function publicDiagnostics() {
@@ -743,7 +745,10 @@ function publicFeishuState() {
 
 async function sendFeishuAppText(text, { replyTo = '', taskId = '' } = {}) {
   if (!feishuClient || !config.feishuBoundChatId) return { ok: false, reason: 'app-bot-not-ready' };
-  const data = { content: JSON.stringify(buildFeishuPost(text)), msg_type: 'post' };
+  const post = buildFeishuPost(text);
+  const operatorId = config.feishuMentionOperator !== false && Array.isArray(config.feishuAllowedUserIds) ? String(config.feishuAllowedUserIds[0] || '') : '';
+  if (operatorId && post?.zh_cn?.content) post.zh_cn.content.unshift([{ tag: 'at', user_id: operatorId, user_name: '操作者' }, { tag: 'text', text: ' ' }]);
+  const data = { content: JSON.stringify(post), msg_type: 'post' };
   const response = replyTo
     ? await feishuClient.im.v1.message.reply({ path: { message_id: replyTo }, data: { ...data, reply_in_thread: true } })
     : await feishuClient.im.v1.message.create({ params: { receive_id_type: 'chat_id' }, data: { ...data, receive_id: config.feishuBoundChatId } });
@@ -911,6 +916,20 @@ async function bindLatestFeishuThread() {
   return { id: config.feishuBoundThreadId, name: config.feishuBoundThreadName };
 }
 
+async function rotateFeishuTopic(threadId) {
+  const id = String(threadId || '').trim();
+  if (!id) throw Error('没有识别到要重开话题的 Codex 对话。');
+  const roots = config.feishuTaskTopicRoots && typeof config.feishuTaskTopicRoots === 'object' ? config.feishuTaskTopicRoots : {};
+  const chats = config.feishuTaskTopicChats && typeof config.feishuTaskTopicChats === 'object' ? config.feishuTaskTopicChats : {};
+  delete roots[id];
+  delete chats[id];
+  config.feishuTaskTopicRoots = roots;
+  config.feishuTaskTopicChats = chats;
+  codexSessionTopicsAnnounced.delete(id);
+  await saveConfig();
+  return { ok: true, threadId: id };
+}
+
 async function handleFeishuMessage(data) {
   let replyMessageId = '';
   try {
@@ -981,6 +1000,11 @@ async function handleFeishuMessage(data) {
     const threadId = links[rootId] || links[parentId] || topicRootTask || config.feishuBoundThreadId;
     if (!threadId) {
       await sendFeishuAppText('还没有绑定 Codex 对话，请先发送“绑定”。', { replyTo: message.message_id });
+      return;
+    }
+    if (message.message_type === 'text' && /^(新话题|重开话题|换个话题|rotate topic)$/i.test(text)) {
+      await rotateFeishuTopic(threadId);
+      await sendFeishuAppText('已为这个 Codex 对话关闭旧话题映射。下一条完成结果会自动创建新的飞书话题，旧话题保留不变。', { replyTo: message.message_id, taskId: threadId });
       return;
     }
     if (typeof ensureFeishuTaskTopic === 'function') await ensureFeishuTaskTopic(String(threadId));
@@ -2696,6 +2720,11 @@ async function handle(req, res) {
       await saveConfig();
       return send(res,200,{ok:true,message:'已清空旧话题映射。下一个任务完成或新对话消息会自动创建新的飞书话题。'});
     }
+    if (req.method==='POST'&&u.pathname==='/api/feishu/topics/rotate') {
+      if(!isLoopback(req.socket.remoteAddress))return send(res,403,{error:'重开话题仅允许本机操作'});
+      const result=await rotateFeishuTopic(String(data.taskId||''));
+      return send(res,200,{...result,message:'旧话题已保留；这个对话的下一条结果会创建新的话题。'});
+    }
     if (req.method==='GET'&&u.pathname==='/') return send(res,200,dashboardHtml,'text/html; charset=utf-8');
     if (req.method==='GET'&&u.pathname==='/api/status'){
       const nets = os.networkInterfaces();
@@ -2864,6 +2893,7 @@ async function handle(req, res) {
       if(data.feishuWebhookUrl)config.feishuWebhookUrl=String(data.feishuWebhookUrl);
       config.publicDashboardUrl=String(data.publicDashboardUrl||'');
       if(data.feishuNotificationThreadMode==='task'||data.feishuNotificationThreadMode==='flat') config.feishuNotificationThreadMode=data.feishuNotificationThreadMode;
+      if(typeof data.feishuMentionOperator==='boolean') config.feishuMentionOperator=data.feishuMentionOperator;
       if(['OK','THUMBSUP','DONE','CHECK'].includes(String(data.feishuContinueEmoji||'').toUpperCase())) config.feishuContinueEmoji=String(data.feishuContinueEmoji).toUpperCase();
       await saveConfig();return send(res,200,{ok:true});
     }
