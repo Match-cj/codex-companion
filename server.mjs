@@ -15,7 +15,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.53';
+const APP_VERSION = '0.7.54';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -133,6 +133,10 @@ const codexSessionImagePaths = new Map();
 const codexSessionHtmlPaths = new Map();
 const codexSessionTopicsAnnounced = new Set();
 const sessionActivities = new Map();
+// Reactions can be delivered more than once by Feishu (and users may tap OK
+// repeatedly). Keep one continue request in flight per conversation so a
+// single failed turn does not become several competing writers.
+const feishuContinueRequests = new Map();
 function observeSessionActivity(event, kind, threadId, cwd = '') {
   if (kind !== 'user' || !threadId || event?.type !== 'event_msg') return;
   const payload = event.payload || {};
@@ -219,6 +223,7 @@ function humanError(error) {
   if (message.includes('ECONNREFUSED') || message.includes('fetch failed')) return '连接不上本地服务，请确认 Codex Companion 正在运行。';
   if (message.includes('ENOENT')) return '找不到需要启动的程序，请确认 Codex CLI 已正确安装。';
   if (message.includes('超时')) return 'Codex 两分钟没有回应。任务可能卡住了，请稍后重试或重启 Companion。';
+  if (/stream disconnected|stream closed before response\.completed|connection reset|socket hang up/i.test(message)) return 'Codex 连接在回复完成前中断了。请确认本机代理/网络正常后，再回复“继续”；本次没有消耗新的任务内容。';
   if (message.includes('有任务正在运行')) return message;
   if (message.includes('Webhook')) return message;
   if (message.includes('HTTP 400')) return '账号或请求信息已经失效，请刷新账号；如果仍失败，请在 Companion 网页中重新登录。';
@@ -1019,6 +1024,7 @@ async function recoverInterruptedDesktopTakeovers() {
 }
 
 async function handleFeishuReaction(data) {
+  let requestThreadId = '';
   try {
     const event = data?.event || data || {};
     const emoji = String(event.reaction_type?.emoji_type || event.reactionType?.emojiType || '').toUpperCase();
@@ -1033,9 +1039,21 @@ async function handleFeishuReaction(data) {
     const links = config.feishuMessageThreads && typeof config.feishuMessageThreads === 'object' ? config.feishuMessageThreads : {};
     const threadId = String(links[messageId] || '').trim();
     if (!threadId) return;
+    requestThreadId = threadId;
+    const now = Date.now();
+    const previous = feishuContinueRequests.get(threadId) || 0;
+    if (now - previous < 45000) {
+      await sendFeishuAppText('这个对话刚刚已经收到“继续”请求，请等待本轮结果后再重试。', { replyTo: messageId, taskId: threadId });
+      return;
+    }
+    feishuContinueRequests.set(threadId, now);
     const task = await continueThreadFromFeishu(threadId, [{ type: 'text', text: '继续往下推进' }]);
     await sendFeishuAppText('已收到表情，继续推进这个 Codex 对话。', { replyTo: messageId, taskId: task.id });
-  } catch (error) { console.error('[feishu reaction command]', error.message); }
+    setTimeout(() => { if (feishuContinueRequests.get(threadId) === now) feishuContinueRequests.delete(threadId); }, 45000).unref?.();
+  } catch (error) {
+    console.error('[feishu reaction command]', error.message);
+    if (requestThreadId) feishuContinueRequests.delete(requestThreadId);
+  }
 }
 
 async function startFeishuLongConnection() {
@@ -2462,6 +2480,13 @@ class CodexServer {
             return;
           }
           task.turnFinalText = `429 Too Many Requests，已自动继续 ${maxAttempts} 次仍未恢复。请稍后重试或在飞书回复“继续”。`;
+        }
+        if (task.status === 'failed' && !task.turnFinalText) {
+          const reason = turnError ? humanError(turnError) : '没有收到完整的完成结果。请查看桌面端错误提示后再重试。';
+          task.turnFinalText = `Codex 任务失败：${reason}`;
+          if (task.turnOutput && task.turnOutput !== task.turnFinalText) {
+            task.turnFinalText += `\n\n失败前最后输出：\n${trim(task.turnOutput, 1800)}`;
+          }
         }
         const noticeBody = task.turnFinalText || finalText;
         completionNotice({ taskId: id, status: task.status, body: trim(noticeBody, 3000), cwd: task.cwd }).then(notice => notifyTurnResult(notice, { taskId: id, turnId: p.turn?.id, finalText: task.status === 'completed' ? task.turnFinalText || '' : '', imagePaths: task.turnImagePaths || [], htmlPaths: task.turnHtmlPaths || [], cwd: task.cwd })).catch(error => console.error('[task notification]', error.message));
