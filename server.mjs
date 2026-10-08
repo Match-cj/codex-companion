@@ -15,7 +15,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.8.2';
+const APP_VERSION = '0.8.3';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -171,6 +171,7 @@ const codexSessionImagePaths = new Map();
 const codexSessionHtmlPaths = new Map();
 const codexSessionTopicsAnnounced = new Set();
 const codexSessionContextStats = new Map();
+const feishuTopicCreationLocks = new Map();
 const sessionActivities = new Map();
 // Reactions can be delivered more than once by Feishu (and users may tap OK
 // repeatedly). Keep one continue request in flight per conversation so a
@@ -1985,6 +1986,7 @@ async function notify(text, opts = {}) {
     saveConfig().catch(() => {});
     return { ok: false, reason: 'muted' };
   }
+  let releaseTopicLock = null;
   try {
     const embeddedTaskId = await inferNotificationTaskId(text, opts.taskId);
     let messageId = '';
@@ -1993,6 +1995,19 @@ async function notify(text, opts = {}) {
       const roots = config.feishuTaskTopicRoots && typeof config.feishuTaskTopicRoots === 'object' ? config.feishuTaskTopicRoots : {};
       const chats = config.feishuTaskTopicChats && typeof config.feishuTaskTopicChats === 'object' ? config.feishuTaskTopicChats : {};
       let replyTo = topicMode && embeddedTaskId && chats[embeddedTaskId] === config.feishuBoundChatId ? String(roots[embeddedTaskId] || '') : '';
+      if (topicMode && embeddedTaskId && !replyTo) {
+        const previous = feishuTopicCreationLocks.get(embeddedTaskId) || Promise.resolve();
+        let release;
+        const current = new Promise(resolve => { release = resolve; });
+        feishuTopicCreationLocks.set(embeddedTaskId, current);
+        await previous;
+        releaseTopicLock = () => {
+          release?.();
+          if (feishuTopicCreationLocks.get(embeddedTaskId) === current) feishuTopicCreationLocks.delete(embeddedTaskId);
+        };
+        // Another completion may have created the root while this call waited.
+        replyTo = chats[embeddedTaskId] === config.feishuBoundChatId ? String(roots[embeddedTaskId] || '') : '';
+      }
       const compactText = replyTo
         ? String(text).replace(/^\s*(?:任务|对话)：[0-9a-f-]{20,}\s*$/gmi, '').replace(/\n{3,}/g, '\n\n').trim()
         : text;
@@ -2025,6 +2040,8 @@ async function notify(text, opts = {}) {
         // as a topic, even before its first completion/image reply.
         await sendFeishuAppText('已建立此 Codex 任务话题。', { replyTo: messageId, taskId: embeddedTaskId });
       }
+      releaseTopicLock?.();
+      releaseTopicLock = null;
     } else {
       const response = await fetch(config.feishuWebhookUrl, { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ msg_type: 'post', content: { post: buildFeishuPost(text) } }) });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -2035,6 +2052,9 @@ async function notify(text, opts = {}) {
     saveConfig().catch(() => {});
     return { ok: true, messageId };
   } catch (e) {
+    // Do not leave a per-task creation lock held if the Feishu API rejects a
+    // root or the network drops while creating it.
+    releaseTopicLock?.();
     pushHistory({ at: Date.now(), appName, body: trim(text, 3800), sent: false, reason: e.message, taskId: String(opts.taskId || '') });
     saveConfig().catch(() => {});
     console.error('[feishu]', e.message);
