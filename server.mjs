@@ -15,7 +15,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.59';
+const APP_VERSION = '0.8.0';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -41,6 +41,8 @@ const defaultConfig = {
   feishuBoundChatId: '',
   feishuBoundThreadId: '',
   feishuNotificationThreadMode: 'task',
+  feishuTopicRootSchemaVersion: 2,
+  feishuTaskTopicChats: {},
   feishuContinueEmoji: 'OK',
   feishuImageRelayEnabled: true,
   feishuImageRelayRoot: '',
@@ -82,12 +84,17 @@ function publicConfig() {
     feishuImageRelayEnabled: !!config.feishuImageRelayEnabled, feishuImageRelayRoot: config.feishuImageRelayRoot || '' };
 }
 function publicDiagnostics() {
+  const recentNotifications = Array.isArray(config.notificationHistory) ? config.notificationHistory.slice(0, 50) : [];
+  const topicRoots = config.feishuTaskTopicRoots && typeof config.feishuTaskTopicRoots === 'object' ? config.feishuTaskTopicRoots : {};
+  const topicChats = config.feishuTaskTopicChats && typeof config.feishuTaskTopicChats === 'object' ? config.feishuTaskTopicChats : {};
   const report = { format: 1, appVersion: APP_VERSION, createdAt: new Date().toISOString(),
     runtime: { node: process.version, platform: process.platform, arch: process.arch },
     health: { taskEngineReady: !!codex?.proc, sessionMonitorReady: codexSessionWatcherReady,
       feishuState: publicFeishuState().state, webhookConfigured: !!config.feishuWebhookUrl,
       operatorVerified: !!config.feishuAllowedUserIds?.length, remoteEnabled: !!config.remoteAccessEnabled },
-    counts: { accounts: accounts.length, activeBackendTasks: [...tasks.values()].filter(t => ['starting','running','waiting_confirmation'].includes(t.status)).length },
+    counts: { accounts: accounts.length, activeBackendTasks: [...tasks.values()].filter(t => ['starting','running','waiting_confirmation'].includes(t.status)).length,
+      feishuTopicRoots: Object.keys(topicRoots).length, feishuTopicRootsForBoundChat: Object.keys(topicRoots).filter(id => topicChats[id] === config.feishuBoundChatId).length,
+      recentNotificationFailures: recentNotifications.filter(item => !item.sent).length },
     privacy: '仅包含白名单状态和数量；不包含账号身份、路径、任务内容、原始日志、网络地址或任何凭据。' };
   report.issues = diagnosticIssues(report);
   return report;
@@ -100,6 +107,8 @@ function diagnosticIssues(report) {
   if (!report.health.webhookConfigured && report.health.feishuState === 'not_configured') add('FEISHU_OPTIONAL','info','飞书尚未配置：不影响本机使用；需要通知或手机回复时再设置。');
   else if (!['connected','not_configured'].includes(report.health.feishuState)) add('FEISHU_DISCONNECTED','warning','应用机器人尚未连接。检查飞书应用配置、发布状态及网络。');
   if (report.health.feishuState === 'connected' && !report.health.operatorVerified) add('OPERATOR_UNVERIFIED','warning','飞书回复控制未验证：复制本机指令，在群里 @ 自建应用机器人后发送。');
+  if (report.health.feishuState === 'connected' && report.counts.feishuTopicRoots > report.counts.feishuTopicRootsForBoundChat) add('TOPIC_MAPPING_STALE','warning','检测到旧群聊或旧版本的话题映射；点击“一键自检并修复”可安全重建。');
+  if (report.counts.recentNotificationFailures) add('NOTIFICATION_FAILURES','warning',`最近 50 条通知中有 ${report.counts.recentNotificationFailures} 条未送达，请在“飞书通知”中查看历史或发送测试消息。`);
   if (report.health.remoteEnabled) add('REMOTE_HTTP','info','远程控制已开启。仅在可信私有网络使用；HTTP 本身不提供传输加密。');
   return issues;
 }
@@ -135,6 +144,7 @@ const codexSessionKinds = new Map();
 const codexSessionImagePaths = new Map();
 const codexSessionHtmlPaths = new Map();
 const codexSessionTopicsAnnounced = new Set();
+const codexSessionContextStats = new Map();
 const sessionActivities = new Map();
 // Reactions can be delivered more than once by Feishu (and users may tap OK
 // repeatedly). Keep one continue request in flight per conversation so a
@@ -795,7 +805,8 @@ async function announceDesktopConversation(threadId) {
   const id = String(threadId || '').trim();
   if (!id || codexSessionTopicsAnnounced.has(id)) return;
   const roots = config.feishuTaskTopicRoots && typeof config.feishuTaskTopicRoots === 'object' ? config.feishuTaskTopicRoots : {};
-  if (roots[id]) { codexSessionTopicsAnnounced.add(id); return; }
+  const chats = config.feishuTaskTopicChats && typeof config.feishuTaskTopicChats === 'object' ? config.feishuTaskTopicChats : {};
+  if (roots[id] && chats[id] === config.feishuBoundChatId) { codexSessionTopicsAnnounced.add(id); return; }
   codexSessionTopicsAnnounced.add(id);
   const activity = sessionActivities.get(id);
   const label = await taskConversationLabel(id, activity?.title || '', activity?.cwd || '');
@@ -806,7 +817,8 @@ async function ensureFeishuTaskTopic(threadId) {
   const id = String(threadId || '').trim();
   if (!id || config.feishuNotificationThreadMode !== 'task' || !feishuClient || !config.feishuBoundChatId) return;
   const roots = config.feishuTaskTopicRoots && typeof config.feishuTaskTopicRoots === 'object' ? config.feishuTaskTopicRoots : {};
-  if (roots[id]) return;
+  const chats = config.feishuTaskTopicChats && typeof config.feishuTaskTopicChats === 'object' ? config.feishuTaskTopicChats : {};
+  if (roots[id] && chats[id] === config.feishuBoundChatId) return;
   await announceDesktopConversation(id);
 }
 
@@ -1931,16 +1943,35 @@ async function notify(text, opts = {}) {
     if (feishuClient && config.feishuBoundChatId) {
       const topicMode = config.feishuNotificationThreadMode === 'task';
       const roots = config.feishuTaskTopicRoots && typeof config.feishuTaskTopicRoots === 'object' ? config.feishuTaskTopicRoots : {};
-      const replyTo = topicMode && embeddedTaskId ? String(roots[embeddedTaskId] || '') : '';
+      const chats = config.feishuTaskTopicChats && typeof config.feishuTaskTopicChats === 'object' ? config.feishuTaskTopicChats : {};
+      let replyTo = topicMode && embeddedTaskId && chats[embeddedTaskId] === config.feishuBoundChatId ? String(roots[embeddedTaskId] || '') : '';
       const compactText = replyTo
         ? String(text).replace(/^\s*(?:任务|对话)：[0-9a-f-]{20,}\s*$/gmi, '').replace(/\n{3,}/g, '\n\n').trim()
         : text;
-      const sent = await sendFeishuAppText(compactText, { replyTo, taskId: embeddedTaskId });
+      let sent;
+      try {
+        sent = await sendFeishuAppText(compactText, { replyTo, taskId: embeddedTaskId });
+      } catch (error) {
+        if (!replyTo || !topicMode || !embeddedTaskId) throw error;
+        // The root may have been deleted, belong to an old group, or come from
+        // a pre-topic release. Recreate it once instead of silently losing all
+        // later completions for this conversation.
+        delete roots[embeddedTaskId];
+        delete chats[embeddedTaskId];
+        config.feishuTaskTopicRoots = roots;
+        config.feishuTaskTopicChats = chats;
+        codexSessionTopicsAnnounced.delete(embeddedTaskId);
+        await saveConfig();
+        replyTo = '';
+        sent = await sendFeishuAppText(text, { taskId: embeddedTaskId });
+      }
       messageId = sent.messageId || '';
       if (topicMode && embeddedTaskId && messageId && !replyTo) {
         roots[embeddedTaskId] = messageId;
+        chats[embeddedTaskId] = config.feishuBoundChatId;
         config.feishuTaskTopicRoots = Object.fromEntries(Object.entries(roots).slice(-100));
-        saveConfig().catch(() => {});
+        config.feishuTaskTopicChats = Object.fromEntries(Object.entries(chats).filter(([id]) => config.feishuTaskTopicRoots[id]).slice(-100));
+        await saveConfig();
         // Feishu only exposes a dedicated topic window after the root has a
         // reply. Create one short marker so every task is immediately findable
         // as a topic, even before its first completion/image reply.
@@ -1952,11 +1983,11 @@ async function notify(text, opts = {}) {
       const result = await response.json().catch(() => ({}));
       if (result.code && result.code !== 0) throw new Error(result.msg || `飞书错误 ${result.code}`);
     }
-    pushHistory({ at: Date.now(), appName, body: trim(text, 3800), sent: true });
+    pushHistory({ at: Date.now(), appName, body: trim(text, 3800), sent: true, taskId: embeddedTaskId || '', messageId: messageId || '' });
     saveConfig().catch(() => {});
     return { ok: true, messageId };
   } catch (e) {
-    pushHistory({ at: Date.now(), appName, body: trim(text, 3800), sent: false, reason: e.message });
+    pushHistory({ at: Date.now(), appName, body: trim(text, 3800), sent: false, reason: e.message, taskId: String(opts.taskId || '') });
     saveConfig().catch(() => {});
     console.error('[feishu]', e.message);
     return { ok: false, reason: e.message };
@@ -2222,7 +2253,19 @@ async function taskConversationLabel(taskId, fallback = '', cwd = '') {
 async function completionNotice({ taskId, status, body, cwd = '' }) {
   const label = await taskConversationLabel(taskId, '', cwd);
   const link = config.feishuIncludeDashboardLink === true ? `\n\n${dashboardLink(`#task=${encodeURIComponent(taskId || '')}`)}` : '';
-  return `${label}\n\n${String(body || '').trim()}${link}\n\n状态：${status}`;
+  const labels = { completed: '已完成', failed: '失败', interrupted: '已中断', retry_waiting: '等待自动重试', running: '运行中', waiting_confirmation: '等待确认' };
+  return `${label}\n\n${String(body || '').trim()}${link}\n\n状态：${labels[status] || status}`;
+}
+
+function sessionFailureMessage(threadId, rawError) {
+  const stats = codexSessionContextStats.get(String(threadId)) || {};
+  const used = Number(stats.inputTokens || stats.totalTokens);
+  const limit = Number(stats.contextWindow);
+  const ratio = limit > 0 ? used / limit : 0;
+  if (ratio >= 0.9 && /stream disconnected|stream closed before response\.completed/i.test(String(rawError || ''))) {
+    return `Codex 对话过长，压缩上下文时中断。\n已使用约 ${Math.round(used / 1000)}k / ${Math.round(limit / 1000)}k token（${Math.round(ratio * 100)}%）。\n\n继续重试或切换模型通常不能解决。请新建对话，并让旧对话先生成交接摘要后再继续。`;
+  }
+  return `Codex 任务失败：${humanError(rawError || '没有收到完整的完成结果。')}`;
 }
 
 async function readCodexSessionKind(file) {
@@ -2273,6 +2316,13 @@ async function processCodexSessionAppend(file) {
       }
       observeSessionPrompt(event, sessionThreadId(file));
       observeSessionActivity(event, codexSessionKinds.get(file) || 'unknown', sessionThreadId(file));
+      if (event?.type === 'event_msg' && event?.payload?.type === 'token_count') {
+        const info = event.payload.info || {};
+        const usage = info.total_token_usage || info.last_token_usage || {};
+        codexSessionContextStats.set(sessionThreadId(file), {
+          inputTokens: Number(usage.input_tokens || 0), totalTokens: Number(usage.total_tokens || 0), contextWindow: Number(info.model_context_window || 0), at: Date.now(),
+        });
+      }
       if ((codexSessionKinds.get(file) || 'unknown') === 'user' && event?.type === 'response_item' && event.payload?.type === 'message') {
         announceDesktopConversation(sessionThreadId(file)).catch(error => console.error('[codex topic]', error.message));
       }
@@ -2303,12 +2353,20 @@ async function processCodexSessionAppend(file) {
       const turnId = String(event.payload.turn_id || '');
       const threadId = sessionThreadId(file);
       const message = String(event.payload.last_agent_message || '').trim();
+      const rawError = String(event.payload.error?.message || event.payload.error || '').trim();
       const rateLimited = /(?:\b429\b|too many requests|exceeded retry limit)/i.test(JSON.stringify(event.payload));
       if (rateLimited) {
         await notify(`Codex 任务因 429 限流中断\n对话：${threadId}\n请在这条通知下添加快捷表情继续，或稍后在 Codex 中重试。\n${dashboardLink(`#task=${encodeURIComponent(threadId)}`)}`, { appName: 'Codex 任务', taskId: threadId });
         continue;
       }
-      if (!message) continue;
+      if (!message) {
+        if (rawError) {
+          const cwd = sessionActivities.get(threadId)?.cwd || '';
+          const body = sessionFailureMessage(threadId, rawError);
+          await notifyTurnResult(await completionNotice({ taskId: threadId, status: 'failed', body, cwd }), { taskId: threadId, turnId, finalText: '', imagePaths: [], htmlPaths: [], cwd });
+        }
+        continue;
+      }
       const imagePaths = codexSessionImagePaths.get(`${file}:${turnId}`) || [];
       const htmlPaths = codexSessionHtmlPaths.get(`${file}:${turnId}`) || [];
       codexSessionImagePaths.delete(`${file}:${turnId}`);
@@ -2341,6 +2399,27 @@ async function startCodexSessionMonitor() {
     codexSessionWatcher.on('error', error => { codexSessionWatcherReady = false; console.error('[codex session watcher]', error.message); });
     codexSessionWatcherReady = true;
   } catch (error) { console.error('[codex session watcher]', error.message); }
+}
+
+async function repairCompanion() {
+  const actions = [];
+  const roots = config.feishuTaskTopicRoots && typeof config.feishuTaskTopicRoots === 'object' ? config.feishuTaskTopicRoots : {};
+  const chats = config.feishuTaskTopicChats && typeof config.feishuTaskTopicChats === 'object' ? config.feishuTaskTopicChats : {};
+  const kept = Object.fromEntries(Object.entries(roots).filter(([id]) => chats[id] === config.feishuBoundChatId));
+  if (Object.keys(kept).length !== Object.keys(roots).length) {
+    config.feishuTaskTopicRoots = kept;
+    config.feishuTaskTopicChats = Object.fromEntries(Object.keys(kept).map(id => [id, config.feishuBoundChatId]));
+    await saveConfig();
+    actions.push('已清理旧群聊/旧版本的话题映射');
+  }
+  if (!codex?.proc) { await startTaskEngine(); actions.push('已重新连接后台任务引擎'); }
+  if (config.feishuAppId && config.feishuAppSecretProtected && !['connected','connecting','reconnecting'].includes(publicFeishuState().state)) {
+    await startFeishuLongConnection();
+    actions.push('已重新连接飞书长连接');
+  }
+  if (!codexSessionWatcherReady) { await startCodexSessionMonitor(); actions.push('已重新启动 Codex 对话监听'); }
+  if (!actions.length) actions.push('当前服务和话题映射正常，无需修改');
+  return { ok: true, actions, diagnostics: publicDiagnostics() };
 }
 
 async function monitorWindowsNotifications() {
@@ -2567,6 +2646,19 @@ async function handle(req, res) {
       const bytes=Buffer.from(JSON.stringify(publicDiagnostics(),null,2));
       res.writeHead(200,{'content-type':'application/json; charset=utf-8','content-length':bytes.length,'cache-control':'no-store','content-disposition':'attachment; filename="CodexCompanion-diagnostics.json"'});
       return res.end(bytes);
+    }
+    if (req.method==='POST'&&u.pathname==='/api/diagnostics/repair') {
+      if(!isLoopback(req.socket.remoteAddress))return send(res,403,{error:'一键修复仅允许本机操作'});
+      return send(res,200,await repairCompanion());
+    }
+    if (req.method==='POST'&&u.pathname==='/api/feishu/topics/rebuild') {
+      if(!isLoopback(req.socket.remoteAddress))return send(res,403,{error:'话题重建仅允许本机操作'});
+      config.feishuTaskTopicRoots = {};
+      config.feishuTaskTopicChats = {};
+      config.feishuTopicRootSchemaVersion = 2;
+      codexSessionTopicsAnnounced.clear();
+      await saveConfig();
+      return send(res,200,{ok:true,message:'已清空旧话题映射。下一个任务完成或新对话消息会自动创建新的飞书话题。'});
     }
     if (req.method==='GET'&&u.pathname==='/') return send(res,200,dashboardHtml,'text/html; charset=utf-8');
     if (req.method==='GET'&&u.pathname==='/api/status'){
@@ -2802,7 +2894,18 @@ function send(res,status,value,type='application/json; charset=utf-8'){const b=B
 
 async function startTaskEngine(){if(codex?.proc)return;codex=new CodexServer();try{await codex.start()}catch(e){taskEngineError=humanError(e);console.error('[task engine]',e.message);codex.close();codex.proc=null;}}
 async function main() {
-  config = { ...defaultConfig, ...await readJson(configPath) };
+  const storedConfig = await readJson(configPath);
+  config = { ...defaultConfig, ...storedConfig };
+  if (storedConfig.feishuTopicRootSchemaVersion !== 2) {
+    // Roots created by older releases did not record their chat. Reusing one
+    // can report success while the result lands in an old/hidden topic. Keep a
+    // recoverable snapshot, then let each conversation create one fresh root.
+    config.feishuLegacyTaskTopicRoots = config.feishuTaskTopicRoots || {};
+    config.feishuTaskTopicRoots = {};
+    config.feishuTaskTopicChats = {};
+    config.feishuTopicRootSchemaVersion = 2;
+    await saveConfig();
+  }
   if (config.imageRelayDefaultVersion !== 1) {
     config.feishuImageRelayEnabled = true;
     config.imageRelayDefaultVersion = 1;

@@ -1,6 +1,6 @@
 # Codex Companion 交接文档
 
-当前开发版本：**v0.7.59**（菜单置顶避让、直接客户端对话自动补建话题）
+当前开发版本：**v0.8.0**（话题映射自动修复、桌面失败诊断、一键自检）
 
 本轮排查：网页和浮窗最终调用同一切换 API，但旧浮窗额外预验证、主要依赖双击卡片，且成功后校验不能证明按钮手势触发。新增单击“切换账号”按钮仍需二次确认；移除额外预验证，保留双击卡片。WPF 自检模拟 Button.Click，已确认调用切换函数（SelfTest 下不执行真实切换）；后台只记录请求来自 widget/web，不写账号身份。30 项单测及 WPF 自检通过，真实切换仍需用户非重要任务场景验收。
 
@@ -59,7 +59,7 @@ Codex Switcher 不再是运行依赖。若机器上已有 Switcher，Companion �
 
 ## 对外分发
 
-开发测试包为 `CodexCompanion-Setup-v0.7.59.exe`。用户只需双击一次，安装器会：
+开发测试包为 `CodexCompanion-Setup-v0.8.0.exe`。用户只需双击一次，安装器会：
 
 1. 解压到 `%LOCALAPPDATA%\Programs\CodexCompanion`；
 2. 安装内置 Node.js 与官方 Codex CLI 运行时；
