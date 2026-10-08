@@ -15,7 +15,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.8.3';
+const APP_VERSION = '0.8.4';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -840,7 +840,9 @@ async function announceDesktopConversation(threadId) {
   codexSessionTopicsAnnounced.add(id);
   const activity = sessionActivities.get(id);
   const label = await taskConversationLabel(id, activity?.title || '', activity?.cwd || '');
-  await notify(`Codex 对话已开始\n${label}\n任务：${id}\n后续完成、图片、HTML 和 429 通知都会进入这个话题。`, { appName: 'Codex 任务', taskId: id });
+  // Feishu uses the first post line as the topic title. Put the stable
+  // project/conversation label there so topic lists remain distinguishable.
+  await notify(`${label}\nCodex 对话已开始\n任务：${id}\n后续完成、图片、HTML 和 429 通知都会进入这个话题。`, { appName: 'Codex 任务', taskId: id });
 }
 
 async function ensureFeishuTaskTopic(threadId) {
