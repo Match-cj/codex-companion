@@ -15,7 +15,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.7.54';
+const APP_VERSION = '0.7.55';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -49,6 +49,9 @@ const defaultConfig = {
   resetReminderMinutes: 15,
   autoContinue429: true,
   autoContinue429MaxAttempts: 3,
+  autoContinueTransient: true,
+  autoContinueTransientMaxAttempts: 2,
+  feishuIncludeDashboardLink: false,
   publicDashboardUrl: '',
   accountAliases: {},
   accountBackend: 'native',
@@ -865,8 +868,10 @@ async function bindLatestFeishuThread() {
 }
 
 async function handleFeishuMessage(data) {
+  let replyMessageId = '';
   try {
     const message = data?.message || {};
+    replyMessageId = String(message.message_id || '');
     if (data?.sender?.sender_type === 'app') return;
     const senderId = String(data?.sender?.sender_id?.open_id || '');
     const allow = Array.isArray(config.feishuAllowedUserIds) ? config.feishuAllowedUserIds : [];
@@ -954,7 +959,7 @@ async function handleFeishuMessage(data) {
     }
   } catch (error) {
     console.error('[feishu reply]', error.message);
-    try { await sendFeishuAppText(`没有成功继续 Codex 对话：${humanError(error)}`, { replyTo: data?.message?.message_id || '' }); } catch {}
+    try { await sendFeishuAppText(`没有成功继续 Codex 对话：${humanError(error)}`, { replyTo: replyMessageId }); } catch {}
   }
 }
 
@@ -2201,7 +2206,8 @@ async function taskConversationLabel(taskId, fallback = '', cwd = '') {
 }
 async function completionNotice({ taskId, status, body, cwd = '' }) {
   const label = await taskConversationLabel(taskId, '', cwd);
-  return `${label}\n\n${String(body || '').trim()}\n\n${dashboardLink(`#task=${encodeURIComponent(taskId || '')}`)}\n\n状态：${status}`;
+  const link = config.feishuIncludeDashboardLink === true ? `\n\n${dashboardLink(`#task=${encodeURIComponent(taskId || '')}`)}` : '';
+  return `${label}\n\n${String(body || '').trim()}${link}\n\n状态：${status}`;
 }
 
 async function readCodexSessionKind(file) {
@@ -2480,6 +2486,25 @@ class CodexServer {
             return;
           }
           task.turnFinalText = `429 Too Many Requests，已自动继续 ${maxAttempts} 次仍未恢复。请稍后重试或在飞书回复“继续”。`;
+        }
+        const transientFailure = /selected model is at capacity|model is temporarily unavailable|service unavailable|stream disconnected|stream closed before response\.completed|connection reset|socket hang up/i.test(`${turnError}\n${finalText}`);
+        if (task.status === 'failed' && transientFailure && config.autoContinueTransient !== false) {
+          const maxAttempts = Math.min(Math.max(Number(config.autoContinueTransientMaxAttempts) || 2, 1), 5);
+          task.autoRetryTransientCount = Number(task.autoRetryTransientCount || 0) + 1;
+          if (task.autoRetryTransientCount <= maxAttempts) {
+            const delayMs = Math.min(90000, 20000 * task.autoRetryTransientCount);
+            task.status = 'retry_waiting';
+            task.output = `Codex 暂时不可用，${Math.round(delayMs / 1000)} 秒后自动重试（第 ${task.autoRetryTransientCount}/${maxAttempts} 次）。`;
+            notify(`Codex 暂时不可用，正在自动重试\n任务：${id}\n${Math.round(delayMs / 1000)} 秒后重试\n第 ${task.autoRetryTransientCount}/${maxAttempts} 次`, { appName: 'Codex 任务', taskId: id });
+            clearTimeout(this.retryTimers.get(id));
+            this.retryTimers.set(id, setTimeout(async () => {
+              this.retryTimers.delete(id);
+              try { await this.continueTask(task, [{ type: 'text', text: '继续往下推进，恢复本轮任务并完成剩余工作。' }]); }
+              catch (error) { task.status = 'failed'; task.turnFinalText = `自动继续失败：${humanError(error)}`; completionNotice({ taskId: id, status: task.status, body: task.turnFinalText, cwd: task.cwd }).then(notice => notifyTurnResult(notice, { taskId: id, turnId: `retry-${Date.now()}`, finalText: '', imagePaths: [] })).catch(e => console.error('[task retry notification]', e.message)); }
+            }, delayMs));
+            return;
+          }
+          task.turnFinalText = `模型或连接暂时不可用，已自动重试 ${maxAttempts} 次仍未恢复。请稍后回复“继续”。`;
         }
         if (task.status === 'failed' && !task.turnFinalText) {
           const reason = turnError ? humanError(turnError) : '没有收到完整的完成结果。请查看桌面端错误提示后再重试。';
@@ -2796,6 +2821,12 @@ async function main() {
   startTaskEngine().catch(e => console.error('[task engine]', e.message));
   startFeishuLongConnection().catch(e => console.error('[feishu connection]', e.message));
   startCodexSessionMonitor().catch(e => console.error('[codex session monitor]', e.message));
+  // A conversation that existed before the monitor started has no new
+  // response_item event to trigger topic creation. Reconcile the currently
+  // bound conversation once after Feishu connects so it also gets a topic.
+  setTimeout(() => {
+    if (config.feishuBoundThreadId) announceDesktopConversation(config.feishuBoundThreadId).catch(error => console.error('[codex topic reconcile]', error.message));
+  }, 5000).unref?.();
   monitorWindowsNotifications();
   setInterval(async () => {
     if (!codex?.proc) startTaskEngine().catch(e => console.error('[task engine]', e.message));
