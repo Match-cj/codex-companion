@@ -2,7 +2,7 @@ param([int]$Port = 17841,[switch]$SelfTest)
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 Add-Type 'using System; using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags); [DllImport("user32.dll", EntryPoint="GetWindowLongW")] public static extern int GetWindowLong(IntPtr hwnd, int index); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); }'
-$script:Port=$Port; $script:AppVersion='0.8.7'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
+$script:Port=$Port; $script:AppVersion='0.8.8'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
 $mutexName=if($SelfTest){'Global\CodexCompanionQuotaWidget_v5_selftest'}else{'Global\CodexCompanionQuotaWidget_v5'}
 $script:Mutex=New-Object System.Threading.Mutex($false,$mutexName); if(-not $script:Mutex.WaitOne(0,$false)){exit}
 $Transparent=[Windows.Media.Brushes]::Transparent
@@ -16,6 +16,8 @@ $Red=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::FromRgb(255
 $White=[Windows.Media.Brushes]::White
 $PlusBadgeBg=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::FromRgb(48,58,92))
 $PlusBadgeFg=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::FromRgb(196,207,255))
+$FreeBadgeBg=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::FromRgb(41,75,71))
+$FreeBadgeFg=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::FromRgb(169,243,221))
 $ProBadgeBg=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::FromRgb(77,57,24))
 $ProBadgeFg=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::FromRgb(255,211,112))
 function Get-Status{try{Invoke-RestMethod "http://127.0.0.1:$script:Port/api/status" -TimeoutSec 8}catch{$null}}
@@ -50,9 +52,10 @@ function Get-Color($r){if($r-le 15){$Red}elseif($r-le 35){$Yellow}else{$Green}}
 function New-Text($text,$size,$color,[switch]$bold){$t=New-Object Windows.Controls.TextBlock;$t.Text=[string]$text;$t.FontFamily='Microsoft YaHei UI';$t.FontSize=$size;$t.Foreground=$color;if($bold){$t.FontWeight='Bold'};$t}
 function New-PlanBadge($plan){
  $isPro=([string]$plan).ToLowerInvariant()-eq'pro'
- $badgeText=if($isPro){'Pro'}else{'Plus'}
- $badgeBackground=if($isPro){$ProBadgeBg}else{$PlusBadgeBg}
- $badgeForeground=if($isPro){$ProBadgeFg}else{$PlusBadgeFg}
+ $isFree=([string]$plan).ToLowerInvariant()-eq'free'
+ $badgeText=if($isPro){'Pro'}elseif($isFree){'Free'}else{'Plus'}
+ $badgeBackground=if($isPro){$ProBadgeBg}elseif($isFree){$FreeBadgeBg}else{$PlusBadgeBg}
+ $badgeForeground=if($isPro){$ProBadgeFg}elseif($isFree){$FreeBadgeFg}else{$PlusBadgeFg}
  $badge=New-Object Windows.Controls.Border
  $badge.Width=44;$badge.Height=20;$badge.CornerRadius=10;$badge.Margin='0,0,8,0'
  $badge.Background=$badgeBackground
@@ -225,11 +228,6 @@ function Show-Detail{
   $reset.Children.Add((New-QuotaIcon 'reset'))|Out-Null
   $reset.Children.Add((New-Text "$count  ·  到期 $(Get-Expiry $a)" 10 $Muted))|Out-Null
   if(-not$loginExpired){$content.Children.Add($reset)|Out-Null}
-  if((-not$a.is_active)-and(-not$loginExpired)){
-   $switchButton=New-Object Windows.Controls.Button;$switchButton.Content='切换账号';$switchButton.Tag=@{Id=[string]$a.id;Name=[string]$shownName};$switchButton.Height=24;$switchButton.HorizontalAlignment='Left';$switchButton.Margin='0,6,0,0';$switchButton.Padding='9,1';$switchButton.FontSize=10
-   $switchButton.Add_Click({param($sender,$eventArgs) Switch-WidgetAccount ([string]$sender.Tag.Id) ([string]$sender.Tag.Name)})
-   $content.Children.Add($switchButton)|Out-Null;$script:SwitchButtonCardsBuilt++
-  }
   $cardMenu=New-Object Windows.Controls.ContextMenu
   $warmItem=New-Object Windows.Controls.MenuItem;$warmItem.Header='预热 5 小时额度';$warmItem.Tag=@{Id=[string]$a.id;Name=[string]$shownName}
   if($loginExpired){$warmItem.IsEnabled=$false;$warmItem.Header='登录已失效，请先在网页重新登录'}
@@ -238,23 +236,11 @@ function Show-Detail{
   if((-not$a.is_active)-and(-not$loginExpired)){
     $card.Cursor=[Windows.Input.Cursors]::Hand;$card.ToolTip="双击切换到 $shownName"
     $card.Tag=@{Id=[string]$a.id;Name=[string]$shownName;LastClick=[DateTime]::MinValue}
-   $switchHandler={
-    param($sender,$eventArgs)
-    $source=$eventArgs.OriginalSource
-    while($null-ne$source-and$source-ne$sender){
-     if($source -is [Windows.Controls.Button]){return}
-     $source=[Windows.Media.VisualTreeHelper]::GetParent($source)
-    }
-    $now=[DateTime]::UtcNow
-    $elapsed=($now-$sender.Tag.LastClick).TotalMilliseconds
-    $sender.Tag.LastClick=$now
-    if($eventArgs.ClickCount-ge 2-or($elapsed-ge 0-and$elapsed-le[System.Windows.Forms.SystemInformation]::DoubleClickTime)){
-     $eventArgs.Handled=$true
-     $sender.Tag.LastClick=[DateTime]::MinValue
-     Switch-WidgetAccount ([string]$sender.Tag.Id) ([string]$sender.Tag.Name)
-    }
+   $switchHandler={param($sender,$eventArgs)
+    $eventArgs.Handled=$true
+    Switch-WidgetAccount ([string]$sender.Tag.Id) ([string]$sender.Tag.Name)
    }
-   $card.Add_PreviewMouseLeftButtonDown($switchHandler)
+   $card.Add_MouseDoubleClick($switchHandler)
    $script:SwitchableCardsBuilt++
    $script:SwitchGestureCardsBuilt++
   }
