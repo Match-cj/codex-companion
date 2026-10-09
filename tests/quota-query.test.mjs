@@ -31,6 +31,7 @@ test('quota status reports remaining primary and secondary windows', () => {
   assert.match(result, /当前账号：测试账号/);
   assert.match(result, /5 小时额度：剩余 75%/);
   assert.match(result, /周额度：剩余 28%/);
+  assert.match(result, /重置 \d+天\d+小时|重置 \d+小时\d+分|重置 \d+分/);
 });
 
 test('quota status surfaces a safe login-expired state', () => {

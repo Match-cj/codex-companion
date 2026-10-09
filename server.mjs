@@ -15,7 +15,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.8.6';
+const APP_VERSION = '0.8.7';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -259,7 +259,7 @@ const readJson = async file => {
 const saveConfig = () => fs.mkdir(appDir, { recursive: true }).then(() => fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf8'));
 function humanError(error) {
   const message = String(error?.message || error || '未知错误');
-  if (/invalid refresh token|token refresh|refresh token|token.{0,30}expired|token_expired/i.test(message)) return '这个账号的登录已经失效，请在 Companion 网页中重新登录后再刷新。';
+  if (/invalid refresh token|token refresh|refresh token|token.{0,30}(expired|revoked)|token_expired|token_revoked|unauthorized|401\b/i.test(message)) return '这个账号的登录已经失效，请在 Companion 网页中重新登录后再刷新。';
   if (message.includes('ECONNREFUSED') || message.includes('fetch failed')) return '连接不上本地服务，请确认 Codex Companion 正在运行。';
   if (message.includes('ENOENT')) return '找不到需要启动的程序，请确认 Codex CLI 已正确安装。';
   if (message.includes('超时')) return 'Codex 两分钟没有回应。任务可能卡住了，请稍后重试或重启 Companion。';
@@ -2082,8 +2082,16 @@ function isQuotaCommand(value) {
 function formatQuotaReset(value) {
   if (value == null || value === '') return '';
   const numeric = Number(value);
-  const date = Number.isFinite(numeric) ? new Date(numeric * 1000) : new Date(String(value));
-  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN');
+  const timestamp = Number.isFinite(numeric) ? numeric : Date.parse(String(value)) / 1000;
+  if (!Number.isFinite(timestamp)) return '';
+  const seconds = Math.floor(timestamp - Date.now() / 1000);
+  if (seconds <= 0) return '已重置';
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days > 0) return `${days}天${hours}小时`;
+  if (hours > 0) return `${hours}小时${minutes}分`;
+  return `${Math.max(1, minutes)}分`;
 }
 function formatQuotaStatus(account) {
   if (!account) return '当前没有可用账号，暂时无法读取额度。';

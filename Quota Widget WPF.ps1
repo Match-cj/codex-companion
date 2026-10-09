@@ -2,7 +2,7 @@ param([int]$Port = 17841,[switch]$SelfTest)
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 Add-Type 'using System; using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags); [DllImport("user32.dll", EntryPoint="GetWindowLongW")] public static extern int GetWindowLong(IntPtr hwnd, int index); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); }'
-$script:Port=$Port; $script:AppVersion='0.8.6'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
+$script:Port=$Port; $script:AppVersion='0.8.7'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
 $mutexName=if($SelfTest){'Global\CodexCompanionQuotaWidget_v5_selftest'}else{'Global\CodexCompanionQuotaWidget_v5'}
 $script:Mutex=New-Object System.Threading.Mutex($false,$mutexName); if(-not $script:Mutex.WaitOne(0,$false)){exit}
 $Transparent=[Windows.Media.Brushes]::Transparent
@@ -35,7 +35,14 @@ function Get-Remaining($a,$prefix){if($null -eq $a -or $null -eq $a.usage){retur
 function Test-LoginExpired($a){
  if($null-eq$a-or$null-eq$a.usage){return $false}
  $message=[string]$a.usage.error
- return (-not[string]::IsNullOrWhiteSpace($message))-and($message-match'登录.*失效|重新登录|invalid refresh token|refresh token|token.{0,30}expired|token_expired')
+ return (-not[string]::IsNullOrWhiteSpace($message))-and($message-match'登录.*失效|重新登录|invalid refresh token|refresh token|token.{0,30}(expired|revoked)|token_expired|token_revoked|unauthorized|401')
+}
+function Get-FriendlyUsageError($message){
+ $text=[string]$message
+ if([string]::IsNullOrWhiteSpace($text)){return ''}
+ if($text-match'登录.*失效|重新登录|invalid refresh token|refresh token|token.{0,30}(expired|revoked)|token_expired|token_revoked|unauthorized|401'){return '登录已失效，请在网页重新登录这个账号。'}
+ if($text-match'网络|fetch failed|ECONNREFUSED|超时|timeout'){return '暂时无法读取额度，请检查网络或稍后刷新。'}
+ return '额度读取失败，请打开网页查看后台详情。'
 }
 function Get-Countdown($a,$prefix){try{$seconds=[int64]$a.usage.($prefix+'_resets_at')-[DateTimeOffset]::UtcNow.ToUnixTimeSeconds();if($seconds-le 0){return '已重置'};$d=[Math]::Floor($seconds/86400);$h=[Math]::Floor(($seconds%86400)/3600);$m=[Math]::Floor(($seconds%3600)/60);if($d-gt 0){return "${d}天${h}小时"};if($h-gt 0){return "${h}小时${m}分"};return "${m}分"}catch{'--'}}
 function Get-Expiry($a){try{$raw=$a.reset_credits_expires_at;if(-not $raw){return '--'};$seconds=[DateTimeOffset]::Parse([string]$raw).ToUnixTimeSeconds()-[DateTimeOffset]::UtcNow.ToUnixTimeSeconds();if($seconds-le 0){return '已到期'};('{0}天{1}小时'-f [Math]::Floor($seconds/86400),[Math]::Floor(($seconds%86400)/3600))}catch{'--'}}
@@ -194,6 +201,7 @@ function Show-Detail{
   $nc=if($a.is_active){$Green}else{$White};$prefix=if($a.is_active){'● '}else{''};$name=New-Text ($prefix+$shownName) 12 $nc -bold;if(-not[string]::IsNullOrWhiteSpace([string]$a.alias)){$name.ToolTip=[string]$a.name};$head.Children.Add($name)|Out-Null;$content.Children.Add($head)|Out-Null
   $loginExpired=Test-LoginExpired $a
   if($loginExpired){$warning=New-Text '登录已失效 · 请在网页重新登录' 11 $Red -bold;$warning.Margin='0,5,0,2';$content.Children.Add($warning)|Out-Null;$script:LoginExpiredCardsBuilt++}
+  elseif(-not[string]::IsNullOrWhiteSpace([string]$a.usage.error)){$warning=New-Text (Get-FriendlyUsageError $a.usage.error) 11 $Red -bold;$warning.Margin='0,5,0,2';$content.Children.Add($warning)|Out-Null}
   $five=if($loginExpired){$null}else{Get-Remaining $a 'primary'};$week=if($loginExpired){$null}else{Get-Remaining $a 'secondary'}
   $quotaGrid=New-Object Windows.Controls.Grid;$quotaGrid.Width=390;$quotaGrid.Margin='0,2,0,0'
   $col1=New-Object Windows.Controls.ColumnDefinition;$col1.Width=195
@@ -217,6 +225,11 @@ function Show-Detail{
   $reset.Children.Add((New-QuotaIcon 'reset'))|Out-Null
   $reset.Children.Add((New-Text "$count  ·  到期 $(Get-Expiry $a)" 10 $Muted))|Out-Null
   if(-not$loginExpired){$content.Children.Add($reset)|Out-Null}
+  if((-not$a.is_active)-and(-not$loginExpired)){
+   $switchButton=New-Object Windows.Controls.Button;$switchButton.Content='切换账号';$switchButton.Tag=@{Id=[string]$a.id;Name=[string]$shownName};$switchButton.Height=24;$switchButton.HorizontalAlignment='Left';$switchButton.Margin='0,6,0,0';$switchButton.Padding='9,1';$switchButton.FontSize=10
+   $switchButton.Add_Click({param($sender,$eventArgs) Switch-WidgetAccount ([string]$sender.Tag.Id) ([string]$sender.Tag.Name)})
+   $content.Children.Add($switchButton)|Out-Null;$script:SwitchButtonCardsBuilt++
+  }
   $cardMenu=New-Object Windows.Controls.ContextMenu
   $warmItem=New-Object Windows.Controls.MenuItem;$warmItem.Header='预热 5 小时额度';$warmItem.Tag=@{Id=[string]$a.id;Name=[string]$shownName}
   if($loginExpired){$warmItem.IsEnabled=$false;$warmItem.Header='登录已失效，请先在网页重新登录'}

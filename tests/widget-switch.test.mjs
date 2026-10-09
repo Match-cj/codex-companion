@@ -15,7 +15,7 @@ test('widget and webpage use the same account-switch action after confirmation',
   assert.match(dashboard, /function switchAccount\(id\).*closeCodex:true/);
 });
 test('inactive account cards switch only after a double click', () => {
-  assert.doesNotMatch(widget, /\$switchButton\.Content='切换账号'/);
   assert.match(widget, /ClickCount-ge 2/);
   assert.match(widget, /Switch-WidgetAccount/);
+  assert.match(widget, /\$switchButton\.Content='切换账号'/);
 });
