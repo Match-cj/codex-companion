@@ -15,7 +15,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.8.9';
+const APP_VERSION = '0.9.0';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -53,7 +53,8 @@ const defaultConfig = {
   autoContinue429: true,
   autoContinue429MaxAttempts: 3,
   autoContinueTransient: true,
-  autoContinueTransientMaxAttempts: 3,
+  autoContinueTransientMaxAttempts: 10,
+  autoTakeoverDesktopTransient: true,
   autoFallbackModel: 'gpt-6-luna',
   feishuIncludeDashboardLink: false,
   publicDashboardUrl: '',
@@ -112,7 +113,8 @@ function publicDiagnosticBundle() {
       retry429: config.autoContinue429 !== false,
       retry429MaxAttempts: Number(config.autoContinue429MaxAttempts || 3),
       retryTransient: config.autoContinueTransient !== false,
-      retryTransientMaxAttempts: Number(config.autoContinueTransientMaxAttempts || 3),
+      retryTransientMaxAttempts: Number(config.autoContinueTransientMaxAttempts || 10),
+      takeoverDesktopTransient: config.autoTakeoverDesktopTransient !== false,
       fallbackModel: String(config.autoFallbackModel || ''),
     },
     feishu: {
@@ -2437,9 +2439,20 @@ async function processCodexSessionAppend(file) {
       const threadId = sessionThreadId(file);
       const message = String(event.payload.last_agent_message || '').trim();
       const rawError = String(event.payload.error?.message || event.payload.error || '').trim();
+      const eventText = `${message}\n${rawError}\n${JSON.stringify(event.payload)}`;
       const rateLimited = /(?:\b429\b|too many requests|exceeded retry limit)/i.test(JSON.stringify(event.payload));
       if (rateLimited) {
         await notify(`Codex 任务因 429 限流中断\n对话：${threadId}\n请在这条通知下添加快捷表情继续，或稍后在 Codex 中重试。\n${dashboardLink(`#task=${encodeURIComponent(threadId)}`)}`, { appName: 'Codex 任务', taskId: threadId });
+        continue;
+      }
+      const capacityFailure = /selected model is at capacity|model is temporarily unavailable/i.test(eventText);
+      if (capacityFailure && config.autoTakeoverDesktopTransient !== false && !desktopTakeoverIds().includes(String(threadId))) {
+        await notify(`检测到 Codex 模型暂时繁忙，正在接管这个桌面对话并自动重试\n对话：${threadId}\n将切换到备用模型；如果需要停止，请在后台任务中点击停止。`, { appName: 'Codex 任务', taskId: threadId });
+        try {
+          await continueThreadFromFeishu(String(threadId), [{ type: 'text', text: '继续当前任务，恢复本轮工作并完成剩余内容。' }]);
+        } catch (error) {
+          await notify(`自动接管重试没有成功：${humanError(error)}\n对话：${threadId}`, { appName: 'Codex 任务', taskId: threadId });
+        }
         continue;
       }
       if (!message) {
@@ -2674,7 +2687,10 @@ class CodexServer {
         const capacityFailure = /selected model is at capacity|model is temporarily unavailable/i.test(`${turnError}\n${finalText}`);
         const transientFailure = capacityFailure || /service unavailable|stream disconnected|stream closed before response\.completed|connection reset|socket hang up/i.test(`${turnError}\n${finalText}`);
         if (task.status === 'failed' && transientFailure && config.autoContinueTransient !== false) {
-          const maxAttempts = Math.min(Math.max(Number(config.autoContinueTransientMaxAttempts) || 3, 1), 5);
+          const configuredAttempts = Number(config.autoContinueTransientMaxAttempts) || 10;
+          const maxAttempts = capacityFailure
+            ? Math.min(Math.max(configuredAttempts, 10), 20)
+            : Math.min(Math.max(configuredAttempts, 1), 20);
           task.autoRetryTransientCount = Number(task.autoRetryTransientCount || 0) + 1;
           if (task.autoRetryTransientCount <= maxAttempts) {
             const delayMs = 20000;
