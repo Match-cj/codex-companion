@@ -21,3 +21,9 @@ test('inactive account cards switch only after a double click', () => {
   assert.match(widget, /Switch-WidgetAccount/);
   assert.doesNotMatch(widget, /\$switchButton\.Content='切换账号'/);
 });
+test('widget exposes running conversations, stop actions, and full shutdown', () => {
+  assert.match(widget, /运行中对话：/);
+  assert.match(widget, /api\/task\/.*\/stop/);
+  assert.match(widget, /退出 Companion（后台与浮窗）/);
+  assert.match(widget, /api\/shutdown/);
+});

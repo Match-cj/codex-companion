@@ -15,7 +15,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.9.1';
+const APP_VERSION = '0.9.2';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -115,7 +115,7 @@ function publicDiagnosticBundle() {
       retryTransient: config.autoContinueTransient !== false,
       retryTransientMaxAttempts: Number(config.autoContinueTransientMaxAttempts || 10),
       takeoverDesktopTransient: config.autoTakeoverDesktopTransient !== false,
-      fallbackModel: String(config.autoFallbackModel || ''),
+      fallbackModel: '',
     },
     feishu: {
       configured: !!(config.feishuAppId && config.feishuAppSecretProtected),
@@ -174,6 +174,10 @@ const codexSessionHtmlPaths = new Map();
 const codexSessionTopicsAnnounced = new Set();
 const codexSessionContextStats = new Map();
 const codexSessionAutoTakeovers = new Set();
+// A desktop session can append the same failed completion repeatedly while the
+// UI is still open. Keep a per-thread guard as well as the per-turn key so one
+// capacity failure cannot create an endless Feishu notification loop.
+const codexSessionAutoTakeoverThreads = new Set();
 const feishuTopicCreationLocks = new Map();
 const sessionActivities = new Map();
 // Reactions can be delivered more than once by Feishu (and users may tap OK
@@ -1052,6 +1056,7 @@ function isActiveWriterError(error) {
 }
 
 async function continueThreadFromFeishu(threadId, input, { manual = false } = {}) {
+  if (manual) codexSessionAutoTakeoverThreads.delete(String(threadId));
   try {
     const task = await codex.resumeTask(threadId);
     if (manual) { task.autoRetryTransientCount = 0; task.autoRetry429Count = 0; }
@@ -2448,8 +2453,10 @@ async function processCodexSessionAppend(file) {
       }
       const capacityFailure = /selected model is at capacity|model is temporarily unavailable/i.test(eventText);
       const takeoverKey = `${file}:${turnId}`;
-      if (capacityFailure && config.autoTakeoverDesktopTransient !== false && !desktopTakeoverIds().includes(String(threadId)) && !codexSessionAutoTakeovers.has(takeoverKey)) {
+      if (capacityFailure && config.autoTakeoverDesktopTransient !== false && !desktopTakeoverIds().includes(String(threadId)) && !codexSessionAutoTakeovers.has(takeoverKey) && !codexSessionAutoTakeoverThreads.has(String(threadId))) {
         codexSessionAutoTakeovers.add(takeoverKey);
+        codexSessionAutoTakeoverThreads.add(String(threadId));
+        await notify(`检测到 Codex 模型暂时繁忙，开始自动接管并重试\n对话：${threadId}`, { appName: 'Codex 任务', taskId: threadId });
         try {
           await continueThreadFromFeishu(String(threadId), [{ type: 'text', text: '继续当前任务，恢复本轮工作并完成剩余内容。' }]);
         } catch (error) {
@@ -2457,6 +2464,10 @@ async function processCodexSessionAppend(file) {
         }
         continue;
       }
+      // Once a desktop conversation has been handed to the backend, the old
+      // desktop JSONL may repeat its failed completion. The backend owns the
+      // final notification; never forward those stale repeats to Feishu.
+      if (capacityFailure && desktopTakeoverIds().includes(String(threadId))) continue;
       if (!message) {
         if (rawError) {
           const cwd = sessionActivities.get(threadId)?.cwd || '';
@@ -2806,6 +2817,19 @@ async function handle(req, res) {
         nativeVault:await boundedNativeVaultStatus(),
         network:{addresses:config.remoteAccessEnabled?addrs:[], tailscaleIp:config.remoteAccessEnabled?tailscale:null, port}
       });
+    }
+    if (req.method==='POST'&&u.pathname==='/api/shutdown'){
+      if(!isLoopback(req.socket.remoteAddress))return send(res,403,{error:'退出 Companion 只能在本机操作'});
+      send(res,200,{ok:true,message:'Companion 正在退出。'});
+      setTimeout(()=>{
+        try{codex?.close();}catch{}
+        try{codexSessionWatcher?.close();}catch{}
+        try{feishuWsClient?.close({force:true});}catch{}
+        try{notificationDb?.close();}catch{}
+        try{server.close();}catch{}
+        process.exit(0);
+      },120).unref?.();
+      return;
     }
     if (req.method==='POST'&&u.pathname==='/api/task'){if(!codex?.proc)throw Error('任务引擎正在重连，请稍等十几秒再试；账号、额度和切换功能不受影响。');const prompt=String(data.prompt||'').trim();if(!prompt)throw Error('请填写任务内容');const cwd=String(data.cwd||'').trim()||process.cwd();try{await refreshAccounts()}catch{}const baseline=activeQuotaSnapshot();const t=await codex.startTask(prompt,cwd);t.quotaBaseline=baseline;await notify(`Codex 任务已启动\n任务：${t.id}\n目录：${t.cwd}`, { appName: 'Codex 任务', taskId: t.id });return send(res,200,{ok:true,id:t.id});}
     if (req.method==='GET'&&u.pathname==='/api/threads'){
