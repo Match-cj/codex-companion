@@ -15,7 +15,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.9.0';
+const APP_VERSION = '0.9.1';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -55,7 +55,7 @@ const defaultConfig = {
   autoContinueTransient: true,
   autoContinueTransientMaxAttempts: 10,
   autoTakeoverDesktopTransient: true,
-  autoFallbackModel: 'gpt-6-luna',
+  autoFallbackModel: '',
   feishuIncludeDashboardLink: false,
   publicDashboardUrl: '',
   accountAliases: {},
@@ -173,6 +173,7 @@ const codexSessionImagePaths = new Map();
 const codexSessionHtmlPaths = new Map();
 const codexSessionTopicsAnnounced = new Set();
 const codexSessionContextStats = new Map();
+const codexSessionAutoTakeovers = new Set();
 const feishuTopicCreationLocks = new Map();
 const sessionActivities = new Map();
 // Reactions can be delivered more than once by Feishu (and users may tap OK
@@ -2446,8 +2447,9 @@ async function processCodexSessionAppend(file) {
         continue;
       }
       const capacityFailure = /selected model is at capacity|model is temporarily unavailable/i.test(eventText);
-      if (capacityFailure && config.autoTakeoverDesktopTransient !== false && !desktopTakeoverIds().includes(String(threadId))) {
-        await notify(`检测到 Codex 模型暂时繁忙，正在接管这个桌面对话并自动重试\n对话：${threadId}\n将切换到备用模型；如果需要停止，请在后台任务中点击停止。`, { appName: 'Codex 任务', taskId: threadId });
+      const takeoverKey = `${file}:${turnId}`;
+      if (capacityFailure && config.autoTakeoverDesktopTransient !== false && !desktopTakeoverIds().includes(String(threadId)) && !codexSessionAutoTakeovers.has(takeoverKey)) {
+        codexSessionAutoTakeovers.add(takeoverKey);
         try {
           await continueThreadFromFeishu(String(threadId), [{ type: 'text', text: '继续当前任务，恢复本轮工作并完成剩余内容。' }]);
         } catch (error) {
@@ -2695,11 +2697,9 @@ class CodexServer {
           if (task.autoRetryTransientCount <= maxAttempts) {
             const delayMs = 20000;
             task.status = 'retry_waiting';
-            const fallbackModel = capacityFailure && task.autoRetryTransientCount === 1 ? String(config.autoFallbackModel || '').trim() : '';
-            task.output = fallbackModel
-              ? `当前模型繁忙，${Math.round(delayMs / 1000)} 秒后自动改用 ${fallbackModel} 重试。`
-              : `Codex 暂时不可用，${Math.round(delayMs / 1000)} 秒后自动重试（第 ${task.autoRetryTransientCount}/${maxAttempts} 次）。`;
-            notify(`${fallbackModel ? `当前模型繁忙，将自动切换到 ${fallbackModel}` : 'Codex 暂时不可用，正在自动重试'}\n任务：${id}\n${Math.round(delayMs / 1000)} 秒后重试\n第 ${task.autoRetryTransientCount}/${maxAttempts} 次`, { appName: 'Codex 任务', taskId: id });
+            const fallbackModel = '';
+            task.output = `Codex 暂时不可用，${Math.round(delayMs / 1000)} 秒后自动重试（第 ${task.autoRetryTransientCount}/${maxAttempts} 次）。`;
+            if (!capacityFailure) notify(`Codex 暂时不可用，正在自动重试\n任务：${id}\n${Math.round(delayMs / 1000)} 秒后重试\n第 ${task.autoRetryTransientCount}/${maxAttempts} 次`, { appName: 'Codex 任务', taskId: id });
             clearTimeout(this.retryTimers.get(id));
             this.retryTimers.set(id, setTimeout(async () => {
               this.retryTimers.delete(id);
