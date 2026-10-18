@@ -15,7 +15,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.9.2';
+const APP_VERSION = '0.9.3';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -85,6 +85,7 @@ function publicConfig() {
     feishuNotificationThreadMode: config.feishuNotificationThreadMode === 'task' ? 'task' : 'flat',
     feishuContinueEmoji: ['OK','THUMBSUP','DONE','CHECK'].includes(config.feishuContinueEmoji) ? config.feishuContinueEmoji : 'OK',
     feishuMentionOperator: config.feishuMentionOperator !== false,
+    autoTakeoverDesktopTransient: config.autoTakeoverDesktopTransient !== false,
     feishuImageRelayEnabled: !!config.feishuImageRelayEnabled, feishuImageRelayRoot: config.feishuImageRelayRoot || '' };
 }
 function publicDiagnostics() {
@@ -945,8 +946,73 @@ async function rotateFeishuTopic(threadId) {
   return { ok: true, threadId: id };
 }
 
+async function forgetFeishuThreadMapping(threadId) {
+  const id = String(threadId || '').trim();
+  if (!id) return;
+  if (String(config.feishuBoundThreadId || '') === id) {
+    config.feishuBoundThreadId = '';
+    config.feishuBoundThreadName = '';
+  }
+  const roots = config.feishuTaskTopicRoots && typeof config.feishuTaskTopicRoots === 'object' ? config.feishuTaskTopicRoots : {};
+  const chats = config.feishuTaskTopicChats && typeof config.feishuTaskTopicChats === 'object' ? config.feishuTaskTopicChats : {};
+  delete roots[id]; delete chats[id];
+  config.feishuTaskTopicRoots = roots; config.feishuTaskTopicChats = chats;
+  const links = config.feishuMessageThreads && typeof config.feishuMessageThreads === 'object' ? config.feishuMessageThreads : {};
+  config.feishuMessageThreads = Object.fromEntries(Object.entries(links).filter(([, value]) => String(value) !== id));
+  codexSessionTopicsAnnounced.delete(id);
+  await saveConfig();
+}
+
+function feishuRunningCount() {
+  const ids = new Set([...tasks.values()]
+    .filter(task => ['starting', 'running', 'waiting_confirmation', 'retry_waiting'].includes(task.status))
+    .map(task => String(task.id)));
+  for (const row of publicTaskActivity()) ids.add(String(row.id));
+  return ids.size;
+}
+
+function feishuMenuText() {
+  const takeover = config.autoTakeoverDesktopTransient !== false ? '开启' : '关闭';
+  return `Codex Tools 手机菜单\n\n自动接管：${takeover}\n运行中对话：${feishuRunningCount()} 个\n\n可直接回复下面的命令：\n· 自动接管 开启\n· 自动接管 关闭\n· 状态\n· 刷新额度\n· 绑定最近对话\n· 新话题\n\n说明：自动接管关闭后，桌面端遇到模型容量不足不会转入后台；普通重试策略不受影响。`;
+}
+
+async function handleFeishuControlCommand(text, message) {
+  const command = String(text || '').trim().replace(/[：:]/g, ' ');
+  if (/^(菜单|menu|设置|帮助|help)$/i.test(command)) {
+    await sendFeishuAppText(feishuMenuText(), { replyTo: message.message_id });
+    return true;
+  }
+  if (/^(自动接管|接管)\s*(开启|打开|开|on)$/i.test(command)) {
+    config.autoTakeoverDesktopTransient = true;
+    await saveConfig();
+    await sendFeishuAppText('自动接管已开启。模型容量不足时会自动转入后台，用当前模型重试；过程静默，只发送开始和最终结果。\n\n' + feishuMenuText(), { replyTo: message.message_id });
+    return true;
+  }
+  if (/^(自动接管|接管)\s*(关闭|关|off)$/i.test(command)) {
+    config.autoTakeoverDesktopTransient = false;
+    await saveConfig();
+    await sendFeishuAppText('自动接管已关闭。桌面端遇到模型容量不足时不会自动转入后台。\n\n' + feishuMenuText(), { replyTo: message.message_id });
+    return true;
+  }
+  if (/^(状态|status)$/i.test(command)) {
+    await sendFeishuAppText(`Codex Tools 当前状态\n\n自动接管：${config.autoTakeoverDesktopTransient !== false ? '开启' : '关闭'}\n运行中对话：${feishuRunningCount()} 个\n当前账号：${accounts.find(account => account.is_active)?.display_name || accounts.find(account => account.is_active)?.name || '未识别'}\n\n${feishuMenuText()}`, { replyTo: message.message_id });
+    return true;
+  }
+  if (/^(刷新额度|额度|quota)$/i.test(command)) {
+    await sendFeishuAppText(await currentQuotaText(), { replyTo: message.message_id });
+    return true;
+  }
+  if (/^(绑定最近对话|绑定最近任务)$/i.test(command)) {
+    const thread = await bindLatestFeishuThread();
+    await sendFeishuAppText(`已绑定最近的 Codex 对话：${thread.name}`, { replyTo: message.message_id, taskId: thread.id });
+    return true;
+  }
+  return false;
+}
+
 async function handleFeishuMessage(data) {
   let replyMessageId = '';
+  let selectedThreadId = '';
   try {
     const message = data?.message || {};
     replyMessageId = String(message.message_id || '');
@@ -1000,6 +1066,7 @@ async function handleFeishuMessage(data) {
       return;
     }
     if (chatId !== config.feishuBoundChatId) return;
+    if (message.message_type === 'text' && typeof handleFeishuControlCommand === 'function' && await handleFeishuControlCommand(text, message)) return;
     if (message.message_type === 'text' && isQuotaCommand(text)) {
       await sendFeishuAppText(await currentQuotaText(), { replyTo: message.message_id });
       return;
@@ -1013,6 +1080,7 @@ async function handleFeishuMessage(data) {
     // immediate parent: older releases mapped an unrelated Windows-notice
     // reply to the default conversation, which misrouted “继续”.
     const threadId = links[rootId] || links[parentId] || topicRootTask || config.feishuBoundThreadId;
+    selectedThreadId = String(threadId || '');
     if (!threadId) {
       await sendFeishuAppText('还没有绑定 Codex 对话，请先发送“绑定”。', { replyTo: message.message_id });
       return;
@@ -1047,7 +1115,14 @@ async function handleFeishuMessage(data) {
     }
   } catch (error) {
     console.error('[feishu reply]', error.message);
-    try { await sendFeishuAppText(`没有成功继续 Codex 对话：${humanError(error)}`, { replyTo: replyMessageId }); } catch {}
+    const notFound = /thread\s+not\s+found|找不到.*对话|对话不存在/i.test(String(error?.message || error || ''));
+    if (notFound && selectedThreadId) {
+      try { await forgetFeishuThreadMapping(selectedThreadId); } catch {}
+    }
+    const message = notFound
+      ? '这条消息对应的 Codex 对话已经不存在（可能被删除、清理或换了本机数据目录）。我已清理旧映射。请回复“菜单”，再发送“绑定最近对话”，然后重新继续。'
+      : `没有成功继续 Codex 对话：${humanError(error)}`;
+    try { await sendFeishuAppText(message, { replyTo: replyMessageId }); } catch {}
   }
 }
 
@@ -2969,6 +3044,7 @@ async function handle(req, res) {
       config.publicDashboardUrl=String(data.publicDashboardUrl||'');
       if(data.feishuNotificationThreadMode==='task'||data.feishuNotificationThreadMode==='flat') config.feishuNotificationThreadMode=data.feishuNotificationThreadMode;
       if(typeof data.feishuMentionOperator==='boolean') config.feishuMentionOperator=data.feishuMentionOperator;
+      if(typeof data.autoTakeoverDesktopTransient==='boolean') config.autoTakeoverDesktopTransient=data.autoTakeoverDesktopTransient;
       if(['OK','THUMBSUP','DONE','CHECK'].includes(String(data.feishuContinueEmoji||'').toUpperCase())) config.feishuContinueEmoji=String(data.feishuContinueEmoji).toUpperCase();
       await saveConfig();return send(res,200,{ok:true});
     }
