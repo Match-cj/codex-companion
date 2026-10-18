@@ -7,6 +7,7 @@
     "@larksuiteoapi/node-sdk": "1.73.3"
   },
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "test": "node --test tests/*.test.mjs"
   }
 }

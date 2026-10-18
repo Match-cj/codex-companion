@@ -1,0 +1,34 @@
+name: Windows checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Use Node.js LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Check JavaScript syntax
+        run: node --check server.mjs
+      - name: Run tests
+        run: node --test tests/*.test.mjs
+      - name: Parse PowerShell widget
+        shell: powershell
+        run: |
+          $null = [scriptblock]::Create([IO.File]::ReadAllText((Resolve-Path '.\Quota Widget WPF.ps1')))
+          Write-Host 'PowerShell parse succeeded'
+      - name: Run widget self-test
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\Quota Widget WPF.ps1' -SelfTest
