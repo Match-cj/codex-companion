@@ -1,6 +1,6 @@
 # Codex Companion
 
-独立的 Windows Codex 伴侣程序。当前开发基线为 v0.9.3（容量不足只重试不切换模型、自动接管仅发送开始与最终结果，飞书可用手机菜单开关自动接管）：
+独立的 Windows Codex 伴侣程序。当前开发基线为 v0.9.4（修复打开旧项目时历史消息被误回放到飞书）：
 
 本项目以 MIT 许可证开源。贡献代码前请阅读 [贡献指南](CONTRIBUTING.md)；安全问题请阅读 [安全报告说明](SECURITY.md)。版本变化见 [CHANGELOG.md](CHANGELOG.md)，长期计划见 [ROADMAP.md](ROADMAP.md)。
 
@@ -75,7 +75,7 @@
 
 推荐直接发送单个文件：
 
-`CodexCompanion-Setup-v0.9.3.exe`
+`CodexCompanion-Setup-v0.9.4.exe`
 
 用户双击一次即可安装并启动，安装器已经内置 Node.js 和官方 Codex CLI，不再要求另外安装 Node.js、Codex CLI 或 Codex Switcher。已有 Switcher 账号的用户仍可在高级设置中一次性迁移；新用户直接使用 Companion 的通用网页登录或设备码登录。Codex 桌面应用可选，但想使用切换后自动打开功能时需要安装。
 

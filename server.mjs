@@ -15,7 +15,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.9.3';
+const APP_VERSION = '0.9.4';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -2376,6 +2376,19 @@ function sessionThreadId(file) {
   return path.basename(file).match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i)?.[1] || '';
 }
 
+// Codex may rewrite an existing session file when the user only opens an old
+// project. Never interpret that rewrite as a new append: doing so would replay
+// the whole historical conversation to Feishu. New files are still read from
+// zero so a session created after the monitor starts is observed normally.
+function sessionAppendStartOffset(previousOffset, stat, now = Date.now()) {
+  const size = Number(stat?.size || 0);
+  if (previousOffset == null) {
+    const birth = Number(stat?.birthtimeMs || 0);
+    return birth > 0 && now - birth < 2 * 60 * 1000 ? 0 : size;
+  }
+  return size < Number(previousOffset) ? size : Number(previousOffset);
+}
+
 function sessionKindFromMeta(payload) {
   if (payload?.thread_source === 'subagent' || payload?.source?.subagent) return 'subagent';
   return String(payload?.thread_source || 'unknown');
@@ -2460,9 +2473,13 @@ async function markCodexTurnComplete(turnId) {
 async function processCodexSessionAppend(file) {
   try {
     const stat = await fs.stat(file);
-    let offset = codexSessionOffsets.get(file);
-    if (offset == null) offset = 0;
-    if (stat.size < offset) { offset = 0; codexSessionPartials.delete(file); }
+    const previousOffset = codexSessionOffsets.get(file);
+    const offset = sessionAppendStartOffset(previousOffset, stat);
+    if (previousOffset == null || stat.size < Number(previousOffset)) {
+      codexSessionOffsets.set(file, offset);
+      codexSessionPartials.delete(file);
+      if (offset === stat.size) return;
+    }
     if (stat.size === offset) return;
     const length = stat.size - offset;
     const handle = await fs.open(file, 'r');
