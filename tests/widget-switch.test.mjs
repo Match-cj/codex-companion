@@ -7,7 +7,7 @@ const dashboard = fs.readFileSync(new URL('../dashboard.html', import.meta.url),
 test('widget and webpage use the same account-switch action after confirmation', () => {
   const action = widget.slice(widget.indexOf('function Switch-WidgetAccount('), widget.indexOf('function Warmup-WidgetAccount('));
   assert.match(action, /api\/codex\/status/);
-  assert.match(action, /MessageBoxResult\]::Yes/);
+  assert.match(action, /MessageBoxResult\]::OK/);
   assert.match(action, /closeCodex=\$true/);
   assert.match(action, /api\/accounts\/switch/);
   assert.doesNotMatch(action, /validateOnly/);
