@@ -34,7 +34,7 @@
     <input id="feishu" type="password" class="wide" placeholder="粘贴飞书机器人 Webhook 完整地址">
     <div class="row"><button class="good" onclick="setupFeishu()">保存并发送测试消息</button><button class="plain" onclick="toggleWebhook()">显示/隐藏地址</button><span id="feishuState" class="muted"></span></div>
     <details><summary>第一次使用？展开查看飞书设置步骤</summary><ol><li>在飞书中新建一个群，只有你自己也可以。</li><li>打开群聊右上角 <b>… → 设置 → 群机器人 → 添加机器人</b>。</li><li>选择 <b>自定义机器人</b>，名称可填写“Codex 通知”。</li><li>安全设置建议选择“关键词”，关键词填写 <b>Codex</b>；暂时不要开启签名校验。</li><li>创建后复制完整 Webhook 地址，粘贴到上方，点击“保存并发送测试消息”。</li></ol><p class="muted">Webhook 相当于群消息密码，不要发给别人或贴到公开网页。</p></details>
-    <hr><h3>在飞书里回复 Codex</h3><p class="muted">自建应用机器人使用长连接接收回复。App Secret 只会以 Windows 当前用户加密方式保存在本机，不会回显。</p>
+    <div class="login-box"><b>Webhook 与应用机器人区别</b><p><b>Webhook 自定义机器人：</b>单向发送通知，配置简单；不能接收回复，不能执行继续、停止、切换账号，也不支持图片和文件回传。</p><p><b>飞书自建应用机器人：</b>配置 App ID、App Secret 并建立长连接，可接收回复、控制任务和回传图片/文件，需要发布应用并验证操作者。</p><p class="muted">你现在使用的是自建应用机器人方式，不是 Webhook；Webhook 只用于单向通知。</p></div><hr><h3>在飞书里回复 Codex</h3><p class="muted">自建应用机器人使用长连接接收回复。App Secret 只会以 Windows 当前用户加密方式保存在本机，不会回显。</p>
     <div class="row"><input id="feishuAppId" class="grow" placeholder="飞书 App ID（cli_ 开头）"><input id="feishuAppSecret" type="password" class="grow" placeholder="App Secret（已保存可留空）"><button class="good" onclick="setupFeishuApp(this)">保存并连接</button></div>
     <div class="row"><button class="small" onclick="bindLatestThread(this)">一键绑定最近任务</button><button class="small good" onclick="testFeishu(this)">验证飞书送达</button><button class="small" onclick="rebuildFeishuTopics(this)">重建旧话题映射</button><label><input id="feishuMentionOperator" type="checkbox" style="min-width:0" checked>通知时 @ 我</label><span id="feishuAppState" class="muted">尚未配置</span></div>
     <p class="muted">连接后，在机器人所在群里 @机器人发送“绑定”。以后回复机器人通知并 @机器人，内容会追加到绑定的原 Codex 对话，不会新建对话；私聊机器人时可直接回复。在某个任务话题里发送“新话题”，下一条结果会切换到新的话题，旧话题保留。</p>
@@ -137,7 +137,7 @@
   const tabBar=document.createElement('nav');tabBar.className='tabs';tabBar.setAttribute('aria-label','页面标签');
   Object.entries(tabLabels).forEach(([key,label])=>{const button=document.createElement('button');button.className='tab';button.type='button';button.textContent=label;button.dataset.tab=key;button.onclick=()=>activateTab(key);tabBar.append(button)});
   $('network').after(tabBar);
-  function activateTab(key){const visible=new Set(tabLayout[key]||tabLayout.overview);mainSections.forEach((section,index)=>{section.classList.add('tab-section');section.classList.toggle('active',visible.has(index))});if($('securitySection'))$('securitySection').style.display=key==='settings'?'':'none';document.querySelectorAll('.tab').forEach(button=>button.classList.toggle('active',button.dataset.tab===key));localStorage.setItem('codexCompanionTab',key)}
+  function activateTab(key){const visible=new Set(tabLayout[key]||tabLayout.overview);mainSections.forEach((section,index)=>{section.classList.add('tab-section');section.classList.toggle('active',visible.has(index))});if($('securitySection'))$('securitySection').style.display=(key==='settings'||key==='feishu')?'':'none';document.querySelectorAll('.tab').forEach(button=>button.classList.toggle('active',button.dataset.tab===key));localStorage.setItem('codexCompanionTab',key)}
   document.querySelectorAll('#recentThreads,#tasks,#taskActivity').forEach(element=>element.classList.add('list-scroll'));
   activateTab(tabLayout[localStorage.getItem('codexCompanionTab')]?localStorage.getItem('codexCompanionTab'):'overview');
 </script></body></html>
