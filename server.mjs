@@ -15,13 +15,14 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '0.9.4';
+const APP_VERSION = '0.9.5';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
   ? path.resolve(process.env.CODEX_COMPANION_DATA_DIR)
   : path.join(process.env.APPDATA || path.join(process.env.USERPROFILE, 'AppData', 'Roaming'), 'CodexCompanion');
 const configPath = path.join(appDir, 'config.json');
+const widgetSwitchTracePath = path.join(appDir, 'widget-switch-trace.jsonl');
 const nativeAccountsPath = path.join(appDir, 'accounts.vault.json');
 const nativeAccountsBackupPath = path.join(appDir, 'accounts.vault.backup.json');
 const switcherAccountsPath = path.join(process.env.USERPROFILE || '', '.codex-switcher', 'accounts.json');
@@ -168,6 +169,10 @@ let codexSessionWatcher = null;
 let codexSessionWatcherReady = false;
 const codexSessionOffsets = new Map();
 const codexSessionRewrites = new Map();
+// Events already present when the watcher starts are historical evidence, not
+// a new desktop reply.  Keep the cutoff so opening an old project cannot
+// replay its entire JSONL history into Feishu.
+let codexSessionMonitorStartedAt = Date.now();
 const codexSessionPartials = new Map();
 const codexSessionDebounces = new Map();
 const codexSessionKinds = new Map();
@@ -266,6 +271,18 @@ const readJson = async file => {
   return {};
 };
 const saveConfig = () => fs.mkdir(appDir, { recursive: true }).then(() => fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf8'));
+async function appendWidgetSwitchTrace(entry = {}) {
+  const row = { at: new Date().toISOString(), stage: String(entry.stage || 'unknown'), account: String(entry.account || '').slice(0, 12), detail: String(entry.detail || '').slice(0, 240) };
+  await fs.mkdir(appDir, { recursive: true });
+  await fs.appendFile(widgetSwitchTracePath, `${JSON.stringify(row)}\n`, 'utf8');
+  return row;
+}
+async function readWidgetSwitchTrace() {
+  try {
+    const lines = (await fs.readFile(widgetSwitchTracePath, 'utf8')).trim().split(/\r?\n/).filter(Boolean).slice(-100);
+    return lines.map(line => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
+  } catch { return []; }
+}
 function humanError(error) {
   const message = String(error?.message || error || '未知错误');
   if (/invalid refresh token|token refresh|refresh token|token.{0,30}(expired|revoked)|token_expired|token_revoked|unauthorized|401\b/i.test(message)) return '这个账号的登录已经失效，请在 Companion 网页中重新登录后再刷新。';
@@ -2394,6 +2411,10 @@ function sessionKindFromMeta(payload) {
   if (payload?.thread_source === 'subagent' || payload?.source?.subagent) return 'subagent';
   return String(payload?.thread_source || 'unknown');
 }
+function isFreshCodexSessionEvent(event, cutoff = codexSessionMonitorStartedAt) {
+  const timestamp = Date.parse(String(event?.timestamp || event?.payload?.timestamp || ''));
+  return !Number.isFinite(timestamp) || timestamp >= Number(cutoff) - 5000;
+}
 function observeSessionPrompt(event, threadId) {
   if (event?.type !== 'response_item' || event.payload?.type !== 'message') return;
   const parts = Array.isArray(event.payload.content) ? event.payload.content.filter(item => item?.type === 'input_text').map(item => String(item.text || '')) : [];
@@ -2516,6 +2537,7 @@ async function processCodexSessionAppend(file) {
         observeSessionMeta(event.payload, sessionThreadId(file));
         continue;
       }
+      if (!isFreshCodexSessionEvent(event)) continue;
       observeSessionPrompt(event, sessionThreadId(file));
       observeSessionActivity(event, codexSessionKinds.get(file) || 'unknown', sessionThreadId(file));
       if (event?.type === 'event_msg' && event?.payload?.type === 'token_count') {
@@ -2601,6 +2623,7 @@ async function processCodexSessionAppend(file) {
 async function startCodexSessionMonitor() {
   const root = path.join(process.env.USERPROFILE || '', '.codex', 'sessions');
   if (!existsSync(root)) return;
+  codexSessionMonitorStartedAt = Date.now();
   for (const file of await listCodexSessionFiles(root)) {
     const stat = await fs.stat(file).catch(() => null);
     if (stat) {
@@ -3018,6 +3041,11 @@ async function handle(req, res) {
     if (req.method==='POST'&&u.pathname==='/api/browser-login/complete') return send(res,200,await completeBrowserLogin(data.callbackUrl));
     if (req.method==='POST'&&u.pathname==='/api/browser-login/cancel'){if(browserLoginInFlight)throw Error('正在交换或保存账号，请等待结果后再取消。');browserLogin={status:'canceled',message:'已取消这次登录。'};return send(res,200,{ok:true});}
     if (req.method==='POST'&&u.pathname==='/api/widget/open') return send(res,200,await openQuotaWidget());
+    if (req.method==='GET'&&u.pathname==='/api/widget/switch-trace') return send(res,200,{ok:true,rows:await readWidgetSwitchTrace()});
+    if (req.method==='POST'&&u.pathname==='/api/widget/switch-trace') {
+      if (!isLoopback(req.socket.remoteAddress)) return send(res,403,{error:'浮窗诊断只能在本机写入'});
+      return send(res,200,{ok:true,row:await appendWidgetSwitchTrace(data)});
+    }
     if (req.method==='GET'&&u.pathname==='/api/codex/status') return send(res,200,{running:await isCodexDesktopRunning()});
     if (req.method==='POST'&&u.pathname==='/api/accounts/switch'){
       const target=await validateNativeSwitchTarget(String(data.id));

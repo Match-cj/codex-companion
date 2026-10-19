@@ -25,3 +25,15 @@ test('a newly created session file is read from the beginning once', () => {
   assert.equal(context.sessionAppendStartOffset(null, { size: 1200, birthtimeMs: now - 1000 }, now), 0);
   assert.equal(context.sessionAppendStartOffset(null, { size: 1200, birthtimeMs: now - 10 * 60 * 1000 }, now), 1200);
 });
+
+test('historical JSONL events are rejected by their event timestamp', () => {
+  assert.match(source, /function isFreshCodexSessionEvent\(/);
+  const helperStart = source.indexOf('function isFreshCodexSessionEvent(');
+  const helperEnd = source.indexOf('function observeSessionPrompt(', helperStart);
+  const helperContext = {};
+  vm.createContext(helperContext);
+  vm.runInContext(`${source.slice(helperStart, helperEnd)};this.isFreshCodexSessionEvent=isFreshCodexSessionEvent;`, helperContext);
+  const cutoff = Date.parse('2026-10-19T10:00:00.000Z');
+  assert.equal(helperContext.isFreshCodexSessionEvent({ timestamp: '2026-10-19T09:59:00.000Z' }, cutoff), false);
+  assert.equal(helperContext.isFreshCodexSessionEvent({ timestamp: '2026-10-19T10:00:01.000Z' }, cutoff), true);
+});

@@ -1,8 +1,8 @@
-﻿param([int]$Port = 17841,[switch]$SelfTest)
+param([int]$Port = 17841,[switch]$SelfTest)
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 Add-Type 'using System; using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags); [DllImport("user32.dll", EntryPoint="GetWindowLongW")] public static extern int GetWindowLong(IntPtr hwnd, int index); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); }'
-$script:Port=$Port; $script:AppVersion='0.9.4'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
+$script:Port=$Port; $script:AppVersion='0.9.5'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
 $mutexName=if($SelfTest){'Global\CodexCompanionQuotaWidget_v5_selftest'}else{'Global\CodexCompanionQuotaWidget_v5'}
 $script:Mutex=New-Object System.Threading.Mutex($false,$mutexName); if(-not $script:Mutex.WaitOne(0,$false)){exit}
 $Transparent=[Windows.Media.Brushes]::Transparent
@@ -20,6 +20,12 @@ $FreeBadgeBg=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::Fro
 $FreeBadgeFg=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::FromRgb(169,243,221))
 $ProBadgeBg=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::FromRgb(77,57,24))
 $ProBadgeFg=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::FromRgb(255,211,112))
+function Trace-WidgetSwitch($stage,$accountName,$detail=''){
+ try{
+  $payload=@{stage=$stage;account=[string]$accountName;detail=[string]$detail}|ConvertTo-Json -Compress
+  Invoke-RestMethod "http://127.0.0.1:$script:Port/api/widget/switch-trace" -Method Post -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($payload)) -TimeoutSec 3|Out-Null
+ }catch{}
+}
 function Get-Status{try{Invoke-RestMethod "http://127.0.0.1:$script:Port/api/status" -TimeoutSec 8}catch{$null}}
 function Get-ApiErrorMessage($record){
  try{
@@ -162,23 +168,29 @@ function Get-WidgetMonitorWorkArea{
 }
 function Switch-WidgetAccount($accountId,$accountName){
  if($SelfTest){$script:SwitchButtonInvocations++;return}
- if($script:SwitchInProgress){return}
+ Trace-WidgetSwitch 'gesture_received' $accountName
+ if($script:SwitchInProgress){Trace-WidgetSwitch 'ignored_busy' $accountName;return}
  try{
   $ErrorActionPreference='Stop'
   $state=Invoke-RestMethod "http://127.0.0.1:$script:Port/api/codex/status" -TimeoutSec 8
   $desktopText=if($state.running){'检测到 ChatGPT/Codex 正在运行；确认后会先将它关闭，切换成功再自动重新打开。'}else{'确认后会切换账号，并自动打开 ChatGPT/Codex。'}
+  Trace-WidgetSwitch 'confirmation_shown' $accountName
   $choice=[Windows.MessageBox]::Show("确定切换到【${accountName}】吗？`n`n$desktopText`n`n正在运行的桌面端任务可能中断。",'确认切换账号','YesNo','Warning')
-  if($choice-ne[Windows.MessageBoxResult]::Yes){return}
+  if($choice-ne[Windows.MessageBoxResult]::Yes){Trace-WidgetSwitch 'confirmation_cancelled' $accountName;return}
+  Trace-WidgetSwitch 'request_started' $accountName
   $script:SwitchInProgress=$true
   [Windows.Input.Mouse]::OverrideCursor=[Windows.Input.Cursors]::Wait
   $payload=@{id=$accountId;closeCodex=$true;source='widget'}|ConvertTo-Json -Compress
   $result=Invoke-RestMethod "http://127.0.0.1:$script:Port/api/accounts/switch" -Method Post -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($payload)) -TimeoutSec 90
+  Trace-WidgetSwitch 'request_response' $accountName ([string]$result.message)
   if($result.ok -ne $true){throw '后台没有确认账号切换成功。'}
   if([string]$result.activeAccountId -ne [string]$accountId){throw "切换后校验失败：当前账号没有改变。请打开网页查看详细状态。"}
+  Trace-WidgetSwitch 'validation_success' $accountName
   Close-Detail
   Update-Widget
   [Windows.MessageBox]::Show([string]$result.message,'Codex Companion','OK','Information')|Out-Null
  }catch{
+  Trace-WidgetSwitch 'failed' $accountName (Get-ApiErrorMessage $_)
   [Windows.MessageBox]::Show("账号切换失败：`n$(Get-ApiErrorMessage $_)",'Codex Companion','OK','Error')|Out-Null
  }finally{$script:SwitchInProgress=$false;[Windows.Input.Mouse]::OverrideCursor=$null}
 }
@@ -245,6 +257,7 @@ function Show-Detail{
     $card.Cursor=[Windows.Input.Cursors]::Hand;$card.ToolTip="双击切换到 $shownName"
     $card.Tag=@{Id=[string]$a.id;Name=[string]$shownName}
    $switchHandler={param($sender,$eventArgs)
+    Trace-WidgetSwitch ("mouse_down_"+[string]$eventArgs.ClickCount) ([string]$sender.Tag.Name)
     if($eventArgs.ClickCount-lt 2){return}
     $eventArgs.Handled=$true
     Switch-WidgetAccount ([string]$sender.Tag.Id) ([string]$sender.Tag.Name)
