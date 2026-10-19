@@ -167,6 +167,7 @@ let feishuState = { state: 'not_configured', error: '', connectedAt: 0 };
 let codexSessionWatcher = null;
 let codexSessionWatcherReady = false;
 const codexSessionOffsets = new Map();
+const codexSessionRewrites = new Map();
 const codexSessionPartials = new Map();
 const codexSessionDebounces = new Map();
 const codexSessionKinds = new Map();
@@ -2474,10 +2475,28 @@ async function processCodexSessionAppend(file) {
   try {
     const stat = await fs.stat(file);
     const previousOffset = codexSessionOffsets.get(file);
+    const rewrite = codexSessionRewrites.get(file);
+    if (rewrite) {
+      // A rewrite can arrive in several fs.watch callbacks. Keep advancing the
+      // offset while the file is changing, but never parse those historical
+      // bytes as fresh conversation events.
+      if (stat.size !== rewrite.lastSize) {
+        rewrite.lastSize = stat.size;
+        rewrite.until = Date.now() + 1500;
+      }
+      codexSessionOffsets.set(file, stat.size);
+      codexSessionPartials.delete(file);
+      if (Date.now() < rewrite.until) return;
+      codexSessionRewrites.delete(file);
+      return;
+    }
     const offset = sessionAppendStartOffset(previousOffset, stat);
     if (previousOffset == null || stat.size < Number(previousOffset)) {
       codexSessionOffsets.set(file, offset);
       codexSessionPartials.delete(file);
+      if (stat.size < Number(previousOffset || 0)) {
+        codexSessionRewrites.set(file, { lastSize: stat.size, until: Date.now() + 1500 });
+      }
       if (offset === stat.size) return;
     }
     if (stat.size === offset) return;

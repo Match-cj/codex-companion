@@ -10,6 +10,11 @@ const context = {};
 vm.createContext(context);
 vm.runInContext(`${source.slice(start, end)};this.sessionAppendStartOffset=sessionAppendStartOffset;`, context);
 
+test('session monitor quarantines multi-callback rewrites', () => {
+  assert.match(source, /codexSessionRewrites\.set\(file/);
+  assert.match(source, /historical[\r\n]+\s*\/\/ bytes as fresh conversation events/);
+});
+
 test('opening an old project after monitoring starts does not replay its history', () => {
   assert.equal(context.sessionAppendStartOffset(5000, { size: 1200, birthtimeMs: 1 }, Date.now()), 1200);
   assert.equal(context.sessionAppendStartOffset(5000, { size: 5000, birthtimeMs: 1 }, Date.now()), 5000);
