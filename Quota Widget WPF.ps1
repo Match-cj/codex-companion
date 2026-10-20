@@ -2,7 +2,7 @@ param([int]$Port = 17841,[switch]$SelfTest)
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 Add-Type 'using System; using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags); [DllImport("user32.dll", EntryPoint="GetWindowLongW")] public static extern int GetWindowLong(IntPtr hwnd, int index); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); }'
-$script:Port=$Port; $script:AppVersion='1.0.2'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
+$script:Port=$Port; $script:AppVersion='1.0.3'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
 $mutexName=if($SelfTest){'Global\CodexCompanionQuotaWidget_v5_selftest'}else{'Global\CodexCompanionQuotaWidget_v5'}
 $script:Mutex=New-Object System.Threading.Mutex($false,$mutexName); if(-not $script:Mutex.WaitOne(0,$false)){exit}
 $Transparent=[Windows.Media.Brushes]::Transparent
@@ -41,8 +41,8 @@ function Get-ApiErrorMessage($record){
 }
 function Get-RunningTasks($status){
  $rows=@()
- if($null-ne$status.tasks){$rows+=@($status.tasks.psobject.Properties|ForEach-Object{$_.Value}|Where-Object{$_.status-in @('starting','running','waiting_confirmation','retry_waiting')})}
- if($null-ne$status.taskActivity -and $null-ne$status.taskActivity.rows){$rows+=@($status.taskActivity.rows|Where-Object{$_.source-in @('desktop','takeover','companion')})}
+ if($null-ne$status.tasks){$rows+=@($status.tasks.psobject.Properties|ForEach-Object{$_.Value}|Where-Object{$_.status -in @('starting','running','waiting_confirmation','retry_waiting')})}
+ if($null-ne$status.taskActivity -and $null-ne$status.taskActivity.rows){$rows+=@($status.taskActivity.rows|Where-Object{$_.source -in @('desktop','takeover','companion')})}
  $seen=@{};return @($rows|Where-Object{$id=[string]$_.id;if($seen.ContainsKey($id)){return $false};$seen[$id]=$true;return $true})
 }
 function Get-Remaining($a,$prefix){if($null -eq $a -or $null -eq $a.usage){return $null};$used=$a.usage.($prefix+'_used_percent');if($null -eq $used){return $null};[Math]::Max(0,[Math]::Min(100,[int](100-[double]$used)))}
@@ -175,7 +175,7 @@ function Switch-WidgetAccount($accountId,$accountName){
   $state=Invoke-RestMethod "http://127.0.0.1:$script:Port/api/codex/status" -TimeoutSec 8
   $desktopText=if($state.running){'检测到 ChatGPT/Codex 正在运行；确认后会先将它关闭，切换成功再自动重新打开。'}else{'确认后会切换账号，并自动打开 ChatGPT/Codex。'}
   Trace-WidgetSwitch 'confirmation_shown' $accountName
-  $choice=[Windows.MessageBox]::Show("确定切换到【${accountName}】吗？`n`n$desktopText`n`n请点击“确定”继续，点击“取消”不会切换。",'确认切换账号','OKCancel','Warning')
+  $choice=[Windows.MessageBox]::Show("确定切换到【${accountName}】吗？`n`n$desktopText`n`n请点击确定继续，点击取消不会切换。",'确认切换账号','OKCancel','Warning')
   Trace-WidgetSwitch 'confirmation_result' $accountName ([string]$choice)
   if($choice-ne[Windows.MessageBoxResult]::OK){Trace-WidgetSwitch 'confirmation_cancelled' $accountName ([string]$choice);return}
   Trace-WidgetSwitch 'request_started' $accountName
