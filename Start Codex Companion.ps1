@@ -13,6 +13,7 @@ $nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
 $node = if (Test-Path -LiteralPath $bundledNode) { $bundledNode } elseif ($nodeCommand) { $nodeCommand.Source } else { '' }
 $port = 17841
 $statusUrl = "http://127.0.0.1:$port/api/status"
+$healthUrl = "http://127.0.0.1:$port/api/health"
 $logFile = Join-Path $root 'launcher.log'
 $serverOut = Join-Path $root 'server.stdout.log'
 $serverErr = Join-Path $root 'server.stderr.log'
@@ -45,7 +46,24 @@ function Test-PortOpen($hostName, $p) {
     }
 }
 
-Write-Log "=== Launcher starting (v0.9.4) ==="
+function Test-HttpReady($url) {
+    try {
+        $request = [System.Net.WebRequest]::Create($url)
+        $request.Proxy = $null
+        $request.Timeout = 2000
+        $response = $request.GetResponse()
+        try {
+            $code = [int]$response.StatusCode
+            return ($code -ge 200 -and $code -lt 300)
+        } finally {
+            $response.Dispose()
+        }
+    } catch {
+        return $false
+    }
+}
+
+Write-Log "=== Launcher starting (v1.0.4) ==="
 Write-Log "Data directory: $companionDataRoot"
 
 if (-not $node -or -not (Test-Path -LiteralPath $node)) {
@@ -101,9 +119,9 @@ for ($attempt = 1; $attempt -le 2 -and -not $ready; $attempt++) {
             Write-Log ("Server attempt $attempt exited early (code=$($serverProc.ExitCode))")
             break
         }
-        if (Test-PortOpen '127.0.0.1' $port) {
+        if (Test-PortOpen '127.0.0.1' $port -and (Test-HttpReady $healthUrl)) {
             $ready = $true
-            Write-Log "Server port ready (TCP) on attempt $attempt"
+            Write-Log "Server health ready (HTTP) on attempt $attempt"
             break
         }
         Start-Sleep -Milliseconds 500
