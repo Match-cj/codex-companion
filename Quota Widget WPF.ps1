@@ -2,7 +2,7 @@ param([int]$Port = 17841,[switch]$SelfTest)
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 Add-Type 'using System; using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags); [DllImport("user32.dll", EntryPoint="GetWindowLongW")] public static extern int GetWindowLong(IntPtr hwnd, int index); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); }'
-$script:Port=$Port; $script:AppVersion='1.0.6'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
+$script:Port=$Port; $script:AppVersion='1.0.7'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
 $mutexName=if($SelfTest){'Global\CodexCompanionQuotaWidget_v5_selftest'}else{'Global\CodexCompanionQuotaWidget_v5'}
 $script:Mutex=New-Object System.Threading.Mutex($false,$mutexName); if(-not $script:Mutex.WaitOne(0,$false)){exit}
 $Transparent=[Windows.Media.Brushes]::Transparent
@@ -21,6 +21,7 @@ $FreeBadgeFg=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::Fro
 $ProBadgeBg=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::FromRgb(77,57,24))
 $ProBadgeFg=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::FromRgb(255,211,112))
 function Trace-WidgetSwitch($stage,$accountName,$detail=''){
+ if($SelfTest){return}
  try{
   $payload=@{stage=$stage;account=[string]$accountName;detail=[string]$detail}|ConvertTo-Json -Compress
   Invoke-RestMethod "http://127.0.0.1:$script:Port/api/widget/switch-trace" -Method Post -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($payload)) -TimeoutSec 3|Out-Null
@@ -151,6 +152,25 @@ $Number=New-Text '--' 22 $Green -bold;$Number.HorizontalAlignment='Center';$Numb
 function Set-Arc($r){if($r-le 0){$Arc.Data=$null;return};$c=36;$radius=28;$start=-90;$end=$start+(3.599*[Math]::Min(99.9,$r));$a1=$start*[Math]::PI/180;$a2=$end*[Math]::PI/180;$p1=New-Object Windows.Point -ArgumentList ($c+$radius*[Math]::Cos($a1)),($c+$radius*[Math]::Sin($a1));$p2=New-Object Windows.Point -ArgumentList ($c+$radius*[Math]::Cos($a2)),($c+$radius*[Math]::Sin($a2));$g=New-Object Windows.Media.StreamGeometry;$ctx=$g.Open();$ctx.BeginFigure($p1,$false,$false);$ctx.ArcTo($p2,(New-Object Windows.Size -ArgumentList $radius,$radius),0,(($end-$start)-gt 180),[Windows.Media.SweepDirection]::Clockwise,$true,$false);$ctx.Close();$g.Freeze();$Arc.Data=$g}
 function Update-Widget{$script:Status=Get-Status;$runningCount=@(Get-RunningTasks $script:Status).Count;$Window.ToolTip="Codex Companion`n运行中对话：$runningCount（含自动接管）";$a=$script:Status.accounts|Where-Object{$_.is_active}|Select-Object -First 1;if(Test-LoginExpired $a){$Number.Text='!';$Number.Foreground=$Red;$Arc.Data=$null;return};$r=Get-Remaining $a 'primary';if($null-eq$r){$r=Get-Remaining $a 'secondary'};if($null-eq$r){$Number.Text='--';$Arc.Data=$null;return};$color=Get-Color $r;$Number.Text=[string]$r;$Number.Foreground=$color;$Arc.Stroke=$color;Set-Arc $r}
 function Close-Detail([switch]$Force){if($script:SwitchInProgress -and -not$Force){return};if($null-ne$script:Detail){$d=$script:Detail;$script:Detail=$null;$script:DetailClosedAt=[DateTime]::UtcNow;try{$d.Close()}catch{}}}
+function Test-ScreenPointInsideWindow($floatingWindow,$cursor){
+ if($null-eq$floatingWindow -or -not$floatingWindow.IsVisible){return $false}
+ try{
+  # Cursor.Position is in screen pixels; convert to this window's WPF units.
+  # Adding ActualWidth (DIPs) to PointToScreen (pixels) fails at non-100% DPI.
+  $local=$floatingWindow.PointFromScreen([Windows.Point]::new([double]$cursor.X,[double]$cursor.Y))
+  return $local.X-ge 0 -and $local.X-le$floatingWindow.ActualWidth -and $local.Y-ge 0 -and $local.Y-le$floatingWindow.ActualHeight
+ }catch{return $false}
+}
+function Handle-OutsidePointerDown($cursor){
+ if($null-eq$script:Detail -or $script:SwitchInProgress -or $script:MenuOpen){return}
+ if($Window.IsMouseOver -or $script:Detail.IsMouseOver){return}
+ $insideMain=Test-ScreenPointInsideWindow $Window $cursor
+ $insideDetail=Test-ScreenPointInsideWindow $script:Detail $cursor
+ if(-not$insideMain -and -not$insideDetail){
+  Trace-WidgetSwitch 'panel_closed_outside' '' ("widget=$script:AppVersion pid=$PID")
+  Close-Detail
+ }
+}
 function Get-WidgetMonitorWorkArea{
  try{
   $center=$Window.PointToScreen([Windows.Point]::new(([double]$Window.ActualWidth/2.0),([double]$Window.ActualHeight/2.0)))
@@ -265,6 +285,7 @@ function Show-Detail{
     Switch-WidgetAccount ([string]$sender.Tag.Id) ([string]$sender.Tag.Name)
    }
    $card.Add_PreviewMouseLeftButtonDown($switchHandler)
+   if($SelfTest){$script:TestSwitchCard=$card;$script:TestSwitchHandler=$switchHandler}
    $script:SwitchableCardsBuilt++
    $script:SwitchGestureCardsBuilt++
   }
@@ -274,7 +295,7 @@ function Show-Detail{
  $stack.Measure([Windows.Size]::new(402,[double]::PositiveInfinity))
  $total=$stack.DesiredSize.Height+18
  $d.Height=[Math]::Max(80,$total)
- $work=Get-WidgetMonitorWorkArea;$left=$Window.Left+(($Window.ActualWidth-$d.Width)/2);$left=[Math]::Max($work.Left+4,[Math]::Min($left,$work.Right-$d.Width-4));$below=$Window.Top+$Window.ActualHeight+6;$top=if(($below+$d.Height)-le$work.Bottom){$below}else{$Window.Top-$d.Height-6};$d.Left=$left;$d.Top=[Math]::Max($work.Top+4,[Math]::Min($top,$work.Bottom-$d.Height-4));if(-not$SelfTest){$d.Show()}
+ $work=Get-WidgetMonitorWorkArea;$left=$Window.Left+(($Window.ActualWidth-$d.Width)/2);$left=[Math]::Max($work.Left+4,[Math]::Min($left,$work.Right-$d.Width-4));$below=$Window.Top+$Window.ActualHeight+6;$top=if(($below+$d.Height)-le$work.Bottom){$below}else{$Window.Top-$d.Height-6};$d.Left=$left;$d.Top=[Math]::Max($work.Top+4,[Math]::Min($top,$work.Bottom-$d.Height-4));if($SelfTest){$d.Opacity=0};$d.Show()
 }
 if($SelfTest){
  $Error.Clear()
@@ -288,6 +309,28 @@ if($SelfTest){
  Update-Widget
  Show-Detail
  $stackForTest=$script:Detail.Content.Child
+ $scaledBoundsPass=$true
+ foreach($scale in @(1.0,1.25,1.5,2.0)){
+  $fakeWindow=[pscustomobject]@{IsVisible=$true;ActualWidth=430.0;ActualHeight=279.0;Scale=$scale;Left=-1900.0;Top=120.0}
+  $fakeWindow|Add-Member -MemberType ScriptMethod -Name PointFromScreen -Value {param($point) [Windows.Point]::new(($point.X-$this.Left)/$this.Scale,($point.Y-$this.Top)/$this.Scale)}
+  $insideScaled=[Windows.Point]::new($fakeWindow.Left+429*$scale,$fakeWindow.Top+278*$scale)
+  $outsideScaled=[Windows.Point]::new($fakeWindow.Left+431*$scale,$fakeWindow.Top+280*$scale)
+  if(-not(Test-ScreenPointInsideWindow $fakeWindow $insideScaled) -or (Test-ScreenPointInsideWindow $fakeWindow $outsideScaled)){$scaledBoundsPass=$false}
+ }
+ if(-not$scaledBoundsPass){throw 'Scaled screen-coordinate regression'}
+ $script:Detail.UpdateLayout()
+ $insidePoint=$script:Detail.PointToScreen([Windows.Point]::new($script:Detail.ActualWidth-2,$script:Detail.ActualHeight-2))
+ Handle-OutsidePointerDown $insidePoint
+ $insideClickKeepsPanel=$null-ne$script:Detail
+ if(-not$insideClickKeepsPanel){throw 'Panel disappeared after an inside edge click'}
+ $singleClickKeepsPanel=$false;$doubleClickInvokesSwitch=$false
+ if($null-ne$script:TestSwitchHandler){
+  & $script:TestSwitchHandler $script:TestSwitchCard ([pscustomobject]@{ClickCount=1;Handled=$false})
+  $singleClickKeepsPanel=$null-ne$script:Detail -and $script:SwitchButtonInvocations-eq 0
+  & $script:TestSwitchHandler $script:TestSwitchCard ([pscustomobject]@{ClickCount=2;Handled=$false})
+  $doubleClickInvokesSwitch=$script:SwitchButtonInvocations-eq 1
+ }
+ [pscustomobject]@{ScaledBoundsPass=$scaledBoundsPass;InsideEdgeClickKeepsPanel=$insideClickKeepsPanel;SingleClickKeepsPanel=$singleClickKeepsPanel;DoubleClickInvokesSwitch=$doubleClickInvokesSwitch;DpiScale=[Windows.PresentationSource]::FromVisual($script:Detail).CompositionTarget.TransformToDevice.M11}|ConvertTo-Json -Compress
  [pscustomobject]@{AccountsFromApi=@($script:Status.accounts).Count;CardsBuilt=@($stackForTest.Children).Count;LoginExpiredCards=$script:LoginExpiredCardsBuilt;SwitchableCards=$script:SwitchableCardsBuilt;SwitchGestureCards=$script:SwitchGestureCardsBuilt;SwitchButtonCards=$script:SwitchButtonCardsBuilt;SwitchButtonInvocations=$script:SwitchButtonInvocations;PanelHeight=[Math]::Round($script:Detail.Height,1);TopmostRestored=$topmostRestored;NoFocusSteal=$noFocusSteal;RuntimeErrors=$Error.Count;Errors=@($Error|ForEach-Object{$_.InvocationInfo.PositionMessage+' :: '+$_.Exception.Message})}|ConvertTo-Json -Compress -Depth 3
  Close-Detail
  $Window.Close()
@@ -304,5 +347,5 @@ $Window.Add_MouseLeftButtonDown({$hadDetail=$null-ne$script:Detail;if($hadDetail
 $Menu=New-Object Windows.Controls.ContextMenu;$Menu.Placement='Right';$Menu.PlacementTarget=$Window;$Menu.HorizontalOffset=8;$Refresh=New-Object Windows.Controls.MenuItem;$Refresh.Header='立即刷新额度';$Refresh.Add_Click({Update-Widget});$Menu.Items.Add($Refresh)|Out-Null;$WarmCurrent=New-Object Windows.Controls.MenuItem;$WarmCurrent.Header='预热当前账号';$WarmCurrent.Add_Click({$script:Status=Get-Status;$active=@($script:Status.accounts|Where-Object{$_.is_active})|Select-Object -First 1;if($null-ne$active){$shown=if([string]::IsNullOrWhiteSpace([string]$active.display_name)){[string]$active.name}else{[string]$active.display_name};Warmup-WidgetAccount ([string]$active.id) $shown}else{[Windows.MessageBox]::Show('没有找到当前账号。','Codex Companion','OK','Warning')|Out-Null}});$Menu.Items.Add($WarmCurrent)|Out-Null;$Open=New-Object Windows.Controls.MenuItem;$Open.Header='打开完整页面';$Open.Add_Click({Start-Process "http://127.0.0.1:$script:Port/"});$Menu.Items.Add($Open)|Out-Null;$Version=New-Object Windows.Controls.MenuItem;$Version.Header="Codex Companion v$script:AppVersion";$Version.IsEnabled=$false;$Menu.Items.Add((New-Object Windows.Controls.Separator))|Out-Null;$Menu.Items.Add($Version)|Out-Null;$Exit=New-Object Windows.Controls.MenuItem;$Exit.Header='退出浮窗';$Exit.Add_Click({$Window.Close()});$Menu.Items.Add($Exit)|Out-Null;$Menu.Add_Opened({$script:MenuOpen=$true});$Menu.Add_Closed({$script:MenuOpen=$false});$Window.ContextMenu=$Menu
 $StopMenu=New-Object Windows.Controls.MenuItem;$StopMenu.Header='中止运行中的对话';$StopMenu.Add_SubmenuOpened({$StopMenu.Items.Clear();$status=Get-Status;$running=@(Get-RunningTasks $status);if($running.Count-eq 0){$empty=New-Object Windows.Controls.MenuItem;$empty.Header='当前没有后台运行中的对话';$empty.IsEnabled=$false;$StopMenu.Items.Add($empty)|Out-Null}else{foreach($task in $running){$item=New-Object Windows.Controls.MenuItem;$item.Header="中止：$([string]$task.prompt)";$item.Tag=[string]$task.id;$item.Add_Click({param($sender,$eventArgs)try{Invoke-RestMethod "http://127.0.0.1:$script:Port/api/task/$([uri]::EscapeDataString([string]$sender.Tag))/stop" -Method Post -ContentType 'application/json' -Body '{}' -TimeoutSec 15|Out-Null;[Windows.MessageBox]::Show('已请求中止这个对话。','Codex Companion','OK','Information')|Out-Null}catch{[Windows.MessageBox]::Show("中止失败：`n$(Get-ApiErrorMessage $_)",'Codex Companion','OK','Error')|Out-Null}});$StopMenu.Items.Add($item)|Out-Null}}});$Menu.Items.Add($StopMenu)|Out-Null
 $Shutdown=New-Object Windows.Controls.MenuItem;$Shutdown.Header='退出 Companion（后台与浮窗）';$Shutdown.Add_Click({$choice=[Windows.MessageBox]::Show('确定退出 Companion 后台和浮窗吗？正在运行的后台任务可能中断。','退出 Companion','YesNo','Warning');if($choice-ne[Windows.MessageBoxResult]::Yes){return};try{Invoke-RestMethod "http://127.0.0.1:$script:Port/api/shutdown" -Method Post -ContentType 'application/json' -Body '{}' -TimeoutSec 5|Out-Null}catch{};$Window.Close()});$Menu.Items.Add($Shutdown)|Out-Null
-$OutsideTimer=New-Object Windows.Threading.DispatcherTimer;$OutsideTimer.Interval=[TimeSpan]::FromMilliseconds(60);$script:MouseWasDown=$false;$OutsideTimer.Add_Tick({$isDown=(([CompanionMouse]::GetAsyncKeyState(1)-band 0x8000)-ne 0);if($isDown-and-not$script:MouseWasDown-and$null-ne$script:Detail){$cursor=[System.Windows.Forms.Cursor]::Position;$mainOrigin=$Window.PointToScreen([Windows.Point]::new(0,0));$detailOrigin=$script:Detail.PointToScreen([Windows.Point]::new(0,0));$insideMain=$cursor.X-ge$mainOrigin.X-and$cursor.X-le($mainOrigin.X+$Window.ActualWidth)-and$cursor.Y-ge$mainOrigin.Y-and$cursor.Y-le($mainOrigin.Y+$Window.ActualHeight);$insideDetail=$cursor.X-ge$detailOrigin.X-and$cursor.X-le($detailOrigin.X+$script:Detail.ActualWidth)-and$cursor.Y-ge$detailOrigin.Y-and$cursor.Y-le($detailOrigin.Y+$script:Detail.ActualHeight);if(-not$insideMain-and-not$insideDetail){Close-Detail}};$script:MouseWasDown=$isDown});$OutsideTimer.Start()
+$OutsideTimer=New-Object Windows.Threading.DispatcherTimer;$OutsideTimer.Interval=[TimeSpan]::FromMilliseconds(60);$script:MouseWasDown=$false;$OutsideTimer.Add_Tick({$isDown=(([CompanionMouse]::GetAsyncKeyState(1)-band 0x8000)-ne 0);if($isDown-and-not$script:MouseWasDown){Handle-OutsidePointerDown ([System.Windows.Forms.Cursor]::Position)};$script:MouseWasDown=$isDown});$OutsideTimer.Start()
 $Timer=New-Object Windows.Threading.DispatcherTimer;$Timer.Interval=[TimeSpan]::FromSeconds(60);$Timer.Add_Tick({Update-Widget});$Timer.Start();$Warm=New-Object Windows.Threading.DispatcherTimer;$Warm.Interval=[TimeSpan]::FromMilliseconds(800);$script:WarmCount=0;$Warm.Add_Tick({$script:WarmCount++;Update-Widget;if(@($script:Status.accounts).Count-gt 0-or$script:WarmCount-ge 25){$Warm.Stop()}});$Warm.Start();$Window.Add_Closed({Close-Detail;$Timer.Stop();$Warm.Stop();$OutsideTimer.Stop();try{$script:Mutex.ReleaseMutex()}catch{};[Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvokeShutdown('Normal')});Update-Widget;$Window.Show();[Windows.Threading.Dispatcher]::Run()
