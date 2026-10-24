@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 const source=fs.readFileSync(new URL('../server.mjs',import.meta.url),'utf8');
-function context(){const c={Date,tasks:new Map()};vm.createContext(c);vm.runInContext(source.slice(source.indexOf('const sessionActivities ='),source.indexOf('async function seedSessionActivity(')),c);return c}
+function context(){const c={Date,tasks:new Map()};vm.createContext(c);vm.runInContext(source.slice(source.indexOf('function conversationTitle('),source.indexOf('function observeSessionMeta(')),c);vm.runInContext(source.slice(source.indexOf('const sessionActivities ='),source.indexOf('async function seedSessionActivity(')),c);return c}
 const event=(type,turn='a')=>({type:'event_msg',timestamp:new Date().toISOString(),payload:{type,turn_id:turn}});
 test('two independent main threads; child agents and unknown sources excluded',()=>{const c=context();for(const id of ['one','two'])c.observeSessionActivity(event('task_started'),'user',id);c.observeSessionActivity(event('task_started'),'subagent','child');c.observeSessionActivity(event('task_started'),'unknown','unknown');assert.equal(c.publicTaskActivity().length,2);c.observeSessionActivity(event('task_complete'),'user','one');assert.equal(c.publicTaskActivity().length,1)});
 test('old completion does not finish a newer turn, abort clears record',()=>{const c=context();c.observeSessionActivity(event('task_started','new'),'user','one');c.observeSessionActivity(event('task_complete','old'),'user','one');assert.equal(c.publicTaskActivity().length,1);c.observeSessionActivity(event('turn_aborted','new'),'user','one');assert.equal(c.publicTaskActivity().length,0)});

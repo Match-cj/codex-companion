@@ -52,7 +52,7 @@ test('backend relay uses current completed final message, not commentary or prev
   emit('item/agentMessage/delta',{delta:'another intermediate image'});
   emit('turn/completed',{turn:{id:'turn-2',status:'completed'}});
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(notices[1].finalText,'');
+  assert.equal(notices.length,1,'commentary-only completion must not send a success notification');
 });
 test('Feishu SDK upload shape and reply mapping preserve originating thread',async()=>{
   const source=await fs.readFile(new URL('../server.mjs',import.meta.url),'utf8');let uploaded=0,replied=0;

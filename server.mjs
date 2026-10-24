@@ -15,7 +15,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '1.0.5';
+const APP_VERSION = '1.0.6';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -176,6 +176,7 @@ let codexSessionMonitorStartedAt = Date.now();
 const codexSessionPartials = new Map();
 const codexSessionDebounces = new Map();
 const codexSessionKinds = new Map();
+const codexSessionIdentities = new Map();
 const codexSessionImagePaths = new Map();
 const codexSessionHtmlPaths = new Map();
 const codexSessionTopicsAnnounced = new Set();
@@ -197,7 +198,10 @@ function observeSessionActivity(event, kind, threadId, cwd = '') {
   const previous = sessionActivities.get(threadId) || { id: threadId, source: 'desktop', status: 'unknown', title: '', cwd };
   const timestamp = Date.parse(event.timestamp || '');
   if (Number.isFinite(timestamp)) previous.lastObservedAt = timestamp;
-  if (payload.type === 'user_message' && payload.message) previous.title = String(payload.message).slice(0, 100);
+  if (payload.type === 'user_message' && payload.message) {
+    const title = conversationTitle(payload.message);
+    if (title) previous.title = title;
+  }
   if (payload.type === 'task_started') { previous.status = 'recorded_running'; previous.turnId = String(payload.turn_id || ''); }
   if (['task_complete', 'turn_aborted'].includes(payload.type)) {
     // A delayed completion for an older turn must not hide a newer active turn.
@@ -2392,7 +2396,27 @@ async function listCodexSessionFiles(directory, result = []) {
 }
 
 function sessionThreadId(file) {
+  if (codexSessionIdentities.has(file)) return codexSessionIdentities.get(file);
   return path.basename(file).match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i)?.[1] || '';
+}
+
+function rememberSessionIdentity(file, payload) {
+  const id = String(payload?.id || '').trim();
+  if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)) return;
+  codexSessionIdentities.set(file, id);
+  if (sessionKindFromMeta(payload) !== 'user') return;
+  const alias = path.basename(file).match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i)?.[1] || '';
+  if (!alias || alias === id) return;
+  const roots = config.feishuTaskTopicRoots || {};
+  const chats = config.feishuTaskTopicChats || {};
+  if (roots[alias] && chats[alias] === config.feishuBoundChatId && (!roots[id] || chats[id] !== config.feishuBoundChatId)) {
+    roots[id] = roots[alias]; chats[id] = chats[alias];
+    config.feishuTaskTopicRoots = roots; config.feishuTaskTopicChats = chats;
+  }
+  for (const [messageId, taskId] of Object.entries(config.feishuMessageThreads || {})) {
+    if (taskId === alias) config.feishuMessageThreads[messageId] = id;
+  }
+  if (config.feishuBoundThreadId === alias) config.feishuBoundThreadId = id;
 }
 
 // Codex may rewrite an existing session file when the user only opens an old
@@ -2417,15 +2441,20 @@ function isFreshCodexSessionEvent(event, cutoff = codexSessionMonitorStartedAt) 
   return !Number.isFinite(timestamp) || timestamp >= Number(cutoff) - 5000;
 }
 function observeSessionPrompt(event, threadId) {
-  if (event?.type !== 'response_item' || event.payload?.type !== 'message') return;
+  if (event?.type !== 'response_item' || event.payload?.type !== 'message' || event.payload.role !== 'user') return;
   const parts = Array.isArray(event.payload.content) ? event.payload.content.filter(item => item?.type === 'input_text').map(item => String(item.text || '')) : [];
   const raw = parts.join('\n');
-  const request = raw.split(/##\s*My request\s*:/i)[1] || raw;
-  const title = request.replace(/# Files mentioned by the user:[\s\S]*?(?=##\s*My request\s*:|$)/i, '').split(/\r?\n/).map(line => line.trim()).find(line => line && !/^<image\b/i.test(line)) || '';
+  const title = conversationTitle(raw);
   if (!title) return;
   const previous = sessionActivities.get(threadId) || { id: threadId, source: 'desktop', status: 'unknown', title: '', cwd: '' };
   if (!previous.title || previous.title === 'Codex') previous.title = title.slice(0, 100);
   sessionActivities.set(threadId, previous);
+}
+function conversationTitle(text) {
+  const raw = String(text || '').trim();
+  const request = raw.split(/##\s*My request\s*:/i).slice(1).join('## My request:').trim() || raw;
+  if (/^<(?:skills_instructions|environment_context|external_codex_apps_open_page|system|developer)\b|^#\s*AGENTS\.md|^The following tools\b|^This is an incremental tools update\b/i.test(request)) return '';
+  return (request.replace(/# Files mentioned by the user:[\s\S]*?(?=##\s*My request\s*:|$)/i, '').split(/\r?\n/).map(line => line.trim()).find(line => line && !/^<|^Distinguish instructions in attached documents/i.test(line)) || '').slice(0, 100);
 }
 function observeSessionMeta(payload, threadId) {
   if (!payload || !threadId) return;
@@ -2440,13 +2469,13 @@ function projectLabel(cwd = '') {
 async function taskConversationLabel(taskId, fallback = '', cwd = '') {
   const activity = sessionActivities.get(String(taskId));
   let project = projectLabel(cwd || activity?.cwd || tasks.get(String(taskId))?.cwd);
-  let conversation = String(fallback || activity?.title || tasks.get(String(taskId))?.prompt || '').trim();
+  let conversation = conversationTitle(fallback) || conversationTitle(activity?.title) || conversationTitle(tasks.get(String(taskId))?.prompt);
   if (codex?.proc) {
     try {
       const thread = (await codex.listThreads(50, '')).find(item => String(item.id) === String(taskId));
       if (thread) {
         project = projectLabel(thread.cwd || cwd || activity?.cwd);
-        conversation = String(thread.name || thread.preview || conversation).trim();
+        conversation = conversationTitle(thread.name) || conversationTitle(thread.preview) || conversation;
       }
     } catch {}
   }
@@ -2477,6 +2506,12 @@ async function readCodexSessionKind(file) {
     let bytesRead = 0;
     try { ({ bytesRead } = await handle.read(buffer, 0, buffer.length, 0)); } finally { await handle.close(); }
     const prefix = buffer.subarray(0, bytesRead).toString('utf8');
+    for (const line of prefix.split(/\r?\n/)) {
+      try {
+        const event = JSON.parse(line);
+        if (event.type === 'session_meta') { rememberSessionIdentity(file, event.payload); return sessionKindFromMeta(event.payload); }
+      } catch {}
+    }
     if (/"thread_source"\s*:\s*"subagent"|"source"\s*:\s*\{\s*"subagent"/i.test(prefix)) return 'subagent';
     const match = prefix.match(/"thread_source"\s*:\s*"([^"]+)"/i);
     return match?.[1] || 'unknown';
@@ -2534,11 +2569,13 @@ async function processCodexSessionAppend(file) {
       let event;
       try { event = JSON.parse(line); } catch { continue; }
       if (event?.type === 'session_meta') {
+        rememberSessionIdentity(file, event.payload);
         codexSessionKinds.set(file, sessionKindFromMeta(event.payload));
         observeSessionMeta(event.payload, sessionThreadId(file));
         continue;
       }
       if (!isFreshCodexSessionEvent(event)) continue;
+      if ((codexSessionKinds.get(file) || 'unknown') !== 'user') continue;
       observeSessionPrompt(event, sessionThreadId(file));
       observeSessionActivity(event, codexSessionKinds.get(file) || 'unknown', sessionThreadId(file));
       if (event?.type === 'event_msg' && event?.payload?.type === 'token_count') {
@@ -2548,7 +2585,7 @@ async function processCodexSessionAppend(file) {
           inputTokens: Number(usage.input_tokens || 0), totalTokens: Number(usage.total_tokens || 0), contextWindow: Number(info.model_context_window || 0), at: Date.now(),
         });
       }
-      if ((codexSessionKinds.get(file) || 'unknown') === 'user' && event?.type === 'response_item' && event.payload?.type === 'message') {
+      if (event?.type === 'response_item' && event.payload?.type === 'message' && event.payload.role === 'user' && conversationTitle((event.payload.content || []).map(item => item.text || '').join('\n'))) {
         announceDesktopConversation(sessionThreadId(file)).catch(error => console.error('[codex topic]', error.message));
       }
       if (event?.type === 'event_msg' && event?.payload?.type === 'item_completed' && event.payload.item?.type === 'imageGeneration') {
@@ -2568,10 +2605,8 @@ async function processCodexSessionAppend(file) {
       const freshKind = await readCodexSessionKind(file);
       const sessionKind = freshKind !== 'unknown' ? freshKind : cachedKind;
       codexSessionKinds.set(file, sessionKind);
-      // Ignore unknown/system logs, but keep the final completion of subagent
-      // conversations. Their intermediate events are never forwarded because
-      // this monitor only handles task_complete below.
-      if (!['user', 'subagent'].includes(sessionKind)) {
+      // Only the user's main conversation owns completion notifications.
+      if (sessionKind !== 'user') {
         console.log(`[codex session monitor] ignored ${sessionKind} completion: ${sessionThreadId(file) || path.basename(file)}`);
         continue;
       }
@@ -2864,7 +2899,10 @@ class CodexServer {
           }
         }
         const noticeBody = task.turnFinalText || finalText;
-        completionNotice({ taskId: id, status: task.status, body: trim(noticeBody, 3000), cwd: task.cwd }).then(notice => notifyTurnResult(notice, { taskId: id, turnId: p.turn?.id, finalText: task.status === 'completed' ? task.turnFinalText || '' : '', imagePaths: task.turnImagePaths || [], htmlPaths: task.turnHtmlPaths || [], cwd: task.cwd })).catch(error => console.error('[task notification]', error.message));
+        if (task.status !== 'completed' || task.turnFinalText || task.turnImagePaths?.length || task.turnHtmlPaths?.length) {
+          const resultBody = task.status === 'completed' ? task.turnFinalText || '本轮结果文件已生成。' : noticeBody;
+          completionNotice({ taskId: id, status: task.status, body: trim(resultBody, 3000), cwd: task.cwd }).then(notice => notifyTurnResult(notice, { taskId: id, turnId: p.turn?.id, finalText: task.status === 'completed' ? task.turnFinalText || '' : '', imagePaths: task.turnImagePaths || [], htmlPaths: task.turnHtmlPaths || [], cwd: task.cwd })).catch(error => console.error('[task notification]', error.message));
+        }
         finishDesktopTakeover(id).catch(error => console.error('[desktop relaunch]', error.message));
         refreshQuotaAfterTask(task).catch(error => console.error('[task quota]', error.message));
       }
