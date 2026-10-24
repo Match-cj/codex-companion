@@ -21,6 +21,16 @@ test('inactive account cards switch only after a double click', () => {
   assert.match(widget, /Switch-WidgetAccount/);
   assert.doesNotMatch(widget, /\$switchButton\.Content='切换账号'/);
 });
+test('switch confirmation owns its window and suppresses floating-window interference', () => {
+  const action = widget.slice(widget.indexOf('function Switch-WidgetAccount('), widget.indexOf('function Warmup-WidgetAccount('));
+  assert.ok(action.indexOf('$script:SwitchInProgress=$true') < action.indexOf('MessageBox]::Show'));
+  assert.match(action, /MessageBox\]::Show\(\$owner,/);
+  assert.match(action, /MessageBoxButton\]::OKCancel/);
+  assert.match(action, /value=\$\(\[int\]\$choice\)/);
+  assert.match(widget, /if\(\$script:MenuOpen -or \$script:SwitchInProgress\)\{return\}/);
+  assert.match(widget, /function Close-Detail\(\[switch\]\$Force\)\{if\(\$script:SwitchInProgress -and -not\$Force\)\{return\}/);
+  assert.match(action, /finally\{\$script:SwitchInProgress=\$false/);
+});
 test('widget exposes running conversations, stop actions, and full shutdown', () => {
   assert.match(widget, /运行中对话：/);
   assert.match(widget, /api\/task\/.*\/stop/);

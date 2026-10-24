@@ -2,7 +2,7 @@ param([int]$Port = 17841,[switch]$SelfTest)
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 Add-Type 'using System; using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags); [DllImport("user32.dll", EntryPoint="GetWindowLongW")] public static extern int GetWindowLong(IntPtr hwnd, int index); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); }'
-$script:Port=$Port; $script:AppVersion='1.0.3'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
+$script:Port=$Port; $script:AppVersion='1.0.5'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
 $mutexName=if($SelfTest){'Global\CodexCompanionQuotaWidget_v5_selftest'}else{'Global\CodexCompanionQuotaWidget_v5'}
 $script:Mutex=New-Object System.Threading.Mutex($false,$mutexName); if(-not $script:Mutex.WaitOne(0,$false)){exit}
 $Transparent=[Windows.Media.Brushes]::Transparent
@@ -132,7 +132,7 @@ function New-Quota($tag,$remaining,$countdown,$width){
 $script:MenuOpen=$false
 $Window=New-Object Windows.Window;$Window.Width=72;$Window.Height=72;$Window.WindowStyle='None';$Window.ResizeMode='NoResize';$Window.AllowsTransparency=$true;$Window.Background=$Transparent;$Window.Topmost=$true;$Window.ShowInTaskbar=$false;$Window.UseLayoutRounding=$true;$Window.SnapsToDevicePixels=$true
 function Ensure-WidgetTopmost{
- if($script:MenuOpen){return}
+ if($script:MenuOpen -or $script:SwitchInProgress){return}
  foreach($floatingWindow in @($Window,$script:Detail)){
   if($null-eq$floatingWindow-or-not$floatingWindow.IsVisible){continue}
   $handle=(New-Object Windows.Interop.WindowInteropHelper($floatingWindow)).Handle
@@ -150,7 +150,7 @@ $Arc=New-Object Windows.Shapes.Path;$Arc.Stroke=$Green;$Arc.StrokeThickness=6;$A
 $Number=New-Text '--' 22 $Green -bold;$Number.HorizontalAlignment='Center';$Number.VerticalAlignment='Center';$Root.Children.Add($Number)|Out-Null
 function Set-Arc($r){if($r-le 0){$Arc.Data=$null;return};$c=36;$radius=28;$start=-90;$end=$start+(3.599*[Math]::Min(99.9,$r));$a1=$start*[Math]::PI/180;$a2=$end*[Math]::PI/180;$p1=New-Object Windows.Point -ArgumentList ($c+$radius*[Math]::Cos($a1)),($c+$radius*[Math]::Sin($a1));$p2=New-Object Windows.Point -ArgumentList ($c+$radius*[Math]::Cos($a2)),($c+$radius*[Math]::Sin($a2));$g=New-Object Windows.Media.StreamGeometry;$ctx=$g.Open();$ctx.BeginFigure($p1,$false,$false);$ctx.ArcTo($p2,(New-Object Windows.Size -ArgumentList $radius,$radius),0,(($end-$start)-gt 180),[Windows.Media.SweepDirection]::Clockwise,$true,$false);$ctx.Close();$g.Freeze();$Arc.Data=$g}
 function Update-Widget{$script:Status=Get-Status;$runningCount=@(Get-RunningTasks $script:Status).Count;$Window.ToolTip="Codex Companion`n运行中对话：$runningCount（含自动接管）";$a=$script:Status.accounts|Where-Object{$_.is_active}|Select-Object -First 1;if(Test-LoginExpired $a){$Number.Text='!';$Number.Foreground=$Red;$Arc.Data=$null;return};$r=Get-Remaining $a 'primary';if($null-eq$r){$r=Get-Remaining $a 'secondary'};if($null-eq$r){$Number.Text='--';$Arc.Data=$null;return};$color=Get-Color $r;$Number.Text=[string]$r;$Number.Foreground=$color;$Arc.Stroke=$color;Set-Arc $r}
-function Close-Detail{if($null-ne$script:Detail){$d=$script:Detail;$script:Detail=$null;$script:DetailClosedAt=[DateTime]::UtcNow;try{$d.Close()}catch{}}}
+function Close-Detail([switch]$Force){if($script:SwitchInProgress -and -not$Force){return};if($null-ne$script:Detail){$d=$script:Detail;$script:Detail=$null;$script:DetailClosedAt=[DateTime]::UtcNow;try{$d.Close()}catch{}}}
 function Get-WidgetMonitorWorkArea{
  try{
   $center=$Window.PointToScreen([Windows.Point]::new(([double]$Window.ActualWidth/2.0),([double]$Window.ActualHeight/2.0)))
@@ -168,18 +168,19 @@ function Get-WidgetMonitorWorkArea{
 }
 function Switch-WidgetAccount($accountId,$accountName){
  if($SelfTest){$script:SwitchButtonInvocations++;return}
- Trace-WidgetSwitch 'gesture_received' $accountName
+ Trace-WidgetSwitch 'gesture_received' $accountName ("widget=$script:AppVersion pid=$PID")
  if($script:SwitchInProgress){Trace-WidgetSwitch 'ignored_busy' $accountName;return}
+ $script:SwitchInProgress=$true
  try{
   $ErrorActionPreference='Stop'
   $state=Invoke-RestMethod "http://127.0.0.1:$script:Port/api/codex/status" -TimeoutSec 8
   $desktopText=if($state.running){'检测到 ChatGPT/Codex 正在运行；确认后会先将它关闭，切换成功再自动重新打开。'}else{'确认后会切换账号，并自动打开 ChatGPT/Codex。'}
   Trace-WidgetSwitch 'confirmation_shown' $accountName
-  $choice=[Windows.MessageBox]::Show("确定切换到【${accountName}】吗？`n`n$desktopText`n`n请点击确定继续，点击取消不会切换。",'确认切换账号','OKCancel','Warning')
-  Trace-WidgetSwitch 'confirmation_result' $accountName ([string]$choice)
-  if($choice-ne[Windows.MessageBoxResult]::OK){Trace-WidgetSwitch 'confirmation_cancelled' $accountName ([string]$choice);return}
+  $owner=if($null-ne$script:Detail -and $script:Detail.IsVisible){$script:Detail}else{$Window}
+  $choice=[Windows.MessageBox]::Show($owner,"确定切换到【${accountName}】吗？`n`n$desktopText`n`n请点击确定继续，点击取消不会切换。",'确认切换账号',[Windows.MessageBoxButton]::OKCancel,[Windows.MessageBoxImage]::Warning)
+  Trace-WidgetSwitch 'confirmation_result' $accountName ("result=$choice value=$([int]$choice) type=$($choice.GetType().FullName) widget=$script:AppVersion pid=$PID")
+  if($choice -ne [Windows.MessageBoxResult]::OK){Trace-WidgetSwitch 'confirmation_cancelled' $accountName ([string]$choice);return}
   Trace-WidgetSwitch 'request_started' $accountName
-  $script:SwitchInProgress=$true
   [Windows.Input.Mouse]::OverrideCursor=[Windows.Input.Cursors]::Wait
   $payload=@{id=$accountId;closeCodex=$true;source='widget'}|ConvertTo-Json -Compress
   $result=Invoke-RestMethod "http://127.0.0.1:$script:Port/api/accounts/switch" -Method Post -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($payload)) -TimeoutSec 90
@@ -187,13 +188,13 @@ function Switch-WidgetAccount($accountId,$accountName){
   if($result.ok -ne $true){throw '后台没有确认账号切换成功。'}
   if([string]$result.activeAccountId -ne [string]$accountId){throw "切换后校验失败：当前账号没有改变。请打开网页查看详细状态。"}
   Trace-WidgetSwitch 'validation_success' $accountName
-  Close-Detail
+  Close-Detail -Force
   Update-Widget
   [Windows.MessageBox]::Show([string]$result.message,'Codex Companion','OK','Information')|Out-Null
  }catch{
   Trace-WidgetSwitch 'failed' $accountName (Get-ApiErrorMessage $_)
   [Windows.MessageBox]::Show("账号切换失败：`n$(Get-ApiErrorMessage $_)",'Codex Companion','OK','Error')|Out-Null
- }finally{$script:SwitchInProgress=$false;[Windows.Input.Mouse]::OverrideCursor=$null}
+ }finally{$script:SwitchInProgress=$false;[Windows.Input.Mouse]::OverrideCursor=$null;Ensure-WidgetTopmost}
 }
 function Warmup-WidgetAccount($accountId,$accountName){
  if($script:WarmupInProgress){return}
