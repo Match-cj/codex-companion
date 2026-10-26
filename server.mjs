@@ -14,10 +14,11 @@ import { finalImagePaths, relayFinalImages, validateImageRoot } from './image-re
 import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 import { observeEarlyQuotaReset } from './quota-reset.mjs';
 import { notificationRules, notificationEnabled, notificationType, resetReminderLeads, validateNotificationSettings, nextResetReminder } from './notification-settings.mjs';
+import { recoverReplyTarget } from './feishu-reply-recovery.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '1.0.11';
+const APP_VERSION = '1.0.12';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -1099,7 +1100,7 @@ async function handleFeishuMessage(data) {
     }
     // Resolve old aliases and explicit reply history; never redirect an
     // unrecognized topic to an unrelated default conversation.
-    const threadId = feishuReplyThreadId(message);
+    const threadId = await resolveFeishuReplyThread(message);
     selectedThreadId = String(threadId || '');
     if (!threadId) {
       await sendFeishuAppText('无法识别这条消息所属的原 Codex 对话，未转发到其他任务。请从对应任务的结果通知回复，或在本机控制台核对绑定。', { replyTo: message.message_id });
@@ -1139,7 +1140,7 @@ async function handleFeishuMessage(data) {
     const message = notFound
       ? '后台暂时无法载入这条通知对应的 Codex 对话，尚不能确认对话已删除。原话题映射已保留，未转发到其他任务。请在本机控制台检查原对话或稍后重试。'
       : `没有成功继续 Codex 对话：${humanError(error)}`;
-    try { await sendFeishuAppText(message, { replyTo: replyMessageId }); } catch {}
+    try { await sendFeishuAppText(message, { replyTo: replyMessageId, taskId:selectedThreadId }); } catch {}
   }
 }
 
@@ -1153,8 +1154,34 @@ function feishuReplyThreadId(message) {
   const roots=config.feishuTaskTopicRoots||{},links=config.feishuMessageThreads||{};
   const topic=Object.entries(roots).find(([,value])=>(root&&String(value)===root)||(parent&&String(value)===parent))?.[0];
   const historical=(config.notificationHistory||[]).find(item=>item.sent&&item.messageId&&(item.messageId===root||item.messageId===parent))?.taskId;
-  const candidate=topic||links[root]||links[parent]||historical||(!root&&!parent?config.feishuBoundThreadId:'');
+  const anchor=config.feishuReplyTopicAnchors?.[root];
+  const recovered=anchor&&anchor.chatId===config.feishuBoundChatId?anchor.threadId:'';
+  const candidate=topic||recovered||links[root]||links[parent]||historical||(!root&&!parent?config.feishuBoundThreadId:'');
   return canonicalCodexThreadId(candidate);
+}
+
+async function resolveFeishuReplyThread(message) {
+  let threadId=feishuReplyThreadId(message);
+  let rootId=String(message.root_id||message.rootId||'');
+  if(!threadId&&feishuClient){
+    const recovered=await recoverReplyTarget({message,chatId:config.feishuBoundChatId,appId:config.feishuAppId,canonical:canonicalCodexThreadId,
+      fetchMessage:async id=>{
+        let timer;
+        try{return await Promise.race([feishuClient.im.v1.message.get({path:{message_id:id}}),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('message-read-timeout')),8000)})])}
+        finally{clearTimeout(timer)}
+      }});
+    threadId=recovered.threadId;rootId=recovered.rootId||rootId;
+    console.log(`[feishu reply recovery] ${recovered.reason}; resolved=${Boolean(threadId)}`);
+  }
+  if(threadId&&rootId){
+    const anchors=config.feishuReplyTopicAnchors||{};
+    if(anchors[rootId]?.threadId!==threadId||anchors[rootId]?.chatId!==config.feishuBoundChatId){
+      anchors[rootId]={threadId,chatId:config.feishuBoundChatId};
+      config.feishuReplyTopicAnchors=Object.fromEntries(Object.entries(anchors).slice(-1000));
+      await saveConfig();
+    }
+  }
+  return threadId;
 }
 
 async function continueThreadFromFeishu(threadId, input, { manual = false } = {}) {
@@ -1237,7 +1264,7 @@ async function handleFeishuReaction(data) {
     if (!messageId || !config.feishuBoundChatId) return;
     const links = config.feishuMessageThreads && typeof config.feishuMessageThreads === 'object' ? config.feishuMessageThreads : {};
     const historical=(config.notificationHistory||[]).find(item=>item.sent&&item.messageId===messageId)?.taskId;
-    const threadId = canonicalCodexThreadId(links[messageId] || historical);
+    const threadId = canonicalCodexThreadId(links[messageId] || historical) || await resolveFeishuReplyThread({parent_id:messageId});
     if (!threadId) return;
     requestThreadId = threadId;
     const now = Date.now();
