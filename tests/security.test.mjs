@@ -45,6 +45,8 @@ test('Feishu rejects unapproved senders and pairs only with local secret', async
   const c = { config, feishuPairingCode: '123456789012345678901234', randomBytes, console, isQuotaCommand: () => false, saveConfig: async () => saved++, bindLatestFeishuThread: async () => ({ id: 'thread-a', name: 'Task A' }), sendFeishuAppText: async () => {}, continueThreadFromFeishu: async () => { continued++; return { id: 'thread-a', prompt: 'Task A' }; }, humanError: String };
   vm.createContext(c);
   vm.runInContext(source.slice(source.indexOf('async function handleFeishuMessage('), source.indexOf('function isActiveWriterError(')), c);
+  c.canonicalCodexThreadId=id=>String(id||'');
+  vm.runInContext(source.slice(source.indexOf('function feishuReplyThreadId('),source.indexOf('async function continueThreadFromFeishu(')),c);
   const event = (sender, text, group = 'old-group') => ({ sender: { sender_type: 'user', sender_id: { open_id: sender } }, message: { message_type: 'text', chat_id: group, content: JSON.stringify({ text }) } });
   await c.handleFeishuMessage(event('stranger', '绑定'));
   assert.equal(saved, 0); assert.equal(continued, 0);

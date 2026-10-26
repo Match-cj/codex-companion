@@ -117,3 +117,25 @@ test('metadata alias reuses existing topic without replacing a canonical topic o
   c.rememberSessionIdentity(`rollout-${alias}.jsonl`, { id, thread_source: 'subagent' });
   assert.equal(c.config.feishuTaskTopicRoots[id], undefined);
 });
+
+test('metadata larger than 16 KB recovers real thread identity on startup and routes old replies', async () => {
+  const dir=await fsp.mkdtemp(path.join(os.tmpdir(),'companion-long-meta-'));
+  try {
+    const alias='33333333-3333-4333-8333-333333333333',id='11111111-1111-4111-8111-111111111111';
+    const file=path.join(dir,`rollout-${alias}.jsonl`);
+    const meta=JSON.stringify({type:'session_meta',payload:{id,thread_source:'user',instructions:'中文说明'.repeat(6000)}});
+    assert(Buffer.byteLength(meta)>16384);
+    await fsp.writeFile(file,meta+'\n'+JSON.stringify({type:'event_msg',payload:{type:'task_complete'}})+'\n');
+    const c=monitorContext();
+    assert.equal(await c.readCodexSessionKind(file),'user');
+    assert.equal(c.sessionThreadId(file),id);
+    assert.equal(c.canonicalCodexThreadId(alias),id);
+    assert.equal(c.canonicalCodexThreadId(''),'');
+    c.config={feishuBoundThreadId:'unrelated',notificationHistory:[{sent:true,messageId:'recent-notice',taskId:alias}]};
+    vm.runInContext(source.slice(source.indexOf('function feishuReplyThreadId('),source.indexOf('async function continueThreadFromFeishu(')),c);
+    assert.equal(c.feishuReplyThreadId({parent_id:'recent-notice'}),id);
+    assert.equal(c.feishuReplyThreadId({root_id:'unknown-topic'}),'');
+    assert.equal(c.feishuReplyThreadId({}),'unrelated');
+    assert.equal(c.notices.length,0,'metadata scanning must not replay historical completion');
+  }finally{await fsp.rm(dir,{recursive:true,force:true})}
+});

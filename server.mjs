@@ -17,7 +17,7 @@ import { notificationRules, notificationEnabled, notificationType, resetReminder
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '1.0.10';
+const APP_VERSION = '1.0.11';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -1097,18 +1097,12 @@ async function handleFeishuMessage(data) {
       await sendFeishuAppText(await currentQuotaText(), { replyTo: message.message_id });
       return;
     }
-    const links = config.feishuMessageThreads && typeof config.feishuMessageThreads === 'object' ? config.feishuMessageThreads : {};
-    const topicRoots = config.feishuTaskTopicRoots && typeof config.feishuTaskTopicRoots === 'object' ? config.feishuTaskTopicRoots : {};
-    const rootId = String(message.root_id || message.rootId || '').trim();
-    const parentId = String(message.parent_id || message.parentId || '').trim();
-    const topicRootTask = Object.entries(topicRoots).find(([_, value]) => String(value) === rootId || String(value) === parentId)?.[0] || '';
-    // In a topic, root_id identifies the Codex task. Prefer it over the
-    // immediate parent: older releases mapped an unrelated Windows-notice
-    // reply to the default conversation, which misrouted “继续”.
-    const threadId = links[rootId] || links[parentId] || topicRootTask || config.feishuBoundThreadId;
+    // Resolve old aliases and explicit reply history; never redirect an
+    // unrecognized topic to an unrelated default conversation.
+    const threadId = feishuReplyThreadId(message);
     selectedThreadId = String(threadId || '');
     if (!threadId) {
-      await sendFeishuAppText('还没有绑定 Codex 对话，请先发送“绑定”。', { replyTo: message.message_id });
+      await sendFeishuAppText('无法识别这条消息所属的原 Codex 对话，未转发到其他任务。请从对应任务的结果通知回复，或在本机控制台核对绑定。', { replyTo: message.message_id });
       return;
     }
     if (message.message_type === 'text' && /^(新话题|重开话题|换个话题|rotate topic)$/i.test(text)) {
@@ -1142,11 +1136,8 @@ async function handleFeishuMessage(data) {
   } catch (error) {
     console.error('[feishu reply]', error.message);
     const notFound = /thread\s+not\s+found|找不到.*对话|对话不存在/i.test(String(error?.message || error || ''));
-    if (notFound && selectedThreadId) {
-      try { await forgetFeishuThreadMapping(selectedThreadId); } catch {}
-    }
     const message = notFound
-      ? '这条消息对应的 Codex 对话已经不存在（可能被删除、清理或换了本机数据目录）。我已清理旧映射。请回复“菜单”，再发送“绑定最近对话”，然后重新继续。'
+      ? '后台暂时无法载入这条通知对应的 Codex 对话，尚不能确认对话已删除。原话题映射已保留，未转发到其他任务。请在本机控制台检查原对话或稍后重试。'
       : `没有成功继续 Codex 对话：${humanError(error)}`;
     try { await sendFeishuAppText(message, { replyTo: replyMessageId }); } catch {}
   }
@@ -1156,7 +1147,18 @@ function isActiveWriterError(error) {
   return /already has an active writer|thread-store conflict/i.test(String(error?.message || error || ''));
 }
 
+function feishuReplyThreadId(message) {
+  const root=String(message.root_id||message.rootId||'').trim();
+  const parent=String(message.parent_id||message.parentId||'').trim();
+  const roots=config.feishuTaskTopicRoots||{},links=config.feishuMessageThreads||{};
+  const topic=Object.entries(roots).find(([,value])=>(root&&String(value)===root)||(parent&&String(value)===parent))?.[0];
+  const historical=(config.notificationHistory||[]).find(item=>item.sent&&item.messageId&&(item.messageId===root||item.messageId===parent))?.taskId;
+  const candidate=topic||links[root]||links[parent]||historical||(!root&&!parent?config.feishuBoundThreadId:'');
+  return canonicalCodexThreadId(candidate);
+}
+
 async function continueThreadFromFeishu(threadId, input, { manual = false } = {}) {
+  threadId=canonicalCodexThreadId(threadId);
   if (manual) codexSessionAutoTakeoverThreads.delete(String(threadId));
   try {
     const task = await codex.resumeTask(threadId);
@@ -1234,7 +1236,8 @@ async function handleFeishuReaction(data) {
     const messageId = String(event.message_id || event.messageId || '').trim();
     if (!messageId || !config.feishuBoundChatId) return;
     const links = config.feishuMessageThreads && typeof config.feishuMessageThreads === 'object' ? config.feishuMessageThreads : {};
-    const threadId = String(links[messageId] || '').trim();
+    const historical=(config.notificationHistory||[]).find(item=>item.sent&&item.messageId===messageId)?.taskId;
+    const threadId = canonicalCodexThreadId(links[messageId] || historical);
     if (!threadId) return;
     requestThreadId = threadId;
     const now = Date.now();
@@ -2408,6 +2411,15 @@ function sessionThreadId(file) {
   return path.basename(file).match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i)?.[1] || '';
 }
 
+function canonicalCodexThreadId(threadId) {
+  const id=String(threadId||'').trim();
+  if(!id)return '';
+  for(const [file,canonical] of codexSessionIdentities) {
+    if(path.basename(file).endsWith(`${id}.jsonl`))return canonical;
+  }
+  return id;
+}
+
 function rememberSessionIdentity(file, payload) {
   const id = String(payload?.id || '').trim();
   if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)) return;
@@ -2510,19 +2522,26 @@ function sessionFailureMessage(threadId, rawError) {
 async function readCodexSessionKind(file) {
   try {
     const handle = await fs.open(file, 'r');
-    const buffer = Buffer.alloc(16384);
-    let bytesRead = 0;
-    try { ({ bytesRead } = await handle.read(buffer, 0, buffer.length, 0)); } finally { await handle.close(); }
-    const prefix = buffer.subarray(0, bytesRead).toString('utf8');
+    const chunks=[];let total=0;
+    // session_meta includes instructions and can be far larger than 16 KB.
+    // Read complete lines, with a hard 4 MB cap; never parse a truncated prefix.
+    try {
+      while(total<4*1024*1024){
+        const buffer=Buffer.alloc(Math.min(16384,4*1024*1024-total));
+        const {bytesRead}=await handle.read(buffer,0,buffer.length,total);
+        if(!bytesRead)break;
+        const chunk=buffer.subarray(0,bytesRead);chunks.push(chunk);total+=bytesRead;
+        if(chunk.includes(10))break;
+      }
+    } finally { await handle.close(); }
+    const prefix = Buffer.concat(chunks).toString('utf8').replace(/^\uFEFF/,'');
     for (const line of prefix.split(/\r?\n/)) {
       try {
         const event = JSON.parse(line);
         if (event.type === 'session_meta') { rememberSessionIdentity(file, event.payload); return sessionKindFromMeta(event.payload); }
       } catch {}
     }
-    if (/"thread_source"\s*:\s*"subagent"|"source"\s*:\s*\{\s*"subagent"/i.test(prefix)) return 'subagent';
-    const match = prefix.match(/"thread_source"\s*:\s*"([^"]+)"/i);
-    return match?.[1] || 'unknown';
+    return 'unknown';
   } catch { return 'unknown'; }
 }
 
@@ -2771,7 +2790,7 @@ class CodexServer {
   request(method, params) { const id = ++this.nextId; return new Promise((resolve, reject) => { const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`${method} 超时`)); }, 120000); this.pending.set(id, { resolve, reject, timer }); this.send({ method, id, params }); }); }
   async startTask(prompt, cwd) {
     const r = await this.request('thread/start', { cwd, serviceName: 'codex_companion' });
-    const id = r.thread.id; const task = { id, cwd, prompt, status: 'starting', output: '', startedAt: new Date().toISOString(), lastEventAt: Date.now(), stallNotified: false, turnImagePaths: [], turnHtmlPaths: [] };
+    const id = r.thread.id; (this.loadedThreads ||= new Set()).add(id); const task = { id, cwd, prompt, status: 'starting', output: '', startedAt: new Date().toISOString(), lastEventAt: Date.now(), stallNotified: false, turnImagePaths: [], turnHtmlPaths: [] };
     tasks.set(id, task);
     await this.request('turn/start', { threadId: id, input: [{ type: 'text', text: prompt }], cwd });
     task.status = 'running'; return task;
@@ -2790,7 +2809,7 @@ class CodexServer {
   }
   async resumeTask(threadId) {
     const existing = tasks.get(threadId);
-    if (existing) return existing;
+    if (existing && this.loadedThreads?.has(threadId)) return existing;
     const result = await this.request('thread/resume', { threadId });
     const thread = result.thread || {};
     const turns = Array.isArray(thread.turns) ? thread.turns : [];
@@ -2808,6 +2827,7 @@ class CodexServer {
       resumed: true,
     };
     tasks.set(threadId, task);
+    (this.loadedThreads ||= new Set()).add(threadId);
     if (activeTurn) this.turns.set(threadId, activeTurn.id);
     return task;
   }
