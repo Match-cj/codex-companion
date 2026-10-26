@@ -12,10 +12,11 @@ import os from 'node:os';
 import * as Lark from '@larksuiteoapi/node-sdk';
 import { finalImagePaths, relayFinalImages, validateImageRoot } from './image-relay.mjs';
 import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
+import { observeEarlyQuotaReset } from './quota-reset.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '1.0.7';
+const APP_VERSION = '1.0.8';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -1861,7 +1862,7 @@ async function readNativeUsageOnce(entry, force = false) {
       });
       if (details) result.rateLimitResetCredits = { ...(result.rateLimitResetCredits || {}), ...details };
     }
-    const usage = officialUsageToLegacy(result);
+    const usage = { ...officialUsageToLegacy(result), observed_at: Date.now() / 1000 };
     nativeUsageCache.set(String(entry.id), { at: Date.now(), usage });
     await updateNativeAccountMetadata(entry.id, { last_usage: usage, last_usage_at: new Date().toISOString() });
     const updatedAuth = await readJson(path.join(home, 'auth.json'));
@@ -2242,12 +2243,6 @@ function confirmationDetails(method, params) {
   }
   return `原因：${params.reason || ''}\n命令：${Array.isArray(params.command) ? params.command.join(' ') : params.command || ''}`;
 }
-function observeQuotaRecovery(observations, key, used) {
-  if (!Number.isFinite(used) || used < 0 || used > 100) return false;
-  const previous = observations[key];
-  observations[key] = used;
-  return Number.isFinite(previous) && previous > 0 && used === 0;
-}
 async function checkQuotaNotices() {
   const nowSeconds = Math.floor(Date.now() / 1000);
   const restored = [];
@@ -2291,7 +2286,7 @@ async function checkQuotaNotices() {
       // must not re-arm a recovery notice or turn a missing window into 100%.
       if (!account.usage?.cached && !account.usage?.error && account.usage?.[usedKey] != null) {
         const recoveryKey = `${account.id}:${Number(account.usage?.[windowKey]) || label}`;
-        if (observeQuotaRecovery(config.quotaRecoveryObservations, recoveryKey, used)) {
+        if (observeEarlyQuotaReset(config.quotaRecoveryObservations, recoveryKey, { used, resetAt, observedAt: Number(account.usage.observed_at) || nowSeconds })) {
           restored.push({ id: account.id, account: account.display_name || account.name, type: label });
         }
         recoveryObservationsChanged = true;
@@ -2331,7 +2326,7 @@ async function checkQuotaNotices() {
   const currentRestored = restored.filter(item => accounts.some(account => String(account.id) === String(item.id)));
   if (currentRestored.length) {
     const lines = currentRestored.map(item => `账号：${item.account} · ${item.type} · 剩余 100%`).join('\n');
-    await notify(`Codex 额度已恢复至 100%\n${lines}\n\n使用重置卡、官方重置或额度窗口重置都会触发此通知。`, { appName: 'Codex 额度' });
+    await notify(`Codex 额度已提前恢复至 100%\n${lines}\n\n检测到额度在原定重置时间之前恢复，可能是官方调整或手动重置；仅凭额度数据无法区分来源。`, { appName: 'Codex 额度' });
   }
 }
 

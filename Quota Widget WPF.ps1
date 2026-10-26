@@ -2,7 +2,7 @@ param([int]$Port = 17841,[switch]$SelfTest)
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 Add-Type 'using System; using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags); [DllImport("user32.dll", EntryPoint="GetWindowLongW")] public static extern int GetWindowLong(IntPtr hwnd, int index); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); }'
-$script:Port=$Port; $script:AppVersion='1.0.7'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
+$script:Port=$Port; $script:AppVersion='1.0.8'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
 $mutexName=if($SelfTest){'Global\CodexCompanionQuotaWidget_v5_selftest'}else{'Global\CodexCompanionQuotaWidget_v5'}
 $script:Mutex=New-Object System.Threading.Mutex($false,$mutexName); if(-not $script:Mutex.WaitOne(0,$false)){exit}
 $Transparent=[Windows.Media.Brushes]::Transparent
@@ -27,7 +27,17 @@ function Trace-WidgetSwitch($stage,$accountName,$detail=''){
   Invoke-RestMethod "http://127.0.0.1:$script:Port/api/widget/switch-trace" -Method Post -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($payload)) -TimeoutSec 3|Out-Null
  }catch{}
 }
-function Get-Status{try{Invoke-RestMethod "http://127.0.0.1:$script:Port/api/status" -TimeoutSec 8}catch{$null}}
+function Get-Status{
+ if($SelfTest){
+  $reset=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()+7200
+  return [pscustomobject]@{accounts=@(
+   [pscustomobject]@{id='test-active';name='测试当前账号';is_active=$true;plan_type='plus';usage=[pscustomobject]@{primary_used_percent=20;primary_resets_at=$reset}},
+   [pscustomobject]@{id='test-other';name='测试备用账号';is_active=$false;plan_type='free';usage=[pscustomobject]@{primary_used_percent=10;primary_resets_at=$reset}},
+   [pscustomobject]@{id='test-expired';name='测试失效账号';is_active=$false;plan_type='pro';usage=[pscustomobject]@{error='登录已失效，请重新登录'}}
+  );tasks=[pscustomobject]@{};taskActivity=[pscustomobject]@{rows=@()}}
+ }
+ try{Invoke-RestMethod "http://127.0.0.1:$script:Port/api/status" -TimeoutSec 8}catch{$null}
+}
 function Get-ApiErrorMessage($record){
  try{
   $raw=[string]$record.ErrorDetails.Message
@@ -335,6 +345,7 @@ if($SelfTest){
  Close-Detail
  $Window.Close()
  try{$script:Mutex.ReleaseMutex()}catch{}
+ if($Error.Count -gt 0 -or -not$insideClickKeepsPanel -or -not$singleClickKeepsPanel -or -not$doubleClickInvokesSwitch -or -not$topmostRestored -or -not$noFocusSteal){throw 'Widget self-test failed'}
  exit
 }
 $TopmostTimer=New-Object Windows.Threading.DispatcherTimer

@@ -22,7 +22,7 @@ npm ci
 ```powershell
 node --check server.mjs
 node --test tests/*.test.mjs
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\Quota Widget WPF.ps1' -SelfTest
+powershell.exe -NoProfile -Sta -ExecutionPolicy Bypass -Command '$source=Get-Content -Raw -Encoding UTF8 -LiteralPath ".\Quota Widget WPF.ps1"; & ([scriptblock]::Create($source)) -SelfTest'
 ```
 
 需要验证安装包时再运行：
@@ -32,6 +32,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\Build Branded Install
 ```
 
 安装包和运行时目录是构建产物，不要提交到 Git。测试不要使用真实账号、飞书 Webhook、App Secret 或本机授权文件。
+
+浮窗 `-SelfTest` 使用内置虚构账号，无需启动服务或登录，不读取本机账号，也不执行切换/预热或发送通知。仓库脚本使用 UTF-8；Windows PowerShell 5.1 请按上面的显式 UTF-8 命令执行，避免中文编码导致语法错误。自检失败会返回非零退出码。
 
 ## 提交规范
 
