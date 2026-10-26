@@ -63,7 +63,7 @@ function Test-HttpReady($url) {
     }
 }
 
-Write-Log "=== Launcher starting (v1.0.9) ==="
+Write-Log "=== Launcher starting (v1.0.10) ==="
 Write-Log "Data directory: $companionDataRoot"
 
 if (-not $node -or -not (Test-Path -LiteralPath $node)) {

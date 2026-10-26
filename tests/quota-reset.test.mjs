@@ -35,10 +35,12 @@ function notifier() {
   const source = fs.readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
   let clock = now;
   class FakeDate extends Date { static now() { return clock * 1000; } }
-  const c = { Date: FakeDate, accounts: [], config: { resetReminderMinutes: 15 }, quotaNotifierState: new Map(), subscriptionNotifierState: new Map(),
+  const c = { Date: FakeDate, Map, accounts: [], config: { resetReminderMinutes: 15 }, quotaNotifierState: new Map(), subscriptionNotifierState: new Map(),
     observeEarlyQuotaReset, notificationEnabled, resetReminderLeads, nextResetReminder, notices: [], saveConfig: async () => {}, sentQuotaNoticeToday: () => false, dashboardLink: () => '',
     quotaLabel: minutes => minutes === 10080 ? '周额度' : '5 小时额度', notify: async text => { c.notices.push(text); return { ok: true }; } };
   vm.createContext(c);
+  c.syncNativePublicMetadata=async()=>{};
+  vm.runInContext(source.slice(source.indexOf('function withoutLegacyQuotaWindows('),source.indexOf('async function refreshAccounts(')),c);
   vm.runInContext(source.slice(source.indexOf('async function checkQuotaNotices('), source.indexOf('function activeQuotaSnapshot(')), c);
   c.tick = value => { clock = value; };
   c.account = (id, used, resetAt, extra = {}) => ({ id, name: '测试账号', usage: { primary_used_percent: used, primary_window_minutes: 10080, primary_resets_at: resetAt, observed_at: clock, ...extra } });
@@ -70,4 +72,35 @@ test('normal scheduled expiry preserves upcoming reminder only', async () => {
   c.accounts = [c.account('A', 0, now + 604800)];
   await c.checkQuotaNotices();
   assert.equal(c.notices.length, 1);
+});
+
+test('fresh native response replaces startup cached flag, records baseline and notifies early reset once', async () => {
+  const c=notifier();
+  c.accounts=[c.account('A',40,now+86400,{cached:true,error:'old error'})];
+  const fresh={primary_used_percent:40,primary_window_minutes:10080,primary_resets_at:now+86400,observed_at:now};
+  await c.applyNativeUsageMap(new Map([['A',fresh]]));
+  assert.equal(c.accounts[0].usage.cached,undefined);
+  assert.equal(c.accounts[0].usage.error,undefined);
+  assert.equal(c.config.quotaRecoveryObservations['A:10080'].used,40);
+  c.tick(now+300);
+  const reset={...fresh,primary_used_percent:0,primary_resets_at:now+604800,observed_at:now+300};
+  await c.applyNativeUsageMap(new Map([['A',reset]]));
+  assert.equal(c.notices.length,1);
+  assert.match(c.notices[0],/提前恢复至 100%/);
+  await c.applyNativeUsageMap(new Map([['A',reset]]));
+  assert.equal(c.notices.length,1);
+});
+test('cached native response and failed reads preserve baseline until a fresh observation arrives', async () => {
+  const c=notifier();
+  c.accounts=[c.account('A',40,now+86400)];
+  await c.checkQuotaNotices();
+  c.tick(now+300);
+  const reset={primary_used_percent:0,primary_window_minutes:10080,primary_resets_at:now+604800,observed_at:now+300};
+  await c.applyNativeUsageMap(new Map([['A',{...reset,cached:true}]]));
+  assert.equal(c.notices.length,0);
+  assert.equal(c.config.quotaRecoveryObservations['A:10080'].used,40);
+  await c.applyNativeUsageMap(new Map([['A',{error:'read failed'}]]));
+  assert.equal(c.notices.length,0);
+  await c.applyNativeUsageMap(new Map([['A',reset]]));
+  assert.equal(c.notices.length,1);
 });

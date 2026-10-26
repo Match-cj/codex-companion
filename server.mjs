@@ -17,7 +17,7 @@ import { notificationRules, notificationEnabled, notificationType, resetReminder
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '1.0.9';
+const APP_VERSION = '1.0.10';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -1844,7 +1844,7 @@ async function warmupNativeAccount(id) {
 }
 async function readNativeUsageOnce(entry, force = false) {
   const cached = nativeUsageCache.get(String(entry.id));
-  if (!force && cached && Date.now() - cached.at < 4 * 60 * 1000) return cached.usage;
+  if (!force && cached && Date.now() - cached.at < 4 * 60 * 1000) return { ...cached.usage, cached: true };
   const root = path.join(appDir, 'native-usage');
   const home = path.join(root, randomUUID());
   const session = new IsolatedUsageSession(home);
@@ -2034,6 +2034,10 @@ function withoutLegacyQuotaWindows(usage = {}) {
     delete result[`${slot}_window_minutes`];
   }
   delete result.error;
+  // Fresh responses must not inherit freshness flags/timestamps from the
+  // persisted startup snapshot. Incoming data supplies its own provenance.
+  delete result.cached;
+  delete result.observed_at;
   return result;
 }
 async function applyNativeUsageMap(nativeUsages) {
