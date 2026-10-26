@@ -13,10 +13,11 @@ import * as Lark from '@larksuiteoapi/node-sdk';
 import { finalImagePaths, relayFinalImages, validateImageRoot } from './image-relay.mjs';
 import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 import { observeEarlyQuotaReset } from './quota-reset.mjs';
+import { notificationRules, notificationEnabled, notificationType, resetReminderLeads, validateNotificationSettings, nextResetReminder } from './notification-settings.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '1.0.8';
+const APP_VERSION = '1.0.9';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -843,7 +844,8 @@ async function sendFeishuResultFile(file, replyTo, taskId) {
 async function notifyTurnResult(text, { taskId, turnId, finalText, imagePaths = [], htmlPaths = [], cwd = '' }) {
   if (!await markCodexTurnComplete(turnId)) return;
   const quota = await currentQuotaText();
-  const notice = await notify(`${text}\n\n${quota}`, { appName: 'Codex 任务', taskId });
+  const resultType=/\n\n状态：失败\s*$/.test(text)?'task_failed':'task_completed';
+  const notice = await notify(`${text}\n\n${quota}`, { appName: 'Codex 任务', taskId, notificationType:resultType });
   if (!notice.ok || !notice.messageId) return;
   // Codex often returns generated images as ordinary Markdown links rather
   // than image syntax. Include those paths here so they are relayed even when
@@ -879,7 +881,7 @@ async function announceDesktopConversation(threadId) {
   const label = await taskConversationLabel(id, activity?.title || '', activity?.cwd || '');
   // Feishu uses the first post line as the topic title. Put the stable
   // project/conversation label there so topic lists remain distinguishable.
-  await notify(`${label}\nCodex 对话已开始\n任务：${id}\n后续完成、图片、HTML 和 429 通知都会进入这个话题。`, { appName: 'Codex 任务', taskId: id });
+  await notify(`${label}\nCodex 对话已开始\n任务：${id}\n后续完成、图片、HTML 和 429 通知都会进入这个话题。`, { appName: 'Codex 任务', taskId: id, notificationType:'task_started' });
 }
 
 async function ensureFeishuTaskTopic(threadId) {
@@ -2091,6 +2093,12 @@ async function refreshAccounts({ forceNative = false, awaitNative = false } = {}
   return accounts;
 }
 async function notify(text, opts = {}) {
+  const type=notificationType(text,opts.appName,opts.notificationType);
+  if(type && !notificationEnabled(config,type)) {
+    pushHistory({at:Date.now(),appName:normalizeAppName(opts.appName),body:trim(text,3800),sent:false,reason:'type-disabled',notificationType:type});
+    saveConfig().catch(()=>{});
+    return {ok:false,reason:'type-disabled'};
+  }
   if (!config.feishuWebhookUrl && !(feishuClient && config.feishuBoundChatId)) return { ok: false, reason: 'feishu-not-configured' };
   const appName = normalizeAppName(opts.appName);
   const blacklist = Array.isArray(config.notificationBlacklist) ? config.notificationBlacklist : [];
@@ -2312,11 +2320,12 @@ async function checkQuotaNotices() {
         if (state.state === 'exhausted') quotaNotifierState.set(key, { ...state, state: 'normal', resetSoonNotified: false, resetCycle: resetAt || state.resetCycle });
       }
       const remainingSeconds = resetAt - nowSeconds;
-      if (resetAt > 0 && remainingSeconds > 0 && remainingSeconds <= config.resetReminderMinutes * 60) {
-        const fresh = quotaNotifierState.get(key) || state;
-        if (fresh.state !== 'exhausted' && !fresh.resetSoonNotified) {
-          quotaNotifierState.set(key, { ...fresh, resetSoonNotified: true });
-          await notify(`Codex 额度即将重置\n账号：${account.name}\n类型：${label}\n重置时间：${new Date(resetAt * 1000).toLocaleString('zh-CN')}`, { appName: 'Codex 额度' });
+      if(notificationEnabled(config,'quota_reset_soon')) {
+        config.quotaResetReminderLedger ||= {};
+        const lead=nextResetReminder(config.quotaResetReminderLedger,key,{resetAt,now:nowSeconds,leads:resetReminderLeads(config),windowMinutes:Number(account.usage?.[windowKey])});
+        if(lead!==null) {
+          await saveConfig();
+          await notify(`Codex 额度即将重置\n账号：${account.display_name||account.name}\n类型：${label}\n提醒提前量：${lead>=60?`${lead/60} 小时`:`${lead} 分钟`}\n预计还有：${Math.max(1,Math.ceil(remainingSeconds/60))} 分钟\n重置时间：${new Date(resetAt*1000).toLocaleString('zh-CN')}`,{appName:'Codex 额度',notificationType:'quota_reset_soon'});
         }
       }
     }
@@ -2875,7 +2884,7 @@ class CodexServer {
             task.status = 'retry_waiting';
             const fallbackModel = '';
             task.output = `Codex 暂时不可用，${Math.round(delayMs / 1000)} 秒后自动重试（第 ${task.autoRetryTransientCount}/${maxAttempts} 次）。`;
-            if (!capacityFailure) notify(`Codex 暂时不可用，正在自动重试\n任务：${id}\n${Math.round(delayMs / 1000)} 秒后重试\n第 ${task.autoRetryTransientCount}/${maxAttempts} 次`, { appName: 'Codex 任务', taskId: id });
+            notify(`Codex 暂时不可用，正在自动重试\n任务：${id}\n${Math.round(delayMs / 1000)} 秒后重试\n第 ${task.autoRetryTransientCount}/${maxAttempts} 次`, { appName: 'Codex 任务', taskId: id, notificationType:'task_retry' });
             clearTimeout(this.retryTimers.get(id));
             this.retryTimers.set(id, setTimeout(async () => {
               this.retryTimers.delete(id);
@@ -3137,9 +3146,27 @@ async function handle(req, res) {
       config.feishuImageRelayEnabled = data.enabled; config.feishuImageRelayRoot = root;
       await saveConfig(); return send(res,200,{ok:true});
     }
+    if (req.method==='GET'&&u.pathname==='/api/notifications/settings') {
+      return send(res,200,{rules:notificationRules.map(rule=>({...rule,enabled:notificationEnabled(config,rule.id)})),resetReminderLeadMinutes:resetReminderLeads(config),stallMinutes:Number(config.stallMinutes)||3});
+    }
+    if (req.method==='POST'&&u.pathname==='/api/notifications/settings') {
+      const changes=validateNotificationSettings(data);
+      config={...config,...changes,notificationTypes:{...(config.notificationTypes||{}),...(changes.notificationTypes||{})}};
+      await saveConfig();
+      return send(res,200,{ok:true});
+    }
+    if(req.method==='POST'&&u.pathname==='/api/system/uninstall-page') {
+      if(!isLoopback(req.socket.remoteAddress))return send(res,403,{error:'只能在本机打开卸载页面。'});
+      if(process.platform!=='win32')throw Error('此入口仅支持 Windows。');
+      await new Promise((resolve,reject)=>{
+        const child=spawn('explorer.exe',['ms-settings:appsfeatures'],{detached:true,windowsHide:true,stdio:'ignore'});
+        child.once('error',reject);child.once('spawn',()=>{child.unref();resolve()});
+      });
+      return send(res,200,{ok:true,message:'已打开 Windows 已安装的应用，请搜索 Codex Companion 并选择卸载。'});
+    }
     if (req.method==='POST'&&u.pathname==='/api/config'){
       if(data.feishuWebhookUrl)config.feishuWebhookUrl=String(data.feishuWebhookUrl);
-      config.publicDashboardUrl=String(data.publicDashboardUrl||'');
+      if(Object.hasOwn(data,'publicDashboardUrl'))config.publicDashboardUrl=String(data.publicDashboardUrl||'');
       if(data.feishuNotificationThreadMode==='task'||data.feishuNotificationThreadMode==='flat') config.feishuNotificationThreadMode=data.feishuNotificationThreadMode;
       if(typeof data.feishuMentionOperator==='boolean') config.feishuMentionOperator=data.feishuMentionOperator;
       if(typeof data.autoTakeoverDesktopTransient==='boolean') config.autoTakeoverDesktopTransient=data.autoTakeoverDesktopTransient;

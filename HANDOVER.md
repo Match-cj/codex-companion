@@ -1,6 +1,6 @@
 # Codex Companion 交接文档
 
-当前开发版本：**v1.0.8**。2026-10-26 用户已验收 v1.0.7 浮窗双击账号切换。额度仅对原定时间前恢复满额发送新通知；正常到期保留即将重置提醒。浮窗自检已使用虚构账号，不依赖本机服务。开源当前状态及未完成项以 `ROADMAP.md` 与 `docs/OPEN_SOURCE_RELEASE.md` 为准。下列早期开发记录保留为历史，不作为当前验收状态。
+当前开发版本：**v1.0.9**。通知页增加独立类型开关及多档重置前提醒，`notificationTypes`、`resetReminderLeadMinutes` 和 `stallMinutes` 由专用接口校验保存；`quotaResetReminderLedger` 持久化每周期各档提醒，旧版 `resetReminderMinutes` 兼容默认值。网页卸载按钮仅打开本机 Windows 应用管理页，不直接执行卸载。2026-10-26 用户已验收 v1.0.7 浮窗双击账号切换。额度仅对原定时间前恢复满额发送新通知；正常到期保留即将重置提醒。浮窗自检已使用虚构账号，不依赖本机服务。开源当前状态及未完成项以 `ROADMAP.md` 与 `docs/OPEN_SOURCE_RELEASE.md` 为准。下列早期开发记录保留为历史，不作为当前验收状态。
 
 长期待办和发布前验证清单见 [`ROADMAP.md`](ROADMAP.md)。每次上下文切换或新一轮开发，先读取该文件再继续。
 
