@@ -10,6 +10,7 @@ export const notificationRules = [
   ['task_stalled','任务长时间无进展','后台任务持续无新事件','按下方无进展分钟数'],
   ['takeover_start','开始自动接管','检测到符合自动接管条件的失败','开始接管时；需要已开启自动接管'],
   ['task_retry','逐次重试进度','后台正在等待自动重试','每次重试等待时；默认关闭'],
+  ['context_pressure','上下文接近上限','主对话已用上下文超过 70% / 85% / 95%','每个对话每档一次；压缩或新对话后重新计'],
   ['service_exit','后台引擎退出','运行任务的 Codex 引擎意外退出','检测到退出时；不保证捕获 Companion 自身退出'],
   ['windows','Windows 应用通知','检测到 Windows 通知中心的新通知','收到时；还受下方应用静音控制'],
 ].map(([id,name,condition,timing]) => ({ id,name,condition,timing,defaultEnabled:id !== 'task_retry' }));
@@ -26,7 +27,7 @@ export function notificationType(text, appName, explicit) {
   if (body.startsWith('Windows 通知')) return 'windows';
   for (const [pattern,id] of [
     [/^Codex 额度已提前恢复/,'quota_early'],[/^Codex 额度即将重置/,'quota_reset_soon'],[/^Codex 额度已用尽/,'quota_exhausted'],[/^Codex 重置次数将在 7 天内到期/,'quota_expiry'],
-    [/开始自动接管/,'takeover_start'],[/正在自动重试/,'task_retry'],[/等待确认\n/,'task_approval'],[/长时间没有进展/,'task_stalled'],[/后台服务已退出/,'service_exit'],
+    [/上下文已用约/,'context_pressure'],[/开始自动接管/,'takeover_start'],[/正在自动重试/,'task_retry'],[/等待确认\n/,'task_approval'],[/长时间没有进展/,'task_stalled'],[/后台服务已退出/,'service_exit'],
     [/状态：失败|自动接管重试没有成功|因 429 限流中断/,'task_failed'],[/状态：已完成|状态：已中断/,'task_completed'],[/Codex 对话已开始|Codex 任务已启动/,'task_started']
   ]) if(pattern.test(body)) return id;
   return '';

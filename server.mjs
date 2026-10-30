@@ -16,10 +16,12 @@ import { observeEarlyQuotaReset } from './quota-reset.mjs';
 import { notificationRules, notificationEnabled, notificationType, resetReminderLeads, validateNotificationSettings, nextResetReminder } from './notification-settings.mjs';
 import { recoverReplyTarget } from './feishu-reply-recovery.mjs';
 import { desktopRetryState, desktopTakeoverAllowed, syncDesktopRetryWatcher, startDesktopRetryWatcher, stopDesktopRetryWatcher } from './desktop-retry.mjs';
+import { validateWebhooks, activeWebhookTargets, sendWebhooks, kindLabel as webhookKindLabel, friendlyWebhookReason } from './webhook-notify.mjs';
+import { contextWarning, contextRatio, formatTokenCount, trimContextLedger } from './context-budget.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '1.0.15';
+const APP_VERSION = '1.0.16';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -62,6 +64,8 @@ const defaultConfig = {
   autoTakeoverDesktopTransient: true,
   desktopRetryAutoClick: false,
   desktopRetryCooldownSeconds: 8,
+  webhooks: [],
+  contextPressureLedger: {},
   autoFallbackModel: '',
   feishuIncludeDashboardLink: false,
   publicDashboardUrl: '',
@@ -86,6 +90,26 @@ function requestAccessError(req) {
   }
   return '';
 }
+function maskedWebhookUrl(raw) {
+  try {
+    const parsed = new URL(String(raw || ''));
+    const tail = parsed.pathname.replace(/\/+$/, '').slice(-4);
+    return tail ? `${parsed.origin}/…${tail}` : parsed.origin;
+  } catch { return ''; }
+}
+// Never echo a webhook secret back to the page: show the host and the tail only.
+function publicWebhooks() {
+  return (Array.isArray(config.webhooks) ? config.webhooks : []).map((target, index) => ({
+    id: String(target.id || `${target.kind}-${index + 1}`),
+    kind: target.kind,
+    kindLabel: webhookKindLabel(target.kind),
+    name: target.name || webhookKindLabel(target.kind),
+    enabled: target.enabled !== false,
+    urlHint: maskedWebhookUrl(target.url),
+    lastOkAt: Number(target.lastOkAt || 0),
+    lastError: String(target.lastError || '').slice(0, 160),
+  }));
+}
 function publicConfig() {
   return { port: config.port, feishuAppId: config.feishuAppId, feishuWebhookConfigured: !!config.feishuWebhookUrl,
     publicDashboardUrl: config.publicDashboardUrl, quotaRefreshMinutes: config.quotaRefreshMinutes, resetReminderMinutes: config.resetReminderMinutes,
@@ -95,7 +119,8 @@ function publicConfig() {
     autoTakeoverDesktopTransient: config.autoTakeoverDesktopTransient !== false,
     desktopRetryAutoClick: config.desktopRetryAutoClick === true,
     desktopRetryCooldownSeconds: Number(config.desktopRetryCooldownSeconds || 8),
-    feishuImageRelayEnabled: !!config.feishuImageRelayEnabled, feishuImageRelayRoot: config.feishuImageRelayRoot || '' };
+    feishuImageRelayEnabled: !!config.feishuImageRelayEnabled, feishuImageRelayRoot: config.feishuImageRelayRoot || '',
+    webhooks: publicWebhooks() };
 }
 function publicDiagnostics() {
   const recentNotifications = Array.isArray(config.notificationHistory) ? config.notificationHistory.slice(0, 50) : [];
@@ -299,6 +324,7 @@ async function readWidgetSwitchTrace() {
 function humanError(error) {
   const message = String(error?.message || error || '未知错误');
   if (/invalid refresh token|token refresh|refresh token|token.{0,30}(expired|revoked)|token_expired|token_revoked|unauthorized|401\b/i.test(message)) return '这个账号的登录已经失效，请在 Companion 网页中重新登录后再刷新。';
+  if (message.startsWith('测试发送失败')) return message;
   if (message.includes('ECONNREFUSED') || message.includes('fetch failed')) return '连接不上本地服务，请确认 Codex Companion 正在运行。';
   if (/failed to fetch codex rate limits|error sending request for url.*(?:chatgpt\.com|openai\.com)/i.test(message)) return '额度刷新失败：当前网络或系统代理无法连接 OpenAI 额度接口。页面显示的是上一次成功读取的缓存额度；请检查代理/网络后点击“立即刷新”，这不是额度已耗尽。';
   if (message.includes('ENOENT')) return '找不到需要启动的程序，请确认 Codex CLI 已正确安装。';
@@ -2169,6 +2195,17 @@ async function refreshAccounts({ forceNative = false, awaitNative = false } = {}
   else nativePromise.then(applyNativeUsageMap).catch(error => console.error('[native usage apply]', error.message));
   return accounts;
 }
+function applyWebhookDelivery(results = []) {
+  if (!Array.isArray(config.webhooks) || !results.length) return;
+  const now = Date.now();
+  for (const result of results) {
+    const target = config.webhooks.find(item => String(item.id) === String(result.id));
+    if (!target) continue;
+    if (result.ok) { target.lastOkAt = now; target.lastError = ''; }
+    else { target.lastErrorAt = now; target.lastError = friendlyWebhookReason(result.reason).slice(0, 200); }
+  }
+  saveConfig().catch(() => {});
+}
 async function notify(text, opts = {}) {
   const type=notificationType(text,opts.appName,opts.notificationType);
   if(type && !notificationEnabled(config,type)) {
@@ -2176,8 +2213,10 @@ async function notify(text, opts = {}) {
     saveConfig().catch(()=>{});
     return {ok:false,reason:'type-disabled'};
   }
-  if (!config.feishuWebhookUrl && !(feishuClient && config.feishuBoundChatId)) return { ok: false, reason: 'feishu-not-configured' };
   const appName = normalizeAppName(opts.appName);
+  const extraTargets = Array.isArray(config.webhooks) ? config.webhooks.filter(item => item && item.enabled !== false && item.url) : [];
+  const hasFeishu = !!(config.feishuWebhookUrl || (feishuClient && config.feishuBoundChatId));
+  if (!hasFeishu && !extraTargets.length) return { ok: false, reason: 'feishu-not-configured' };
   const blacklist = Array.isArray(config.notificationBlacklist) ? config.notificationBlacklist : [];
   if (blacklist.includes(appName)) {
     const entry = { at: Date.now(), appName, body: trim(text, 3800), sent: false, reason: 'muted' };
@@ -2189,6 +2228,9 @@ async function notify(text, opts = {}) {
   try {
     const embeddedTaskId = canonicalCodexThreadId(await inferNotificationTaskId(text, opts.taskId));
     let messageId = '';
+    let feishuError = null;
+    let webhookDelivered = 0;
+    if (hasFeishu) try {
     if (feishuClient && config.feishuBoundChatId) {
       const topicMode = config.feishuNotificationThreadMode === 'task';
       const roots = config.feishuTaskTopicRoots && typeof config.feishuTaskTopicRoots === 'object' ? config.feishuTaskTopicRoots : {};
@@ -2240,6 +2282,19 @@ async function notify(text, opts = {}) {
       const result = await response.json().catch(() => ({}));
       if (result.code && result.code !== 0) throw new Error(result.msg || `飞书错误 ${result.code}`);
     }
+    } catch (error) {
+      // A Feishu hiccup must not swallow the other channels.
+      feishuError = error;
+      releaseTopicLock?.();
+      releaseTopicLock = null;
+      console.warn('[notify] feishu failed:', error.message);
+    }
+    if (extraTargets.length) {
+      const delivery = await sendWebhooks(extraTargets, text, { appName, title: opts.title || appName });
+      webhookDelivered = delivery.ok;
+      applyWebhookDelivery(delivery.results);
+    }
+    if (feishuError && !webhookDelivered) throw feishuError;
     pushHistory({ at: Date.now(), appName, body: trim(text, 3800), sent: true, taskId: embeddedTaskId || '', messageId: messageId || '' });
     saveConfig().catch(() => {});
     return { ok: true, messageId };
@@ -2732,6 +2787,7 @@ async function processCodexSessionAppend(file) {
           const cwd = sessionActivities.get(threadId)?.cwd || '';
           const body = sessionFailureMessage(threadId, rawError);
           await notifyTurnResult(await completionNotice({ taskId: threadId, status: 'failed', body, cwd }), { taskId: threadId, turnId, finalText: '', imagePaths: [], htmlPaths: [], cwd });
+          maybeWarnContextPressure(threadId).catch(error => console.error('[context pressure]', error.message));
         }
         continue;
       }
@@ -2742,10 +2798,32 @@ async function processCodexSessionAppend(file) {
       await finishDesktopTakeover(threadId);
       const cwd = sessionActivities.get(threadId)?.cwd || '';
       await notifyTurnResult(await completionNotice({ taskId: threadId, status: 'completed', body: message, cwd }), { taskId: threadId, turnId, finalText: message, imagePaths, htmlPaths, cwd });
+      maybeWarnContextPressure(threadId).catch(error => console.error('[context pressure]', error.message));
     }
   } catch (error) { console.error('[codex session monitor]', error.message); }
 }
 
+async function maybeWarnContextPressure(threadId) {
+  const stats = codexSessionContextStats.get(String(threadId));
+  if (!stats) return false;
+  const ratio = contextRatio(stats);
+  if (!ratio) return false;
+  const ledger = config.contextPressureLedger && typeof config.contextPressureLedger === 'object' ? { ...config.contextPressureLedger } : {};
+  const level = contextWarning(ledger, String(threadId), ratio);
+  if (!level) return false;
+  config.contextPressureLedger = trimContextLedger(ledger);
+  await saveConfig();
+  const used = Number(stats.inputTokens || stats.totalTokens || 0);
+  const limit = Number(stats.contextWindow || 0);
+  const label = await taskConversationLabel(threadId);
+  const advice = level >= 95
+    ? '已经贴着上限了。这个对话下一次压缩很可能中断，建议现在就让它交接，然后新建对话继续。'
+    : level >= 85
+      ? '建议让这个对话先生成交接摘要，再新建对话继续；继续堆内容会变慢、变贵。'
+      : '还可以继续，但记着：重试一次就要把整段上下文重发一次。';
+  await notify(`${label}\n\n上下文已用约 ${formatTokenCount(used)} / ${formatTokenCount(limit)} token（${Math.round(ratio * 100)}%）\n\n${advice}`, { appName: 'Codex 对话', taskId: threadId, notificationType: 'context_pressure' });
+  return true;
+}
 async function startCodexSessionMonitor() {
   const root = path.join(process.env.USERPROFILE || '', '.codex', 'sessions');
   if (!existsSync(root)) return;
@@ -3260,12 +3338,46 @@ async function handle(req, res) {
       if(typeof data.autoTakeoverDesktopTransient==='boolean') config.autoTakeoverDesktopTransient=data.autoTakeoverDesktopTransient;
       if(typeof data.desktopRetryAutoClick==='boolean') config.desktopRetryAutoClick=data.desktopRetryAutoClick;
       if(Number.isFinite(Number(data.desktopRetryCooldownSeconds))) config.desktopRetryCooldownSeconds=Math.min(120,Math.max(3,Math.round(Number(data.desktopRetryCooldownSeconds))));
-      await saveConfig();
-      if(Object.hasOwn(data,'autoTakeoverDesktopTransient')||Object.hasOwn(data,'desktopRetryAutoClick')||Object.hasOwn(data,'desktopRetryCooldownSeconds')) syncDesktopRetryWatcher(config);
       if(['OK','THUMBSUP','DONE','CHECK'].includes(String(data.feishuContinueEmoji||'').toUpperCase())) config.feishuContinueEmoji=String(data.feishuContinueEmoji).toUpperCase();
+      if(Object.hasOwn(data,'webhooks')) config.webhooks=validateWebhooks(data.webhooks)||[];
       await saveConfig();
       if(Object.hasOwn(data,'autoTakeoverDesktopTransient')||Object.hasOwn(data,'desktopRetryAutoClick')||Object.hasOwn(data,'desktopRetryCooldownSeconds')) syncDesktopRetryWatcher(config);
-      return send(res,200,{ok:true,desktopRetry:desktopRetryState()});
+      return send(res,200,{ok:true,desktopRetry:desktopRetryState(),webhooks:publicWebhooks()});
+    }
+    if (req.method==='POST'&&u.pathname==='/api/webhooks/add'){
+      const draft={kind:String(data.kind||''),name:String(data.name||''),url:String(data.url||''),token:String(data.token||''),enabled:true};
+      const existing=Array.isArray(config.webhooks)?config.webhooks:[];
+      const [added]=validateWebhooks([draft]);
+      const key=target=>`${target.kind}|${target.url}|${target.token}`;
+      if(existing.some(target=>key(target)===key(added)))throw Error('这个通知渠道已经添加过了，不用重复添加。');
+      added.id=`wh-${Date.now().toString(36)}`;
+      config.webhooks=[...existing,added];
+      await saveConfig();
+      return send(res,200,{ok:true,id:added.id,name:added.name,webhooks:publicWebhooks()});
+    }
+    if (req.method==='POST'&&u.pathname==='/api/webhooks/remove'){
+      const id=String(data.id||'');
+      const before=Array.isArray(config.webhooks)?config.webhooks.length:0;
+      config.webhooks=(Array.isArray(config.webhooks)?config.webhooks:[]).filter(target=>String(target.id)!==id);
+      if(config.webhooks.length===before)throw Error('没有找到这个通知渠道，可能已经被删除了。');
+      await saveConfig();
+      return send(res,200,{ok:true,webhooks:publicWebhooks()});
+    }
+    if (req.method==='POST'&&u.pathname==='/api/webhooks/toggle'){
+      const id=String(data.id||'');
+      const target=(Array.isArray(config.webhooks)?config.webhooks:[]).find(item=>String(item.id)===id);
+      if(!target)throw Error('没有找到这个通知渠道。');
+      target.enabled=data.enabled!==false;
+      await saveConfig();
+      return send(res,200,{ok:true,webhooks:publicWebhooks()});
+    }
+    if (req.method==='POST'&&u.pathname==='/api/webhooks/test'){
+      const targets=activeWebhookTargets(config);
+      if(!targets.length)throw Error('还没有可用的通知渠道，请先添加一个并保持启用。');
+      const delivery=await sendWebhooks(targets,`Codex Companion 通知测试\n\n以后任务完成、失败、等待确认、长时间无进展、额度不足时，会发到这个渠道。\n时间：${new Date().toLocaleString('zh-CN')}`,{appName:'Codex Companion',title:'Codex Companion 通知测试'});
+      applyWebhookDelivery(delivery.results);
+      if(!delivery.ok)throw Error(`测试发送失败：${delivery.results.filter(item=>!item.ok).map(item=>`${item.name}（${friendlyWebhookReason(item.reason)}）`).join('；')}`);
+      return send(res,200,{ok:true,message:`已发送到 ${delivery.ok} 个渠道。`,results:delivery.results});
     }
     if (req.method==='POST'&&u.pathname==='/api/feishu/setup'){const webhook=String(data.feishuWebhookUrl||'').trim();if(!validFeishuWebhook(webhook))throw Error('Webhook 地址格式不对。请复制飞书自定义机器人提供的完整 HTTPS 地址。');const previous=config.feishuWebhookUrl;config.feishuWebhookUrl=webhook;const result=await notify(`Codex Companion 通知测试成功\n\n以后任务完成、失败、等待确认、长时间无进展或额度不足时，我会通知到这个群。\n\n时间：${new Date().toLocaleString('zh-CN')}`, { appName: 'Codex Companion' });if(!result.ok){config.feishuWebhookUrl=previous;throw Error('飞书没有接收测试消息。请检查 Webhook 是否完整，以及机器人安全设置是否允许发送。')}await saveConfig();return send(res,200,{ok:true,message:'已经保存，测试消息也发送成功了。'});}
     if (req.method==='POST'&&u.pathname==='/api/feishu/test'){if(!config.feishuWebhookUrl&&!(feishuClient&&config.feishuBoundChatId))throw Error('请先配置 Webhook，或连接并绑定应用机器人');const result=await notify(`Codex Companion 飞书通知测试成功\n时间：${new Date().toLocaleString('zh-CN')}\n${dashboardLink()}`, { appName: 'Codex Companion' });if(!result.ok)throw Error('飞书没有接收测试消息，请检查机器人配置和连接状态');return send(res,200,{ok:true});}

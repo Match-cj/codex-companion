@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { desktopRetryEnabled, desktopTakeoverAllowed, desktopRetryCooldownSeconds, parseDesktopRetryLine } from '../desktop-retry.mjs';
+const widget = fs.readFileSync(new URL('../Quota Widget WPF.ps1', import.meta.url), 'utf8');
 
 test('desktop retry stays off unless explicitly enabled on Windows', () => {
   assert.equal(desktopRetryEnabled({}), false);
@@ -33,4 +36,44 @@ test('watcher output lines are parsed defensively', () => {
   assert.equal(parseDesktopRetryLine('not json'), null);
   assert.equal(parseDesktopRetryLine(''), null);
   assert.equal(parseDesktopRetryLine('{"noType":1}'), null);
+});
+
+test('floating window exposes the retry switch through the same config field', () => {
+  const block = widgetRetryBlock();
+  assert.match(block, /desktopRetryAutoClick/);
+  assert.match(block, /api\/config/);
+  assert.match(block, /IsCheckable=\$true/);
+  assert.match(block, /Menu\.Items\.Insert/);
+  assert.match(block, /Update-RetryMenuItem/);
+});
+
+function widgetRetryBlock() {
+  const start = widget.indexOf('$script:RetryItem=$null');
+  assert.notEqual(start, -1, 'retry menu item missing from the widget');
+  const insertAt = widget.indexOf('$Menu.Items.Insert(2,$script:RetryItem)');
+  assert.notEqual(insertAt, -1, 'retry item is not inserted into the widget menu');
+  const end = widget.indexOf('\n', insertAt);
+  return widget.slice(start, end === -1 ? widget.length : end);
+}
+
+test('retry menu item reflects the backend state without firing a toggle', { skip: process.platform !== 'win32' }, () => {
+  const script = `$ErrorActionPreference='Stop'
+Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase
+$script:Port=17841
+$Menu=New-Object Windows.Controls.ContextMenu
+function Get-Status{return [pscustomobject]@{desktopRetry=[pscustomobject]@{enabled=$true}}}
+${widgetRetryBlock()}
+if(-not $script:RetryItem.IsChecked){throw 'Menu item not checked while enabled'}
+if($script:RetryItem.Header -notlike '*已开启*'){throw "Header wrong: $($script:RetryItem.Header)"}
+function Get-Status{return [pscustomobject]@{desktopRetry=[pscustomobject]@{enabled=$false}}}
+Update-RetryMenuItem
+if($script:RetryItem.IsChecked){throw 'Menu item still checked while disabled'}
+if($script:RetryItem.Header -notlike '*已关闭*'){throw "Header wrong: $($script:RetryItem.Header)"}
+function Get-Status{throw 'backend unreachable'}
+Update-RetryMenuItem
+if($script:RetryItem.Header -notlike '*已关闭*'){throw 'Header lost state on backend error'}
+'PASS'`;
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Sta', '-Command', script], { encoding: 'utf8', windowsHide: true, timeout: 20000 });
+  assert.equal(result.status, 0, result.stderr || result.error?.message);
+  assert.match(result.stdout, /PASS/);
 });

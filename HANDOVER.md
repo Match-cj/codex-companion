@@ -1,6 +1,22 @@
 # Codex Companion 交接文档
 
-## 最新状态：v1.0.15（2026-10-30）
+## 最新状态：v1.0.16（2026-10-30）
+
+在 v1.0.15（桌面端自动重试）之上补齐三项：
+
+1. **通用 Webhook 通知层**（`webhook-notify.mjs`）：`config.webhooks = [{id,kind,name,url,token,enabled,lastOkAt,lastError}]`，支持 wecom / dingtalk / pushplus / serverchan / bark / telegram / discord / custom。路由：`POST /api/webhooks/add|remove|toggle|test`；`publicWebhooks()` 只回显 `https://host/…abcd` 形式的 `urlHint`，密钥不回传。`sendWebhooks()` 并行发送、逐渠道返回 `{ok,id,reason}`；`webhookBodyRejected()` 处理腾讯系「200 + errcode≠0」。投递结果写回 `config.webhooks[].lastOkAt/lastError`（经 `friendlyWebhookReason()` 转成人话）。
+2. **上下文水位提醒**（`context-budget.mjs`）：复用已有的 `codexSessionContextStats`（inputTokens / contextWindow）。`contextWarning()` 在 70/85/95 三档各提醒一次，比例跌回 70% 以下（压缩或新对话）自动重置；账本存 `config.contextPressureLedger`（保留最近 100 条）。触发点是 `maybeWarnContextPressure()`，接入主对话 completed 与 failed 两条分支，通知类型 `context_pressure`（默认开启）。
+3. **浮窗右键开关**：`Quota Widget WPF.ps1` 新增可勾选的「桌面端自动重试」项，读 `/api/status` 的 `desktopRetry.enabled` 同步状态，点击走 `POST /api/config`。
+
+改动约束（后续接手请守住）：
+
+- `notify()` 里飞书失败用 `feishuError` 接住而不是直接抛，保证其他渠道照常投递；只有「飞书失败且没有任何 webhook 成功」才整体失败。
+- 现有 vm 单元测试直接切 `server.mjs` 源码片段运行，所以 `notify()` 内部**不要**调用切片范围外的函数；webhook 分发全部落在 `extraTargets.length` 判断之内（测试配置里没有 webhooks，因而不进入该分支）。
+- 新增渠道只需在 `WEBHOOK_KINDS` 加一行、在 `buildWebhookRequest()` 加一个 case，并在 `dashboard.html` 的 `WEBHOOK_KINDS` 同步一行。
+
+96 项测试通过。真机验收仍待：下次容量错误时自动点重试、以及首次配置真实渠道时发一条测试。
+
+## 上一版：v1.0.15（2026-10-30）
 
 新增「桌面端自动重试」（`desktop-retry.mjs` + `Desktop Retry Watcher.ps1`）。背景：Codex 桌面端在 `Selected model is at capacity` 时会显示重试按钮，客户端自身只重试几秒到几分钟就停止，用户此前靠外部脚本手动点击。本次把它做成 Companion 的托管能力：
 
