@@ -15,10 +15,11 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 import { observeEarlyQuotaReset } from './quota-reset.mjs';
 import { notificationRules, notificationEnabled, notificationType, resetReminderLeads, validateNotificationSettings, nextResetReminder } from './notification-settings.mjs';
 import { recoverReplyTarget } from './feishu-reply-recovery.mjs';
+import { desktopRetryState, desktopTakeoverAllowed, syncDesktopRetryWatcher, startDesktopRetryWatcher, stopDesktopRetryWatcher } from './desktop-retry.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '1.0.14';
+const APP_VERSION = '1.0.15';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -59,6 +60,8 @@ const defaultConfig = {
   autoContinueTransient: true,
   autoContinueTransientMaxAttempts: 10,
   autoTakeoverDesktopTransient: true,
+  desktopRetryAutoClick: false,
+  desktopRetryCooldownSeconds: 8,
   autoFallbackModel: '',
   feishuIncludeDashboardLink: false,
   publicDashboardUrl: '',
@@ -90,6 +93,8 @@ function publicConfig() {
     feishuContinueEmoji: ['OK','THUMBSUP','DONE','CHECK'].includes(config.feishuContinueEmoji) ? config.feishuContinueEmoji : 'OK',
     feishuMentionOperator: config.feishuMentionOperator !== false,
     autoTakeoverDesktopTransient: config.autoTakeoverDesktopTransient !== false,
+    desktopRetryAutoClick: config.desktopRetryAutoClick === true,
+    desktopRetryCooldownSeconds: Number(config.desktopRetryCooldownSeconds || 8),
     feishuImageRelayEnabled: !!config.feishuImageRelayEnabled, feishuImageRelayRoot: config.feishuImageRelayRoot || '' };
 }
 function publicDiagnostics() {
@@ -119,7 +124,8 @@ function publicDiagnosticBundle() {
       retry429MaxAttempts: Number(config.autoContinue429MaxAttempts || 3),
       retryTransient: config.autoContinueTransient !== false,
       retryTransientMaxAttempts: Number(config.autoContinueTransientMaxAttempts || 10),
-      takeoverDesktopTransient: config.autoTakeoverDesktopTransient !== false,
+      takeoverDesktopTransient: desktopTakeoverAllowed(config),
+      desktopRetryAutoClick: config.desktopRetryAutoClick === true,
       fallbackModel: '',
     },
     feishu: {
@@ -1010,8 +1016,9 @@ function feishuRunningCount() {
 }
 
 function feishuMenuText() {
-  const takeover = config.autoTakeoverDesktopTransient !== false ? '开启' : '关闭';
-  return `Codex Tools 手机菜单\n\n自动接管：${takeover}\n运行中对话：${feishuRunningCount()} 个\n\n可直接回复下面的命令：\n· 自动接管 开启\n· 自动接管 关闭\n· 状态\n· 刷新额度\n· 绑定最近对话\n· 新话题\n\n说明：自动接管关闭后，桌面端遇到模型容量不足不会转入后台；普通重试策略不受影响。`;
+  const takeover = desktopTakeoverAllowed(config) ? '开启' : '关闭';
+  const retry = desktopRetryState();
+  return `Codex Tools 手机菜单\n\n自动重试：${retry.enabled ? '开启' : '关闭'}${retry.enabled ? `（已点击 ${retry.hits} 次）` : ''}\n自动接管：${takeover}\n运行中对话：${feishuRunningCount()} 个\n\n可直接回复下面的命令：\n· 自动重试 开启\n· 自动重试 关闭\n· 自动接管 开启\n· 自动接管 关闭\n· 状态\n· 刷新额度\n· 绑定最近对话\n· 新话题\n\n说明：自动重试只是按下桌面端自己的重试按钮，不改对话、不换模型；它开启时自动接管不再转入后台。`;
 }
 
 async function handleFeishuControlCommand(text, message) {
@@ -1020,7 +1027,25 @@ async function handleFeishuControlCommand(text, message) {
     await sendFeishuAppText(feishuMenuText(), { replyTo: message.message_id });
     return true;
   }
+  if (/^(自动重试|重试|点重试)\s*(开启|打开|开|on)$/i.test(command)) {
+    config.desktopRetryAutoClick = true;
+    await saveConfig();
+    syncDesktopRetryWatcher(config);
+    await sendFeishuAppText('自动重试已开启。桌面端提示模型繁忙时会自动按下重试按钮，不改动对话内容、不更换模型；自动接管已同时停用。\n\n' + feishuMenuText(), { replyTo: message.message_id });
+    return true;
+  }
+  if (/^(自动重试|重试|点重试)\s*(关闭|关|off)$/i.test(command)) {
+    config.desktopRetryAutoClick = false;
+    await saveConfig();
+    syncDesktopRetryWatcher(config);
+    await sendFeishuAppText('自动重试已关闭。以后需要你自己点击桌面端的重试按钮。\n\n' + feishuMenuText(), { replyTo: message.message_id });
+    return true;
+  }
   if (/^(自动接管|接管)\s*(开启|打开|开|on)$/i.test(command)) {
+    if (config.desktopRetryAutoClick === true) {
+      await sendFeishuAppText('自动重试正在开启，两者不能同时工作。请先回复「自动重试 关闭」再开启自动接管。', { replyTo: message.message_id });
+      return true;
+    }
     config.autoTakeoverDesktopTransient = true;
     await saveConfig();
     await sendFeishuAppText('自动接管已开启。模型容量不足时会自动转入后台，用当前模型重试；过程静默，只发送开始和最终结果。\n\n' + feishuMenuText(), { replyTo: message.message_id });
@@ -1033,7 +1058,7 @@ async function handleFeishuControlCommand(text, message) {
     return true;
   }
   if (/^(状态|status)$/i.test(command)) {
-    await sendFeishuAppText(`Codex Tools 当前状态\n\n自动接管：${config.autoTakeoverDesktopTransient !== false ? '开启' : '关闭'}\n运行中对话：${feishuRunningCount()} 个\n当前账号：${accounts.find(account => account.is_active)?.display_name || accounts.find(account => account.is_active)?.name || '未识别'}\n\n${feishuMenuText()}`, { replyTo: message.message_id });
+    await sendFeishuAppText(`Codex Tools 当前状态\n\n自动重试：${desktopRetryState().enabled ? '开启' : '关闭'}\n自动接管：${desktopTakeoverAllowed(config) ? '开启' : '关闭'}\n运行中对话：${feishuRunningCount()} 个\n当前账号：${accounts.find(account => account.is_active)?.display_name || accounts.find(account => account.is_active)?.name || '未识别'}\n\n${feishuMenuText()}`, { replyTo: message.message_id });
     return true;
   }
   if (/^(刷新额度|额度|quota)$/i.test(command)) {
@@ -2687,7 +2712,7 @@ async function processCodexSessionAppend(file) {
       }
       const capacityFailure = /selected model is at capacity|model is temporarily unavailable/i.test(eventText);
       const takeoverKey = `${file}:${turnId}`;
-      if (capacityFailure && config.autoTakeoverDesktopTransient !== false && !desktopTakeoverIds().includes(String(threadId)) && !codexSessionAutoTakeovers.has(takeoverKey) && !codexSessionAutoTakeoverThreads.has(String(threadId))) {
+      if (capacityFailure && desktopTakeoverAllowed(config) && !desktopTakeoverIds().includes(String(threadId)) && !codexSessionAutoTakeovers.has(takeoverKey) && !codexSessionAutoTakeoverThreads.has(String(threadId))) {
         codexSessionAutoTakeovers.add(takeoverKey);
         codexSessionAutoTakeoverThreads.add(String(threadId));
         await notify(`检测到 Codex 模型暂时繁忙，开始自动接管并重试\n对话：${threadId}`, { appName: 'Codex 任务', taskId: threadId });
@@ -3049,6 +3074,7 @@ async function handle(req, res) {
         accounts,
         tasks:Object.fromEntries(tasks),
         taskActivity:{ rows: publicTaskActivity(), monitorReady: codexSessionWatcherReady, note: '桌面任务依据最近本地记录显示，不是客户端实时运行保证；历史记录只用于展示，不补发通知。' },
+        desktopRetry: desktopRetryState(),
         diagnosticIssues:publicDiagnostics().issues,
         approvals:[...pendingApprovals.values()],
         deviceLogin:deviceLogin?.publicState()||null,
@@ -3232,8 +3258,14 @@ async function handle(req, res) {
       if(data.feishuNotificationThreadMode==='task'||data.feishuNotificationThreadMode==='flat') config.feishuNotificationThreadMode=data.feishuNotificationThreadMode;
       if(typeof data.feishuMentionOperator==='boolean') config.feishuMentionOperator=data.feishuMentionOperator;
       if(typeof data.autoTakeoverDesktopTransient==='boolean') config.autoTakeoverDesktopTransient=data.autoTakeoverDesktopTransient;
+      if(typeof data.desktopRetryAutoClick==='boolean') config.desktopRetryAutoClick=data.desktopRetryAutoClick;
+      if(Number.isFinite(Number(data.desktopRetryCooldownSeconds))) config.desktopRetryCooldownSeconds=Math.min(120,Math.max(3,Math.round(Number(data.desktopRetryCooldownSeconds))));
+      await saveConfig();
+      if(Object.hasOwn(data,'autoTakeoverDesktopTransient')||Object.hasOwn(data,'desktopRetryAutoClick')||Object.hasOwn(data,'desktopRetryCooldownSeconds')) syncDesktopRetryWatcher(config);
       if(['OK','THUMBSUP','DONE','CHECK'].includes(String(data.feishuContinueEmoji||'').toUpperCase())) config.feishuContinueEmoji=String(data.feishuContinueEmoji).toUpperCase();
-      await saveConfig();return send(res,200,{ok:true});
+      await saveConfig();
+      if(Object.hasOwn(data,'autoTakeoverDesktopTransient')||Object.hasOwn(data,'desktopRetryAutoClick')||Object.hasOwn(data,'desktopRetryCooldownSeconds')) syncDesktopRetryWatcher(config);
+      return send(res,200,{ok:true,desktopRetry:desktopRetryState()});
     }
     if (req.method==='POST'&&u.pathname==='/api/feishu/setup'){const webhook=String(data.feishuWebhookUrl||'').trim();if(!validFeishuWebhook(webhook))throw Error('Webhook 地址格式不对。请复制飞书自定义机器人提供的完整 HTTPS 地址。');const previous=config.feishuWebhookUrl;config.feishuWebhookUrl=webhook;const result=await notify(`Codex Companion 通知测试成功\n\n以后任务完成、失败、等待确认、长时间无进展或额度不足时，我会通知到这个群。\n\n时间：${new Date().toLocaleString('zh-CN')}`, { appName: 'Codex Companion' });if(!result.ok){config.feishuWebhookUrl=previous;throw Error('飞书没有接收测试消息。请检查 Webhook 是否完整，以及机器人安全设置是否允许发送。')}await saveConfig();return send(res,200,{ok:true,message:'已经保存，测试消息也发送成功了。'});}
     if (req.method==='POST'&&u.pathname==='/api/feishu/test'){if(!config.feishuWebhookUrl&&!(feishuClient&&config.feishuBoundChatId))throw Error('请先配置 Webhook，或连接并绑定应用机器人');const result=await notify(`Codex Companion 飞书通知测试成功\n时间：${new Date().toLocaleString('zh-CN')}\n${dashboardLink()}`, { appName: 'Codex Companion' });if(!result.ok)throw Error('飞书没有接收测试消息，请检查机器人配置和连接状态');return send(res,200,{ok:true});}
@@ -3364,6 +3396,7 @@ async function main() {
   startTaskEngine().catch(e => console.error('[task engine]', e.message));
   startFeishuLongConnection().catch(e => console.error('[feishu connection]', e.message));
   startCodexSessionMonitor().catch(e => console.error('[codex session monitor]', e.message));
+  startDesktopRetryWatcher(config);
   // A conversation that existed before the monitor started has no new
   // response_item event to trigger topic creation. Reconcile the currently
   // bound conversation once after Feishu connects so it also gets a topic.
@@ -3384,6 +3417,6 @@ async function main() {
       try { await refreshAccounts(); } catch (e) { console.error('[accounts]', e.message); }
     }
   }, 15000);
-  process.on('SIGINT', () => { codex.close(); try { codexSessionWatcher?.close(); } catch {} try { feishuWsClient?.close({ force: true }); } catch {} try { notificationDb?.close(); } catch {} server.close(); process.exit(0); });
+  process.on('SIGINT', () => { stopDesktopRetryWatcher(); codex.close(); try { codexSessionWatcher?.close(); } catch {} try { feishuWsClient?.close({ force: true }); } catch {} try { notificationDb?.close(); } catch {} server.close(); process.exit(0); });
 }
 main().catch(e=>{console.error(e);process.exit(1)});
