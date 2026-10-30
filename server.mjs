@@ -18,7 +18,7 @@ import { recoverReplyTarget } from './feishu-reply-recovery.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '1.0.12';
+const APP_VERSION = '1.0.14';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -872,11 +872,11 @@ async function notifyTurnResult(text, { taskId, turnId, finalText, imagePaths = 
 }
 
 async function announceDesktopConversation(threadId) {
-  const id = String(threadId || '').trim();
+  const id = canonicalCodexThreadId(threadId);
   if (!id || codexSessionTopicsAnnounced.has(id)) return;
   const roots = config.feishuTaskTopicRoots && typeof config.feishuTaskTopicRoots === 'object' ? config.feishuTaskTopicRoots : {};
   const chats = config.feishuTaskTopicChats && typeof config.feishuTaskTopicChats === 'object' ? config.feishuTaskTopicChats : {};
-  if (roots[id] && chats[id] === config.feishuBoundChatId) { codexSessionTopicsAnnounced.add(id); return; }
+  if (existingFeishuTaskTopic(id)) { codexSessionTopicsAnnounced.add(id); return; }
   codexSessionTopicsAnnounced.add(id);
   const activity = sessionActivities.get(id);
   const label = await taskConversationLabel(id, activity?.title || '', activity?.cwd || '');
@@ -892,6 +892,16 @@ async function ensureFeishuTaskTopic(threadId) {
   const chats = config.feishuTaskTopicChats && typeof config.feishuTaskTopicChats === 'object' ? config.feishuTaskTopicChats : {};
   if (roots[id] && chats[id] === config.feishuBoundChatId) return;
   await announceDesktopConversation(id);
+}
+
+function existingFeishuTaskTopic(threadId) {
+  const id = canonicalCodexThreadId(threadId);
+  if (!id) return '';
+  const roots = config.feishuTaskTopicRoots || {}, chats = config.feishuTaskTopicChats || {};
+  if (roots[id] && chats[id] === config.feishuBoundChatId) return String(roots[id]);
+  const alias = Object.keys(roots).find(key => chats[key] === config.feishuBoundChatId && canonicalCodexThreadId(key) === id);
+  if (alias) return String(roots[alias]);
+  return '';
 }
 
 function wrapFeishuText(value, maxLength = 110) {
@@ -960,12 +970,13 @@ async function bindLatestFeishuThread() {
 }
 
 async function rotateFeishuTopic(threadId) {
-  const id = String(threadId || '').trim();
+  const id = canonicalCodexThreadId(threadId);
   if (!id) throw Error('没有识别到要重开话题的 Codex 对话。');
   const roots = config.feishuTaskTopicRoots && typeof config.feishuTaskTopicRoots === 'object' ? config.feishuTaskTopicRoots : {};
   const chats = config.feishuTaskTopicChats && typeof config.feishuTaskTopicChats === 'object' ? config.feishuTaskTopicChats : {};
   delete roots[id];
   delete chats[id];
+  for (const key of Object.keys(roots)) if (canonicalCodexThreadId(key) === id) { delete roots[key]; delete chats[key]; }
   config.feishuTaskTopicRoots = roots;
   config.feishuTaskTopicChats = chats;
   codexSessionTopicsAnnounced.delete(id);
@@ -1174,6 +1185,12 @@ async function resolveFeishuReplyThread(message) {
     console.log(`[feishu reply recovery] ${recovered.reason}; resolved=${Boolean(threadId)}`);
   }
   if(threadId&&rootId){
+    // Repair outbound routing too, but never replace an already chosen topic.
+    if (!existingFeishuTaskTopic(threadId)) {
+      (config.feishuTaskTopicRoots ||= {})[threadId] = rootId;
+      (config.feishuTaskTopicChats ||= {})[threadId] = config.feishuBoundChatId;
+      await saveConfig();
+    }
     const anchors=config.feishuReplyTopicAnchors||{};
     if(anchors[rootId]?.threadId!==threadId||anchors[rootId]?.chatId!==config.feishuBoundChatId){
       anchors[rootId]={threadId,chatId:config.feishuBoundChatId};
@@ -1197,6 +1214,7 @@ async function continueThreadFromFeishu(threadId, input, { manual = false } = {}
   }
 
   await closeCodexDesktop();
+  await rememberDesktopTakeover(threadId);
   try {
     let task;
     let lastError;
@@ -1212,12 +1230,12 @@ async function continueThreadFromFeishu(threadId, input, { manual = false } = {}
     }
     if (!task) throw lastError || Error('Codex 桌面端仍在占用这个对话。');
     if (manual) { task.autoRetryTransientCount = 0; task.autoRetry429Count = 0; }
-    await codex.continueTask(task, input);
     task.remoteDesktopTakeover = true;
-    await rememberDesktopTakeover(threadId);
+    // Register before turn/start: a fast completion can precede its RPC reply.
+    await codex.continueTask(task, input);
     return task;
   } catch (error) {
-    launchCodexDesktop();
+    await finishDesktopTakeover(threadId);
     throw error;
   }
 }
@@ -2144,13 +2162,13 @@ async function notify(text, opts = {}) {
   }
   let releaseTopicLock = null;
   try {
-    const embeddedTaskId = await inferNotificationTaskId(text, opts.taskId);
+    const embeddedTaskId = canonicalCodexThreadId(await inferNotificationTaskId(text, opts.taskId));
     let messageId = '';
     if (feishuClient && config.feishuBoundChatId) {
       const topicMode = config.feishuNotificationThreadMode === 'task';
       const roots = config.feishuTaskTopicRoots && typeof config.feishuTaskTopicRoots === 'object' ? config.feishuTaskTopicRoots : {};
       const chats = config.feishuTaskTopicChats && typeof config.feishuTaskTopicChats === 'object' ? config.feishuTaskTopicChats : {};
-      let replyTo = topicMode && embeddedTaskId && chats[embeddedTaskId] === config.feishuBoundChatId ? String(roots[embeddedTaskId] || '') : '';
+      let replyTo = topicMode ? existingFeishuTaskTopic(embeddedTaskId) : '';
       if (topicMode && embeddedTaskId && !replyTo) {
         const previous = feishuTopicCreationLocks.get(embeddedTaskId) || Promise.resolve();
         let release;
@@ -2162,7 +2180,7 @@ async function notify(text, opts = {}) {
           if (feishuTopicCreationLocks.get(embeddedTaskId) === current) feishuTopicCreationLocks.delete(embeddedTaskId);
         };
         // Another completion may have created the root while this call waited.
-        replyTo = chats[embeddedTaskId] === config.feishuBoundChatId ? String(roots[embeddedTaskId] || '') : '';
+        replyTo = existingFeishuTaskTopic(embeddedTaskId);
       }
       const compactText = replyTo
         ? String(text).replace(/^\s*(?:任务|对话)：[0-9a-f-]{20,}\s*$/gmi, '').replace(/\n{3,}/g, '\n\n').trim()
@@ -2172,17 +2190,10 @@ async function notify(text, opts = {}) {
         sent = await sendFeishuAppText(compactText, { replyTo, taskId: embeddedTaskId });
       } catch (error) {
         if (!replyTo || !topicMode || !embeddedTaskId) throw error;
-        // The root may have been deleted, belong to an old group, or come from
-        // a pre-topic release. Recreate it once instead of silently losing all
-        // later completions for this conversation.
-        delete roots[embeddedTaskId];
-        delete chats[embeddedTaskId];
-        config.feishuTaskTopicRoots = roots;
-        config.feishuTaskTopicChats = chats;
-        codexSessionTopicsAnnounced.delete(embeddedTaskId);
-        await saveConfig();
-        replyTo = '';
-        sent = await sendFeishuAppText(text, { taskId: embeddedTaskId });
+        // A transport/permission failure is not proof the topic was deleted.
+        // Preserve its mapping; explicit topic rotation remains available.
+        console.warn('[feishu topic] reply failed; existing topic preserved');
+        throw error;
       }
       messageId = sent.messageId || '';
       if (topicMode && embeddedTaskId && messageId && !replyTo) {

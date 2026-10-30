@@ -22,6 +22,39 @@ test('inactive account cards switch only after a double click', () => {
   assert.match(widget, /Switch-WidgetAccount/);
   assert.doesNotMatch(widget, /\$switchButton\.Content='切换账号'/);
 });
+
+test('successful switch is nonmodal; confirmation and failure remain actionable', () => {
+  const action=widget.slice(widget.indexOf('function Switch-WidgetAccount('),widget.indexOf('function Warmup-WidgetAccount('));
+  assert.match(action,/Show-WidgetNotice \(\[string\]\$result.message\)/);
+  assert.doesNotMatch(action,/MessageBox\]::Show\(\[string\]\$result.message/);
+  assert.match(action,/MessageBoxButton\]::OKCancel/);
+  assert.match(action,/账号切换失败/);
+});
+
+test('notice stays out of taskbar, does not activate, replaces old notice and expires', {skip:process.platform!=='win32'},()=>{
+  const helper=widget.slice(widget.indexOf('function Close-WidgetNotice{'),widget.indexOf('function Switch-WidgetAccount('));
+  const script=`$ErrorActionPreference='Stop'
+Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase
+$SelfTest=$true
+$Transparent=[Windows.Media.Brushes]::Transparent;$Disc=[Windows.Media.Brushes]::Black;$Green=[Windows.Media.Brushes]::Green;$White=[Windows.Media.Brushes]::White
+function Get-WidgetMonitorWorkArea {return [pscustomobject]@{Left=0;Top=0;Right=1000;Bottom=800}}
+${helper}
+Show-WidgetNotice 'first' 0.1
+$first=$script:NoticeWindow
+if($first.ShowInTaskbar-or$first.ShowActivated){throw 'Taskbar/focus regression'}
+Show-WidgetNotice 'second' 0.1
+if($first.IsVisible){throw 'Old notice still visible'}
+if($script:NoticeWindow.Left-ne 624){throw 'Not at bottom-right'}
+$frame=New-Object Windows.Threading.DispatcherFrame
+$timeout=New-Object Windows.Threading.DispatcherTimer
+$timeout.Interval=[TimeSpan]::FromMilliseconds(400)
+$timeout.Add_Tick({$frame.Continue=$false;$timeout.Stop()});$timeout.Start()
+[Windows.Threading.Dispatcher]::PushFrame($frame)
+if($null-ne$script:NoticeWindow-or$null-ne$script:NoticeTimer){throw 'Notice did not expire'}
+'PASS'`;
+  const result=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Sta','-Command',script],{encoding:'utf8',windowsHide:true,timeout:15000});
+  assert.equal(result.status,0,result.stderr||result.error?.message);assert.match(result.stdout,/PASS/);
+});
 test('switch confirmation owns its window and suppresses floating-window interference', () => {
   const action = widget.slice(widget.indexOf('function Switch-WidgetAccount('), widget.indexOf('function Warmup-WidgetAccount('));
   assert.ok(action.indexOf('$script:SwitchInProgress=$true') < action.indexOf('MessageBox]::Show'));

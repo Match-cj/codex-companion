@@ -2,7 +2,7 @@ param([int]$Port = 17841,[switch]$SelfTest)
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 Add-Type 'using System; using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags); [DllImport("user32.dll", EntryPoint="GetWindowLongW")] public static extern int GetWindowLong(IntPtr hwnd, int index); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); }'
-$script:Port=$Port; $script:AppVersion='1.0.12'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
+$script:Port=$Port; $script:AppVersion='1.0.14'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
 $mutexName=if($SelfTest){'Global\CodexCompanionQuotaWidget_v5_selftest'}else{'Global\CodexCompanionQuotaWidget_v5'}
 $script:Mutex=New-Object System.Threading.Mutex($false,$mutexName); if(-not $script:Mutex.WaitOne(0,$false)){exit}
 $Transparent=[Windows.Media.Brushes]::Transparent
@@ -196,6 +196,35 @@ function Get-WidgetMonitorWorkArea{
  $fallback=[Windows.SystemParameters]::WorkArea
  return [pscustomobject]@{Left=$fallback.Left;Top=$fallback.Top;Right=$fallback.Right;Bottom=$fallback.Bottom}
 }
+function Close-WidgetNotice{
+ if($null-ne$script:NoticeTimer){$script:NoticeTimer.Stop();$script:NoticeTimer=$null}
+ if($null-ne$script:NoticeWindow){$script:NoticeWindow.Close();$script:NoticeWindow=$null}
+}
+function Show-WidgetNotice([string]$message,[double]$seconds=5){
+ Close-WidgetNotice
+ $toast=New-Object Windows.Window
+ $toast.WindowStyle='None';$toast.ResizeMode='NoResize';$toast.AllowsTransparency=$true
+ $toast.Background=$Transparent;$toast.ShowInTaskbar=$false;$toast.ShowActivated=$false
+ $toast.Topmost=$true;$toast.Width=360;$toast.SizeToContent='Height'
+ $border=New-Object Windows.Controls.Border
+ $border.Background=$Disc;$border.BorderBrush=$Green;$border.BorderThickness=1;$border.CornerRadius=12;$border.Padding=16
+ $stack=New-Object Windows.Controls.StackPanel
+ $title=New-Object Windows.Controls.TextBlock
+ $title.Text='Codex Companion · 账号切换成功';$title.Foreground=$Green;$title.FontWeight='SemiBold';$title.FontSize=14
+ $body=New-Object Windows.Controls.TextBlock
+ $body.Text=$message;$body.Foreground=$White;$body.FontSize=13;$body.TextWrapping='Wrap';$body.Margin='0,8,0,0'
+ $stack.Children.Add($title)|Out-Null;$stack.Children.Add($body)|Out-Null
+ $border.Child=$stack;$toast.Content=$border
+ $script:NoticeWindow=$toast
+ if($SelfTest){$toast.Opacity=0}
+ $toast.Show();$toast.UpdateLayout()
+ $area=Get-WidgetMonitorWorkArea
+ $toast.Left=[Math]::Max($area.Left,$area.Right-$toast.ActualWidth-16)
+ $toast.Top=[Math]::Max($area.Top,$area.Bottom-$toast.ActualHeight-16)
+ $script:NoticeTimer=New-Object Windows.Threading.DispatcherTimer
+ $script:NoticeTimer.Interval=[TimeSpan]::FromSeconds([Math]::Max(0.1,$seconds))
+ $script:NoticeTimer.Add_Tick({Close-WidgetNotice});$script:NoticeTimer.Start()
+}
 function Switch-WidgetAccount($accountId,$accountName){
  if($SelfTest){$script:SwitchButtonInvocations++;return}
  Trace-WidgetSwitch 'gesture_received' $accountName ("widget=$script:AppVersion pid=$PID")
@@ -220,7 +249,7 @@ function Switch-WidgetAccount($accountId,$accountName){
   Trace-WidgetSwitch 'validation_success' $accountName
   Close-Detail -Force
   Update-Widget
-  [Windows.MessageBox]::Show([string]$result.message,'Codex Companion','OK','Information')|Out-Null
+  Show-WidgetNotice ([string]$result.message)
  }catch{
   Trace-WidgetSwitch 'failed' $accountName (Get-ApiErrorMessage $_)
   [Windows.MessageBox]::Show("账号切换失败：`n$(Get-ApiErrorMessage $_)",'Codex Companion','OK','Error')|Out-Null
@@ -307,6 +336,7 @@ function Show-Detail{
  $d.Height=[Math]::Max(80,$total)
  $work=Get-WidgetMonitorWorkArea;$left=$Window.Left+(($Window.ActualWidth-$d.Width)/2);$left=[Math]::Max($work.Left+4,[Math]::Min($left,$work.Right-$d.Width-4));$below=$Window.Top+$Window.ActualHeight+6;$top=if(($below+$d.Height)-le$work.Bottom){$below}else{$Window.Top-$d.Height-6};$d.Left=$left;$d.Top=[Math]::Max($work.Top+4,[Math]::Min($top,$work.Bottom-$d.Height-4));if($SelfTest){$d.Opacity=0};$d.Show()
 }
+$Window.Add_Closed({Close-WidgetNotice})
 if($SelfTest){
  $Error.Clear()
  $Window.Opacity=0;$Window.Show();$Window.UpdateLayout()
