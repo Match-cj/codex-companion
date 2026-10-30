@@ -1,9 +1,10 @@
 # Codex Companion - desktop retry watcher
 # Watches the Codex/ChatGPT desktop window. When the client shows its own
 # retry button (for example "Selected model is at capacity"), the watcher
-# presses it through UI Automation. Nothing else is ever touched: no new
-# message is sent to the conversation, no model is changed, no mouse pointer
-# is moved unless UI Automation refuses to invoke the button.
+# presses it. Nothing else is ever touched: no new message is sent to the
+# conversation, no model is changed. The pointer is only used when UI
+# Automation cannot invoke the button, and even then it is put back where it
+# was - and never while the user is moving it.
 #
 # Output protocol (one JSON object per line on stdout):
 #   {"type":"ready"}
@@ -26,8 +27,27 @@ $retryName = [string][char]0x91CD + [char]0x8BD5
 
 Add-Type -Namespace Companion -Name Mouse -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+[DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
 [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e);
+[StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
 '@
+
+function Get-CursorPos {
+  $point = New-Object Companion.Mouse+POINT
+  [Companion.Mouse]::GetCursorPos([ref]$point) | Out-Null
+  return $point
+}
+
+# Taking the pointer away from someone who is using it is the one thing this
+# watcher must never do. Two samples a moment apart tell us whether the mouse
+# is parked: if it moved, the user is working and we simply try again next poll.
+function Test-MouseParked {
+  $first = Get-CursorPos
+  Start-Sleep -Milliseconds 120
+  $second = Get-CursorPos
+  if ($first.X -ne $second.X -or $first.Y -ne $second.Y) { return $null }
+  return $first
+}
 
 function Emit($object) {
   $json = $object | ConvertTo-Json -Compress
@@ -46,6 +66,8 @@ try {
     Where-Object { $_.ProcessId -ne $ownId -and $_.CommandLine -like '*Desktop Retry Watcher.ps1*' })
   foreach ($other in $others) { Stop-Process -Id $other.ProcessId -Force }
 } catch { }
+
+$skipStreak = 0
 
 function ParentAlive {
   if ($ParentPid -le 0) { return $true }
@@ -97,23 +119,52 @@ while (ParentAlive) {
         '{ "at": ' + $now + ' }' | Set-Content -Path $stamp -Encoding ASCII
 
         $invoked = $false
+        $method = ''
         try {
           $pattern = $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
           $pattern.Invoke()
           $invoked = $true
+          $method = 'invoke'
         } catch { }
         if (-not $invoked) {
+          # Electron only exposes part of its controls through the modern
+          # pattern; the legacy MSAA action still works on many of them and
+          # never touches the pointer.
           try {
+            $legacy = $button.GetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern)
+            $legacy.DoDefaultAction()
+            $invoked = $true
+            $method = 'legacy'
+          } catch { }
+        }
+        if (-not $invoked) {
+          $parked = Test-MouseParked
+          # Never yank the pointer out of the user's hand. If they keep moving
+          # it for a long stretch, give up waiting and click anyway - but we
+          # always put the pointer back exactly where we found it.
+          if (-not $parked -and $skipStreak -lt 10) {
+            $skipStreak++
+            Emit @{ type = 'skipped'; at = (Get-Date).ToUniversalTime().ToString('o'); window = $window.Current.Name; reason = 'mouse-in-use' }
+            continue
+          }
+          $skipStreak = 0
+          try {
+            if (-not $parked) { $parked = Get-CursorPos }
             $point = $button.GetClickablePoint()
             [Companion.Mouse]::SetCursorPos([int]$point.X, [int]$point.Y) | Out-Null
-            Start-Sleep -Milliseconds 80
+            Start-Sleep -Milliseconds 60
             [Companion.Mouse]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
             [Companion.Mouse]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 60
+            [Companion.Mouse]::SetCursorPos($parked.X, $parked.Y) | Out-Null
+            $method = 'mouse'
           } catch {
             Emit @{ type = 'error'; message = "click failed: $($_.Exception.Message)" }
+            continue
           }
         }
-        Emit @{ type = 'hit'; at = (Get-Date).ToUniversalTime().ToString('o'); window = $window.Current.Name; proc = $procName }
+        $skipStreak = 0
+        Emit @{ type = 'hit'; at = (Get-Date).ToUniversalTime().ToString('o'); window = $window.Current.Name; proc = $procName; method = $method }
         Start-Sleep -Seconds $CooldownSeconds
       }
     }

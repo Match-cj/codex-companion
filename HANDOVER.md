@@ -1,6 +1,17 @@
 # Codex Companion 交接文档
 
-## 最新状态：v1.0.16（2026-10-30）
+## 最新状态：v1.0.17（2026-10-30）
+
+真机验收后按用户反馈修的四点（都改在 v1.0.16 的基础上）：
+
+1. **抢鼠标**。`Desktop Retry Watcher.ps1` 原来 Invoke 失败就直接 `SetCursorPos`，而 Electron 常常不支持 Invoke，所以几乎每次都动鼠标。现在顺序是：InvokePattern → LegacyIAccessiblePattern.DoDefaultAction → 才用鼠标。用鼠标前先 `Test-MouseParked`（间隔 120ms 采样两次，位置一致才算空闲）；鼠标在用就 `continue` 并 emit `{"type":"skipped"}`，连续 10 次都忙才强制点（仍然还原位置）。点完 `SetCursorPos` 回原位。新增 `GetCursorPos` 到 Add-Type。
+2. **通知轰炸**。会话监视器里新增 `capacityRetrySilence`（Map，定义在 `maybeWarnContextPressure` 之前，**必须在 vm 测试切片范围内**，见下方约束）：`capacityFailure && config.desktopRetryAutoClick === true` 时静默，累计次数；超过 `config.desktopRetryQuietMinutes`（默认 10，1–120）才发一条汇总。任务成功/其他失败时 `capacityRetrySilence.delete(threadId)`。
+3. **渠道选择成本**。`webhook-notify.mjs` 的 `KINDS` 每项补 `howto` / `limit` / 可选 `recommend`；`dashboard.html` 的 `WEBHOOK_KINDS` 同步补一份（有测试断言两边 id 一致）。网页提供「各渠道怎么选」对比表 + 选中渠道后显示限制与详细步骤。
+4. **状态可查**：`desktopRetryStatusText()`（server.mjs）供飞书「自动重试」「状态」使用；`state.lastMethod` / `state.skipped` 由 `applyDesktopRetryEvent()`（已导出，便于单测）写入。
+
+另外新增「对话收尾」：`server.mjs` 顶层 `export const HANDOFF_PROMPT`，页面渲染时替换 `dashboard.html` 里的 `HANDOFF_PROMPT_TEXT`（页面用 `typeof HANDOFF_PROMPT_TEXT==='string'?...:''` 兜底，避免直接打开 html 时整段脚本报错）。飞书命令「交接提示词 / 收尾」。**上下文水位只提醒，不自动插话**——自动往对话里发指令可能打断正在跑的任务，这个决定不要轻易推翻。
+
+## 上一版：v1.0.16（2026-10-30）
 
 在 v1.0.15（桌面端自动重试）之上补齐三项：
 
@@ -12,7 +23,8 @@
 
 - `notify()` 里飞书失败用 `feishuError` 接住而不是直接抛，保证其他渠道照常投递；只有「飞书失败且没有任何 webhook 成功」才整体失败。
 - 现有 vm 单元测试直接切 `server.mjs` 源码片段运行，所以 `notify()` 内部**不要**调用切片范围外的函数；webhook 分发全部落在 `extraTargets.length` 判断之内（测试配置里没有 webhooks，因而不进入该分支）。
-- 新增渠道只需在 `WEBHOOK_KINDS` 加一行、在 `buildWebhookRequest()` 加一个 case，并在 `dashboard.html` 的 `WEBHOOK_KINDS` 同步一行。
+- 新增渠道只需在 `WEBHOOK_KINDS` 加一行、在 `buildWebhookRequest()` 加一个 case，并在 `dashboard.html` 的 `WEBHOOK_KINDS` 同步一行（必须同时补 `limit` 和 `howto`，有测试会检查）。
+- **会话监视器里的新状态必须声明在 `async function processCodexSessionAppend(` 之后、`async function startCodexSessionMonitor(` 之前**，`session-monitor.test.mjs` 用 vm 只切这一段，切片外的模块级变量会 ReferenceError。同理，这段代码里只能用测试上下文已提供的东西（`config`、各个 Map、`notify`、`notifyTurnResult` 等），不要调 `desktopRetryState()` 这类切片外的函数。
 
 96 项测试通过。真机验收仍待：下次容量错误时自动点重试、以及首次配置真实渠道时发一条测试。
 

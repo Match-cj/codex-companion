@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { desktopRetryEnabled, desktopTakeoverAllowed, desktopRetryCooldownSeconds, parseDesktopRetryLine } from '../desktop-retry.mjs';
+import { desktopRetryEnabled, desktopTakeoverAllowed, desktopRetryCooldownSeconds, parseDesktopRetryLine, applyDesktopRetryEvent, desktopRetryState } from '../desktop-retry.mjs';
 const widget = fs.readFileSync(new URL('../Quota Widget WPF.ps1', import.meta.url), 'utf8');
 
 test('desktop retry stays off unless explicitly enabled on Windows', () => {
@@ -36,6 +36,24 @@ test('watcher output lines are parsed defensively', () => {
   assert.equal(parseDesktopRetryLine('not json'), null);
   assert.equal(parseDesktopRetryLine(''), null);
   assert.equal(parseDesktopRetryLine('{"noType":1}'), null);
+});
+
+test('the watcher reports how it clicked, so a mouse fallback is never silent', () => {
+  const before = desktopRetryState();
+  applyDesktopRetryEvent({ type: 'hit', window: 'Codex', method: 'mouse' });
+  assert.equal(desktopRetryState().lastMethod, 'mouse');
+  applyDesktopRetryEvent({ type: 'hit', window: 'Codex', method: 'invoke' });
+  assert.equal(desktopRetryState().lastMethod, 'invoke');
+  assert.equal(desktopRetryState().hits, before.hits + 2);
+});
+
+test('skipped clicks (user is using the mouse) are counted, not treated as hits', () => {
+  const before = desktopRetryState();
+  applyDesktopRetryEvent({ type: 'skipped', reason: 'mouse-in-use' });
+  const after = desktopRetryState();
+  assert.equal(after.skipped, before.skipped + 1);
+  assert.equal(after.hits, before.hits);
+  assert.equal(after.lastError, before.lastError);
 });
 
 test('floating window exposes the retry switch through the same config field', () => {

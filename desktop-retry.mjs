@@ -22,6 +22,8 @@ const state = {
   hits: 0,
   lastHitAt: 0,
   lastWindow: '',
+  lastMethod: '',
+  skipped: 0,
   lastError: '',
 };
 
@@ -63,15 +65,24 @@ export function desktopRetryState() {
   return { ...state };
 }
 
-function applyEvent(payload) {
-  if (!payload) return;
+export function applyDesktopRetryEvent(payload) {
+  if (!payload) return desktopRetryState();
   if (payload.type === 'hit') {
     state.hits += 1;
     state.lastHitAt = Date.now();
     state.lastWindow = String(payload.window || '').slice(0, 80);
+    state.lastMethod = String(payload.method || '').slice(0, 20);
+    return;
+  }
+  // "mouse" means the button refused UI Automation, so the pointer had to be
+  // used (and restored). Worth showing: it is the only case that can disturb
+  // the user, and it tells us the client changed its UI.
+  if (payload.type === 'skipped') {
+    state.skipped += 1;
     return;
   }
   if (payload.type === 'error') state.lastError = String(payload.message || '').slice(0, 200);
+  return desktopRetryState();
 }
 
 export function startDesktopRetryWatcher(config = {}) {
@@ -100,7 +111,7 @@ export function startDesktopRetryWatcher(config = {}) {
     buffer += chunk.toString('utf8');
     const lines = buffer.split(/\r?\n/);
     buffer = lines.pop() || '';
-    for (const line of lines) applyEvent(parseDesktopRetryLine(line));
+    for (const line of lines) applyDesktopRetryEvent(parseDesktopRetryLine(line));
   });
   child.stderr.on('data', chunk => {
     const text = String(chunk).trim();

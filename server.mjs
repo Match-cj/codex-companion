@@ -21,7 +21,7 @@ import { contextWarning, contextRatio, formatTokenCount, trimContextLedger } fro
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '1.0.16';
+const APP_VERSION = '1.0.17';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -37,6 +37,10 @@ const sourceDir = path.dirname(fileURLToPath(import.meta.url));
 const widgetScriptPath = path.join(sourceDir, 'Quota Widget WPF.ps1');
 const widgetLauncherPath = path.join(sourceDir, 'Launch Quota Widget.vbs');
 const dashboardHtml = await fs.readFile(new URL('./dashboard.html', import.meta.url), 'utf8');
+// The handoff wording lives in one place: the page shows it and Feishu can send
+// it, so the two can never drift apart.
+export const HANDOFF_PROMPT = '请把当前对话做一次收尾交接，只输出这份摘要，不要改动任何文件、不要继续做新任务：\n1. 已完成的工作（按改动的文件或模块列要点）\n2. 关键决策与约定（技术选型、命名规则、不能动的地方）\n3. 未完成事项与下一步\n4. 新对话需要知道的背景（当前进度、卡在哪）\n用中文，控制在 400 字以内。';
+const dashboardPage = dashboardHtml.replace('HANDOFF_PROMPT_TEXT', JSON.stringify(HANDOFF_PROMPT));
 const defaultConfig = {
   port: 17841,
   remoteAccessEnabled: false,
@@ -64,6 +68,7 @@ const defaultConfig = {
   autoTakeoverDesktopTransient: true,
   desktopRetryAutoClick: false,
   desktopRetryCooldownSeconds: 8,
+  desktopRetryQuietMinutes: 10,
   webhooks: [],
   contextPressureLedger: {},
   autoFallbackModel: '',
@@ -119,6 +124,7 @@ function publicConfig() {
     autoTakeoverDesktopTransient: config.autoTakeoverDesktopTransient !== false,
     desktopRetryAutoClick: config.desktopRetryAutoClick === true,
     desktopRetryCooldownSeconds: Number(config.desktopRetryCooldownSeconds || 8),
+    desktopRetryQuietMinutes: Number(config.desktopRetryQuietMinutes || 10),
     feishuImageRelayEnabled: !!config.feishuImageRelayEnabled, feishuImageRelayRoot: config.feishuImageRelayRoot || '',
     webhooks: publicWebhooks() };
 }
@@ -1044,13 +1050,35 @@ function feishuRunningCount() {
 function feishuMenuText() {
   const takeover = desktopTakeoverAllowed(config) ? '开启' : '关闭';
   const retry = desktopRetryState();
-  return `Codex Tools 手机菜单\n\n自动重试：${retry.enabled ? '开启' : '关闭'}${retry.enabled ? `（已点击 ${retry.hits} 次）` : ''}\n自动接管：${takeover}\n运行中对话：${feishuRunningCount()} 个\n\n可直接回复下面的命令：\n· 自动重试 开启\n· 自动重试 关闭\n· 自动接管 开启\n· 自动接管 关闭\n· 状态\n· 刷新额度\n· 绑定最近对话\n· 新话题\n\n说明：自动重试只是按下桌面端自己的重试按钮，不改对话、不换模型；它开启时自动接管不再转入后台。`;
+  return `Codex Tools 手机菜单\n\n自动重试：${retry.enabled ? '开启' : '关闭'}${retry.enabled ? `（已点击 ${retry.hits} 次）` : ''}\n自动接管：${takeover}\n运行中对话：${feishuRunningCount()} 个\n\n可直接回复下面的命令：\n· 自动重试 开启\n· 自动重试 关闭\n· 自动接管 开启\n· 自动接管 关闭\n· 状态\n· 自动重试（查状态）\n· 交接提示词\n· 刷新额度\n· 绑定最近对话\n· 新话题\n\n说明：自动重试只是按下桌面端自己的重试按钮，不改对话、不换模型；它开启时自动接管不再转入后台。`;
+}
+
+function desktopRetryStatusText() {
+  const retry = desktopRetryState();
+  const lines = [`自动重试：${retry.enabled ? '开启' : '关闭'}`];
+  if (!retry.supported) return `${lines[0]}\n\n这个功能只在 Windows 桌面端可用。`;
+  if (retry.enabled) {
+    lines.push(`后台监视器：${retry.running ? '运行中' : '没在跑（可能刚启动或被关掉了）'}`);
+    lines.push(`已自动点击：${retry.hits} 次`);
+    if (retry.lastHitAt) lines.push(`最近一次：${new Date(retry.lastHitAt).toLocaleString('zh-CN', { hour12: false })}`);
+    if (retry.lastMethod) lines.push(`点击方式：${retry.lastMethod === 'mouse' ? '鼠标（用完已放回原位）' : '系统消息，不动鼠标'}`);
+    if (retry.skipped) lines.push(`因为你在用鼠标，跳过 ${retry.skipped} 次`);
+    if (retry.lastError) lines.push(`最近错误：${retry.lastError}`);
+    lines.push(`繁忙提示：已静默，每 ${Math.max(1, Math.round(Number(config.desktopRetryQuietMinutes) || 10))} 分钟最多提醒一次`);
+  }
+  return lines.join('\n');
 }
 
 async function handleFeishuControlCommand(text, message) {
   const command = String(text || '').trim().replace(/[：:]/g, ' ');
   if (/^(菜单|menu|设置|帮助|help)$/i.test(command)) {
     await sendFeishuAppText(feishuMenuText(), { replyTo: message.message_id });
+    return true;
+  }
+  // "自动重试" on its own is a question, not a command: people mostly want to
+  // know whether it is still watching before they trust it.
+  if (/^(自动重试|重试|点重试)\s*(状态|情况|怎么样|status)?$/i.test(command)) {
+    await sendFeishuAppText(`${desktopRetryStatusText()}\n\n${feishuMenuText()}`, { replyTo: message.message_id });
     return true;
   }
   if (/^(自动重试|重试|点重试)\s*(开启|打开|开|on)$/i.test(command)) {
@@ -1084,7 +1112,11 @@ async function handleFeishuControlCommand(text, message) {
     return true;
   }
   if (/^(状态|status)$/i.test(command)) {
-    await sendFeishuAppText(`Codex Tools 当前状态\n\n自动重试：${desktopRetryState().enabled ? '开启' : '关闭'}\n自动接管：${desktopTakeoverAllowed(config) ? '开启' : '关闭'}\n运行中对话：${feishuRunningCount()} 个\n当前账号：${accounts.find(account => account.is_active)?.display_name || accounts.find(account => account.is_active)?.name || '未识别'}\n\n${feishuMenuText()}`, { replyTo: message.message_id });
+    await sendFeishuAppText(`Codex Tools 当前状态\n\n${desktopRetryStatusText()}\n自动接管：${desktopTakeoverAllowed(config) ? '开启' : '关闭'}\n运行中对话：${feishuRunningCount()} 个\n当前账号：${accounts.find(account => account.is_active)?.display_name || accounts.find(account => account.is_active)?.name || '未识别'}\n\n${feishuMenuText()}`, { replyTo: message.message_id });
+    return true;
+  }
+  if (/^(交接提示词|交接摘要|收尾提示词|收尾)$/i.test(command)) {
+    await sendFeishuAppText(`${HANDOFF_PROMPT}\n\n把它粘到 Codex 里，它会输出一份交接摘要；把摘要复制出来，新建对话粘进去就能接着干。`, { replyTo: message.message_id });
     return true;
   }
   if (/^(刷新额度|额度|quota)$/i.test(command)) {
@@ -2767,6 +2799,28 @@ async function processCodexSessionAppend(file) {
       }
       const capacityFailure = /selected model is at capacity|model is temporarily unavailable/i.test(eventText);
       const takeoverKey = `${file}:${turnId}`;
+      // The watcher is already pressing Retry on the user's behalf, so a
+      // capacity failure is the normal state, not news. Stay quiet and only
+      // speak up when it has been stuck for a while.
+      if (capacityFailure && config.desktopRetryAutoClick === true) {
+        const silenceKey = String(threadId);
+        const quietMs = Math.min(120, Math.max(1, Number(config.desktopRetryQuietMinutes) || 10)) * 60000;
+        const seen = capacityRetrySilence.get(silenceKey);
+        const nowMs = Date.now();
+        if (!seen) {
+          capacityRetrySilence.set(silenceKey, { firstAt: nowMs, count: 1, notifiedAt: 0 });
+        } else {
+          seen.count += 1;
+          if (nowMs - seen.firstAt >= quietMs) {
+            seen.firstAt = nowMs;
+            seen.notifiedAt = nowMs;
+            await notify(`Codex 还在排队，已自动重试 ${seen.count} 次\n对话：${threadId}\n\n服务端仍然繁忙，但额度没有问题。它会在有空位时自动继续，你不用管；等这一轮真正跑完我再通知你。\n（每 ${Math.round(quietMs / 60000)} 分钟最多提醒一次）`, { appName: 'Codex 任务', taskId: threadId });
+          }
+        }
+        maybeWarnContextPressure(threadId).catch(error => console.error('[context pressure]', error.message));
+        continue;
+      }
+      capacityRetrySilence.delete(String(threadId));
       if (capacityFailure && desktopTakeoverAllowed(config) && !desktopTakeoverIds().includes(String(threadId)) && !codexSessionAutoTakeovers.has(takeoverKey) && !codexSessionAutoTakeoverThreads.has(String(threadId))) {
         codexSessionAutoTakeovers.add(takeoverKey);
         codexSessionAutoTakeoverThreads.add(String(threadId));
@@ -2802,6 +2856,10 @@ async function processCodexSessionAppend(file) {
     }
   } catch (error) { console.error('[codex session monitor]', error.message); }
 }
+
+// While the desktop watcher is pressing Retry for the user, a capacity failure
+// is expected noise - one notification per retry would bury everything else.
+const capacityRetrySilence = new Map();
 
 async function maybeWarnContextPressure(threadId) {
   const stats = codexSessionContextStats.get(String(threadId));
@@ -3089,7 +3147,7 @@ async function api(u,o={}){let r=await fetch(u,{headers:{'Content-Type':'applica
 async function handle(req, res) {
   if (req.method === 'GET' && req.url === '/api/health') return send(res, 200, { ok: true, version: APP_VERSION });
   // Static login page contains no account data; every data/control API is gated.
-  if (req.method === 'GET' && req.url === '/') return send(res, 200, dashboardHtml, 'text/html; charset=utf-8');
+  if (req.method === 'GET' && req.url === '/') return send(res, 200, dashboardPage, 'text/html; charset=utf-8');
   const accessError = requestAccessError(req);
   if (accessError) return send(res, 401, { error: accessError });
   const u = new URL(req.url, `http://${req.headers.host}`);
@@ -3129,7 +3187,7 @@ async function handle(req, res) {
       const result=await rotateFeishuTopic(String(data.taskId||''));
       return send(res,200,{...result,message:'旧话题已保留；这个对话的下一条结果会创建新的话题。'});
     }
-    if (req.method==='GET'&&u.pathname==='/') return send(res,200,dashboardHtml,'text/html; charset=utf-8');
+    if (req.method==='GET'&&u.pathname==='/') return send(res,200,dashboardPage,'text/html; charset=utf-8');
     if (req.method==='GET'&&u.pathname==='/api/status'){
       const nets = os.networkInterfaces();
       const addrs = [];
@@ -3338,6 +3396,7 @@ async function handle(req, res) {
       if(typeof data.autoTakeoverDesktopTransient==='boolean') config.autoTakeoverDesktopTransient=data.autoTakeoverDesktopTransient;
       if(typeof data.desktopRetryAutoClick==='boolean') config.desktopRetryAutoClick=data.desktopRetryAutoClick;
       if(Number.isFinite(Number(data.desktopRetryCooldownSeconds))) config.desktopRetryCooldownSeconds=Math.min(120,Math.max(3,Math.round(Number(data.desktopRetryCooldownSeconds))));
+      if(Number.isFinite(Number(data.desktopRetryQuietMinutes))) config.desktopRetryQuietMinutes=Math.min(120,Math.max(1,Math.round(Number(data.desktopRetryQuietMinutes))));
       if(['OK','THUMBSUP','DONE','CHECK'].includes(String(data.feishuContinueEmoji||'').toUpperCase())) config.feishuContinueEmoji=String(data.feishuContinueEmoji).toUpperCase();
       if(Object.hasOwn(data,'webhooks')) config.webhooks=validateWebhooks(data.webhooks)||[];
       await saveConfig();

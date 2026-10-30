@@ -4,6 +4,21 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import { KINDS, friendlyWebhookReason, buildWebhookRequest, normalizeWebhookTarget, validateWebhooks, trimBytes, isAllowedWebhookUrl, webhookBodyRejected, sendWebhook, sendWebhooks, activeWebhookTargets } from '../webhook-notify.mjs';
 
+test('every channel explains its limits and how to get the address', () => {
+  // The whole point of the comparison table: nobody should have to sign up for
+  // eight services to find out which one fits.
+  for (const kind of KINDS) {
+    assert.ok(kind.limit && kind.limit.length > 10, `${kind.id} has no limit description`);
+    assert.ok(kind.howto && kind.howto.length > 10, `${kind.id} has no setup instructions`);
+    assert.ok(kind.hint, `${kind.id} has no hint`);
+  }
+  const dashboard = fs.readFileSync(new URL('../dashboard.html', import.meta.url), 'utf8');
+  for (const kind of KINDS) {
+    assert.ok(dashboard.includes(`id:'${kind.id}'`), `dashboard is missing channel ${kind.id}`);
+  }
+  assert.match(dashboard, /webhookCompare/);
+});
+
 test('every supported channel builds a request its own API accepts', () => {
   const cases = [
     ['wecom', 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abc', '', payload => {

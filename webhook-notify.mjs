@@ -8,14 +8,62 @@
 // buildWebhookRequest. No server.mjs surgery required.
 
 export const KINDS = [
-  { id: 'wecom', label: '企业微信群机器人', hint: '群设置 → 群机器人 → 添加 → 复制 Webhook 地址', needsToken: false, maxBytes: 1800 },
-  { id: 'dingtalk', label: '钉钉群机器人', hint: '群设置 → 智能群助手 → 添加机器人 → 自定义 → 复制 Webhook 地址', needsToken: false, maxBytes: 1800 },
-  { id: 'pushplus', label: 'PushPlus（微信）', hint: 'https://www.pushplus.plus 登录后复制 token，免费 200 条/天', needsToken: true, maxBytes: 4000 },
-  { id: 'serverchan', label: 'Server酱（微信）', hint: 'https://sct.ftqq.com 登录后复制 SendKey，免费 5 条/天', needsToken: true, maxBytes: 4000 },
-  { id: 'bark', label: 'Bark（iPhone）', hint: 'Bark App 首页的推送地址，形如 https://api.day.app/你的key', needsToken: false, maxBytes: 3000 },
-  { id: 'telegram', label: 'Telegram', hint: '地址填 https://api.telegram.org/bot<token>/sendMessage，token 填 chat_id', needsToken: true, maxBytes: 4000 },
-  { id: 'discord', label: 'Discord', hint: '频道设置 → 整合 → Webhook → 复制 Webhook URL', needsToken: false, maxBytes: 1800 },
-  { id: 'custom', label: '自定义（POST JSON）', hint: '向你的地址 POST {"text":"...","title":"..."}', needsToken: false, maxBytes: 20000 },
+  {
+    id: 'wecom', label: '企业微信群机器人', recommend: true,
+    hint: '群设置 → 群机器人 → 添加 → 复制 Webhook 地址',
+    howto: '装一个企业微信 App（个人也能注册，企业名称随便填，不需要营业执照）→ 新建一个只有你自己的内部群 → 群设置 → 群机器人 → 添加 → 复制地址。大约 5 分钟。不想装 App 的话，注册后到「微信插件」用个人微信扫码绑定，消息就会转到微信。',
+    limit: '免费；每分钟 20 条，没有每日上限。缺点是要装一个 App，消息默认只在企业微信里。',
+    needsToken: false, maxBytes: 1800,
+  },
+  {
+    id: 'dingtalk', label: '钉钉群机器人',
+    hint: '群设置 → 智能群助手 → 添加机器人 → 自定义 → 复制 Webhook 地址',
+    howto: '装钉钉（个人可注册）→ 建群 → 群设置 → 智能群助手 → 添加机器人 → 自定义 → 复制地址。',
+    limit: '免费；每分钟 20 条。缺点是要装钉钉，且消息只在钉钉里。',
+    needsToken: false, maxBytes: 1800,
+  },
+  {
+    id: 'pushplus', label: 'PushPlus（微信）',
+    hint: 'https://www.pushplus.plus 登录后复制 token，免费 200 条/天',
+    howto: '打开 pushplus.plus 用微信扫码登录 → 复制首页的 token。',
+    limit: '免费 200 条/天，消息直接进微信服务号。缺点：注册后要做「真人认证」（一次性小额付费）才能正常推送，否则容易被限制。',
+    needsToken: true, maxBytes: 4000,
+  },
+  {
+    id: 'serverchan', label: 'Server酱（微信）',
+    hint: 'https://sct.ftqq.com 登录后复制 SendKey，免费 5 条/天',
+    howto: '打开 sct.ftqq.com 用微信扫码登录 → 复制 SendKey。',
+    limit: '免费版每天只有 5 条，一天几个任务就超了，只适合极低频或试用。',
+    needsToken: true, maxBytes: 4000,
+  },
+  {
+    id: 'bark', label: 'Bark（iPhone）',
+    hint: 'Bark App 首页的推送地址，形如 https://api.day.app/你的key',
+    howto: 'App Store 装 Bark → 打开 App，首页就是你的推送地址。',
+    limit: '免费、无条数限制；只有 iPhone。国内走 APNs，偶尔会慢几秒。',
+    needsToken: false, maxBytes: 3000,
+  },
+  {
+    id: 'telegram', label: 'Telegram',
+    hint: '地址填 https://api.telegram.org/bot<token>/sendMessage，token 填 chat_id',
+    howto: '找 @BotFather 建机器人拿到 token；再给 @userinfobot 发消息拿到你的 chat_id。',
+    limit: '免费、无限制；但国内需要能正常访问 Telegram。',
+    needsToken: true, maxBytes: 4000,
+  },
+  {
+    id: 'discord', label: 'Discord',
+    hint: '频道设置 → 整合 → Webhook → 复制 Webhook URL',
+    howto: '在 Discord 建一个服务器和频道 → 频道设置 → 整合 → Webhook → 新建 → 复制地址。',
+    limit: '免费、无限制；但国内需要能正常访问 Discord。',
+    needsToken: false, maxBytes: 1800,
+  },
+  {
+    id: 'custom', label: '自定义（POST JSON）',
+    hint: '向你的地址 POST {"text":"...","title":"..."}',
+    howto: '填你自己的接口地址，我们会 POST 一个 JSON：{"title":"...","text":"...","app":"Codex Companion","at":"ISO 时间"}。',
+    limit: '完全自由，可以接自己的脚本、Home Assistant、内网服务。缺点是要自己写接收端。',
+    needsToken: false, maxBytes: 20000,
+  },
 ];
 
 const KIND_IDS = new Set(KINDS.map(kind => kind.id));

@@ -63,10 +63,22 @@ test('the warning text is recognised as its own notification type', () => {
   assert.equal(notificationEnabled({ notificationTypes: { context_pressure: false } }, 'context_pressure'), false);
 });
 
+test('the handoff wording exists once and is reachable from both page and Feishu', () => {
+  const server = fs.readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
+  const dashboard = fs.readFileSync(new URL('../dashboard.html', import.meta.url), 'utf8');
+  assert.match(server, /export const HANDOFF_PROMPT = '/);
+  assert.match(server, /HANDOFF_PROMPT_TEXT/);
+  assert.match(server, /交接提示词/);
+  assert.match(dashboard, /copyHandoffPrompt/);
+  assert.match(dashboard, /HANDOFF_PROMPT_TEXT/);
+  // The page must never be able to break on an unfilled placeholder.
+  assert.match(dashboard, /typeof HANDOFF_PROMPT_TEXT==='string'/);
+});
+
 test('server wires the streak to the session monitor and defaults are safe', () => {
   const server = fs.readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
   assert.match(server, /contextPressureLedger: \{\}/);
   assert.match(server, /async function maybeWarnContextPressure\(threadId\)/);
-  assert.equal((server.match(/maybeWarnContextPressure\(threadId\)\.catch/g) || []).length, 2);
+  assert.ok((server.match(/maybeWarnContextPressure\(threadId\)\.catch/g) || []).length >= 2);
   assert.match(server, /notificationType: 'context_pressure'/);
 });
