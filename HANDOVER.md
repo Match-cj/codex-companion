@@ -1,6 +1,28 @@
 # Codex Companion 交接文档
 
-## 最新状态：v1.0.17（2026-10-30）
+## 最新状态：v1.0.18（2026-10-30）
+
+**`server.mjs` 拆分第一批已完成**（这是本轮主要工作）：
+
+| 新模块 | 内容 | 行数 |
+|---|---|---|
+| `human-error.mjs` | `humanError()`——错误翻译成人话 | ~22 |
+| `desktop-client.mjs` | 桌面端/浮窗的进程管理（`closeCodexDesktop`、`codexDesktopPids`、`isCodexDesktopRunning`、`launchCodexDesktop`、`execPowershellShort`、`isQuotaWidgetRunning`、`findQuotaWidgetWindow`、`focusQuotaWidgetWindow`、`killQuotaWidgetProcesses`、`openQuotaWidget`、`codexLaunch`、`WIDGET_*`） | ~150 |
+| `device-login.mjs` | `DeviceLoginSession` 类 | ~95 |
+
+`server.mjs`：**3594 → 3369 行**，100 项测试全过，功能与界面零变化。做法是用 import 把同名函数引回来，调用点一行没改。
+
+**拆分的硬约束（后面接手务必先看这段）**：12 个测试用 `vm.runInContext(source.slice(起, 止))` 直接执行 `server.mjs` 的**源码文本**（activity / browser-login / feishu-menu / image-relay / notification-settings / quota-query / quota-reset / security / session-monitor / task-control / topic-lifecycle / webhook-notify）。所以：
+
+- **不能重排、不能重命名**这些函数，否则 `indexOf` 定位会错位或找不到。
+- 把某块搬走前，先确认它不在任何切片区间内；搬走后必须跑全量测试确认。
+- 已被切片覆盖的大块（路由 `handle`、会话监视、飞书、额度、账号库）要搬走，必须**同步把对应测试改成 import 新模块**，这属于下一批工作，不要在第一批里顺手做。
+
+**下一批建议顺序**（按耦合从低到高）：① `oauthPortStatus` + `decodeJwtPayload`/`jwtExpiry` → `auth-utils.mjs`；② `IsolatedUsageSession` + 预热 → `native-usage.mjs`；③ 账号库（依赖 `config`/`readJson`/`queueNativeVaultWrite`，建议先抽 `app-paths.mjs` 统一路径常量）；④ 最后才是路由和会话监视（要改测试）。
+
+另外：自动重试命中时会记录 `windowState`（`Minimized`/`Normal`），网页显示「点击时窗口：最小化也能点到」——用来回答"窗口最小化后还能不能自动点"。
+
+## 上一版：v1.0.17（2026-10-30）
 
 真机验收后按用户反馈修的四点（都改在 v1.0.16 的基础上）：
 

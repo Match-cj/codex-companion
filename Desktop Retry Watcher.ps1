@@ -164,7 +164,12 @@ while (ParentAlive) {
           }
         }
         $skipStreak = 0
-        Emit @{ type = 'hit'; at = (Get-Date).ToUniversalTime().ToString('o'); window = $window.Current.Name; proc = $procName; method = $method }
+        # Report whether the client was on screen at all. If hits keep arriving
+        # while it says Minimized, we know the click works without the user
+        # having to keep the window open.
+        $windowState = ''
+        try { $windowState = [string]$window.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern).Current.WindowVisualState } catch { }
+        Emit @{ type = 'hit'; at = (Get-Date).ToUniversalTime().ToString('o'); window = $window.Current.Name; proc = $procName; method = $method; windowState = $windowState }
         Start-Sleep -Seconds $CooldownSeconds
       }
     }

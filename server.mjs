@@ -18,10 +18,13 @@ import { recoverReplyTarget } from './feishu-reply-recovery.mjs';
 import { desktopRetryState, desktopTakeoverAllowed, syncDesktopRetryWatcher, startDesktopRetryWatcher, stopDesktopRetryWatcher } from './desktop-retry.mjs';
 import { validateWebhooks, activeWebhookTargets, sendWebhooks, kindLabel as webhookKindLabel, friendlyWebhookReason } from './webhook-notify.mjs';
 import { contextWarning, contextRatio, formatTokenCount, trimContextLedger } from './context-budget.mjs';
+import { humanError } from './human-error.mjs';
+import { DeviceLoginSession } from './device-login.mjs';
+import { codexLaunch, closeCodexDesktop, codexDesktopPids, isCodexDesktopRunning, launchCodexDesktop, execPowershellShort, isQuotaWidgetRunning, findQuotaWidgetWindow, focusQuotaWidgetWindow, killQuotaWidgetProcesses, openQuotaWidget } from './desktop-client.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '1.0.17';
+const APP_VERSION = '1.0.18';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -327,21 +330,6 @@ async function readWidgetSwitchTrace() {
     return lines.map(line => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
   } catch { return []; }
 }
-function humanError(error) {
-  const message = String(error?.message || error || '未知错误');
-  if (/invalid refresh token|token refresh|refresh token|token.{0,30}(expired|revoked)|token_expired|token_revoked|unauthorized|401\b/i.test(message)) return '这个账号的登录已经失效，请在 Companion 网页中重新登录后再刷新。';
-  if (message.startsWith('测试发送失败')) return message;
-  if (message.includes('ECONNREFUSED') || message.includes('fetch failed')) return '连接不上本地服务，请确认 Codex Companion 正在运行。';
-  if (/failed to fetch codex rate limits|error sending request for url.*(?:chatgpt\.com|openai\.com)/i.test(message)) return '额度刷新失败：当前网络或系统代理无法连接 OpenAI 额度接口。页面显示的是上一次成功读取的缓存额度；请检查代理/网络后点击“立即刷新”，这不是额度已耗尽。';
-  if (message.includes('ENOENT')) return '找不到需要启动的程序，请确认 Codex CLI 已正确安装。';
-  if (message.includes('超时')) return 'Codex 两分钟没有回应。任务可能卡住了，请稍后重试或重启 Companion。';
-  if (/stream disconnected|stream closed before response\.completed|connection reset|socket hang up/i.test(message)) return 'Codex 连接在回复完成前中断了。请确认本机代理/网络正常后，再回复“继续”；本次没有消耗新的任务内容。';
-  if (message.includes('有任务正在运行')) return message;
-  if (message.includes('Webhook')) return message;
-  if (message.includes('HTTP 400')) return '账号或请求信息已经失效，请刷新账号；如果仍失败，请在 Companion 网页中重新登录。';
-  if (message.includes('Country, region, or territory not supported') || message.includes('unsupported_country_region_territory')) return '登录网页已经通过，但后台没有走浏览器正在使用的代理线路。Companion 会改用系统代理重试；如果仍失败，请确认代理软件正在运行。';
-  return `操作没有完成：${message}`;
-}
 function validFeishuWebhook(value) {
   try {
     const url = new URL(value);
@@ -386,222 +374,10 @@ $switcherPorts = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyConti
   } else result.bindable = { ok: false, code: 'IN_USE' };
   return result;
 }
-async function closeCodexDesktop() {
-  if (process.platform !== 'win32') return { stopped: 0 };
-  const before = await codexDesktopPids();
-  if (!before.length) return { stopped: 0 };
-  try {
-    await execFileAsync('taskkill.exe', ['/IM', 'ChatGPT.exe', '/T', '/F'], { windowsHide: true, encoding: 'utf8', timeout: 20000 });
-  } catch (error) {
-    // taskkill may return a non-zero code when one child exits while the process tree is being closed.
-    console.warn('[account switch] taskkill returned:', humanError(error));
-  }
-  const deadline = Date.now() + 15000;
-  let remaining = await codexDesktopPids();
-  while (remaining.length && Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, 300));
-    remaining = await codexDesktopPids();
-  }
-  if (remaining.length) throw Error(`ChatGPT/Codex 没有完全关闭（仍有 ${remaining.length} 个进程），账号尚未切换。请手动退出客户端后重试。`);
-  return { stopped: before.length };
-}
-async function codexDesktopPids() {
-  if (process.platform !== 'win32') return [];
-  const script = `@(Get-CimInstance Win32_Process -Filter "Name='ChatGPT.exe'" | Select-Object -ExpandProperty ProcessId) | ConvertTo-Json -Compress`;
-  try {
-    const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-Command', script], { windowsHide: true, encoding: 'utf8' });
-    const value = JSON.parse(stdout.trim() || '[]');
-    return (Array.isArray(value) ? value : value ? [value] : []).map(Number).filter(Number.isFinite);
-  } catch { return []; }
-}
-async function isCodexDesktopRunning() {
-  return (await codexDesktopPids()).length > 0;
-}
-function launchCodexDesktop() {
-  if (process.platform !== 'win32') return;
-  spawn('explorer.exe', ['shell:AppsFolder\\OpenAI.Codex_2p2nqsd0c76g0!App'], { detached: true, windowsHide: true, stdio: 'ignore' }).unref();
-}
-const WIDGET_MUTEX_NAME = 'Global\\CodexCompanionQuotaWidget_v5';
-const WIDGET_WINDOW_TITLE = 'Codex Companion 额度浮窗';
-
-async function execPowershellShort(script) {
-  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-Command', script], { windowsHide: true, encoding: 'utf8' });
-  return stdout.trim();
-}
-
-async function isQuotaWidgetRunning() {
-  if (process.platform !== 'win32') return false;
-  const script = `try { $m = [System.Threading.Mutex]::OpenExisting('${WIDGET_MUTEX_NAME}'); if ($m -and $m.WaitOne(0, $false)) { $m.ReleaseMutex(); 'false' } else { 'true' } } catch { 'false' }`;
-  try {
-    const result = await execPowershellShort(script);
-    return result === 'true';
-  } catch { return false; }
-}
-
-async function findQuotaWidgetWindow() {
-  if (process.platform !== 'win32') return null;
-  const script = `Add-Type -TypeDefinition @\"
-using System; using System.Runtime.InteropServices;
-public class WidgetWindowFinder {
-  [DllImport(\"user32.dll\", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
-  [DllImport(\"user32.dll\")] public static extern bool IsWindow(IntPtr hWnd);
-  [DllImport(\"user32.dll\")] public static extern bool IsWindowVisible(IntPtr hWnd);
-}
-\"@; $hwnd = [WidgetWindowFinder]::FindWindow($null, '${WIDGET_WINDOW_TITLE}'); if ($hwnd -eq [IntPtr]::Zero) { 'null' } elseif ([WidgetWindowFinder]::IsWindowVisible($hwnd)) { @{ visible = $true; hwnd = $hwnd.ToInt64() } | ConvertTo-Json -Compress } else { @{ visible = $false; hwnd = $hwnd.ToInt64() } | ConvertTo-Json -Compress }`;
-  try {
-    const result = await execPowershellShort(script);
-    if (!result || result === 'null') return null;
-    return JSON.parse(result);
-  } catch { return null; }
-}
-
-async function focusQuotaWidgetWindow(hwnd) {
-  if (process.platform !== 'win32' || !hwnd) return false;
-  const script = `Add-Type -TypeDefinition @\"
-using System; using System.Runtime.InteropServices;
-public class WidgetWindowFocus {
-  [DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-  [DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-  [DllImport(\"user32.dll\")] public static extern bool BringWindowToTop(IntPtr hWnd);
-}
-\"@; $hwnd = [IntPtr]${hwnd}; [WidgetWindowFocus]::ShowWindow($hwnd, 9) | Out-Null; [WidgetWindowFocus]::BringWindowToTop($hwnd) | Out-Null; [WidgetWindowFocus]::SetForegroundWindow($hwnd) | Out-Null; 'ok'`;
-  try {
-    const result = await execPowershellShort(script);
-    return result === 'ok';
-  } catch { return false; }
-}
-
-async function killQuotaWidgetProcesses() {
-  if (process.platform !== 'win32') return;
-  const script = `Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" | Where-Object { $_.CommandLine -like '*CodexCompanion\\Quota Widget WPF.ps1*' } | Stop-Process -Force -ErrorAction SilentlyContinue; Get-CimInstance Win32_Process -Filter \"Name='wscript.exe'\" | Where-Object { $_.CommandLine -like '*Launch Quota Widget*' } | Stop-Process -Force -ErrorAction SilentlyContinue;`;
-  try { await execPowershellShort(script); } catch {}
-}
-
-let widgetOpenLock = false;
-async function openQuotaWidget() {
-  if (process.platform !== 'win32' || !existsSync(widgetScriptPath) || !existsSync(widgetLauncherPath)) throw Error('没有找到额度浮窗文件，请重新解压完整的 Companion。');
-  if (widgetOpenLock) return { ok: true, alreadyOpen: true, message: '正在处理中，请稍候。' };
-  widgetOpenLock = true;
-  try {
-    const running = await isQuotaWidgetRunning();
-    if (running) {
-      const win = await findQuotaWidgetWindow();
-      if (win) await focusQuotaWidgetWindow(win.hwnd);
-      return { ok: true, alreadyOpen: true, message: '额度浮窗已经在运行，并已置顶。' };
-    }
-    const child = spawn('wscript.exe', [widgetLauncherPath], { detached: true, windowsHide: true, stdio: 'ignore' });
-    child.on('error', (err) => { console.error('[widget] spawn failed:', err.message); });
-    child.unref();
-    return { ok: true, alreadyOpen: false };
-  } finally {
-    setTimeout(() => { widgetOpenLock = false; }, 2000);
-  }
-}
-
-function codexLaunch() {
-  if (process.platform === 'win32') {
-    const portableCodex = path.join(sourceDir, 'runtime', 'codex', 'bin', 'codex.exe');
-    if (existsSync(portableCodex)) return { command: portableCodex, args: ['app-server', '--stdio'] };
-    // APPDATA is sometimes unset (e.g. when launched from a non-cmd shell); fall back to USERPROFILE.
-    const appData = process.env.APPDATA
-      || (process.env.USERPROFILE ? path.join(process.env.USERPROFILE, 'AppData', 'Roaming') : '');
-    const codexScript = appData ? path.join(appData, 'npm', 'node_modules', '@openai', 'codex', 'bin', 'codex.js') : '';
-    if (codexScript && existsSync(codexScript)) {
-      return { command: process.execPath, args: [codexScript, 'app-server', '--stdio'] };
-    }
-    // npm installs codex as a .cmd shim; spawn() can't exec a .cmd without a shell, so route through cmd.exe.
-    const codexCmd = appData ? path.join(appData, 'npm', 'codex.cmd') : '';
-    if (codexCmd && existsSync(codexCmd)) {
-      return { command: 'cmd.exe', args: ['/d', '/s', '/c', `"${codexCmd}" app-server --stdio`] };
-    }
-  }
-  return { command: 'codex', args: ['app-server', '--stdio'] };
-}
-
-class DeviceLoginSession {
-  constructor(name = '') {
-    this.name = String(name || '').trim();
-    this.id = randomUUID();
-    this.home = path.join(appDir, 'device-login', this.id);
-    this.pending = new Map();
-    this.nextId = 0;
-    this.proc = null;
-    this.loginId = null;
-    this.state = { status: 'starting', message: '正在生成安全登录码……' };
-  }
-  publicState() { return { ...this.state, loginId: this.loginId }; }
-  async start() {
-    await fs.mkdir(this.home, { recursive: true });
-    const { command, args } = codexLaunch();
-    this.proc = spawn(command, args, { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, CODEX_HOME: this.home } });
-    this.proc.stdout.setEncoding('utf8');
-    let buffer = '';
-    this.proc.stdout.on('data', chunk => { buffer += chunk; const lines = buffer.split(/\r?\n/); buffer = lines.pop() || ''; for (const line of lines) this.receive(line); });
-    this.proc.stderr.on('data', data => console.error('[device login]', String(data).trim()));
-    this.proc.on('exit', code => {
-      if (['starting', 'waiting'].includes(this.state.status)) this.state = { status: 'failed', message: `登录服务意外结束（代码 ${code ?? '-'}），请重试。` };
-    });
-    await this.request('initialize', { clientInfo: { name: 'codex_companion_login', title: 'Codex Companion Login', version: '0.1.7' } });
-    this.send({ method: 'initialized', params: {} });
-    const result = await this.request('account/login/start', { type: 'chatgptDeviceCode' });
-    if (result?.type !== 'chatgptDeviceCode') throw Error('Codex 没有返回设备登录码，请更新 Codex CLI 后重试。');
-    this.loginId = result.loginId;
-    this.state = { status: 'waiting', verificationUrl: result.verificationUrl, userCode: result.userCode, message: '请打开登录页并输入这个一次性代码。' };
-    return this.publicState();
-  }
-  send(value) { this.proc?.stdin.write(`${JSON.stringify(value)}\n`); }
-  request(method, params) {
-    const id = ++this.nextId;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(Error(`${method} 超时`)); }, 120000);
-      this.pending.set(id, { resolve, reject, timer });
-      this.send({ method, id, params });
-    });
-  }
-  receive(line) {
-    if (!line.trim()) return;
-    let message; try { message = JSON.parse(line); } catch { return; }
-    if (message.id !== undefined && this.pending.has(message.id)) {
-      const pending = this.pending.get(message.id); clearTimeout(pending.timer); this.pending.delete(message.id);
-      if (message.error) pending.reject(Error(message.error.message || JSON.stringify(message.error))); else pending.resolve(message.result);
-      return;
-    }
-    if (message.method === 'account/login/completed' && (!this.loginId || message.params?.loginId === this.loginId)) this.finish(message.params || {});
-  }
-  async finish(result) {
-    if (!result.success) {
-      this.state = { status: 'failed', message: `登录没有完成：${result.error || 'OpenAI 没有接受这次登录，请重试。'}` };
-      await this.cleanup(); return;
-    }
-    this.state = { status: 'importing', message: '登录成功，正在安全加入 Companion 账号库……' };
-    try {
-      const authPath = path.join(this.home, 'auth.json');
-      let contents = '';
-      for (let i = 0; i < 20 && !contents; i++) { try { contents = await fs.readFile(authPath, 'utf8'); } catch { await new Promise(resolve => setTimeout(resolve, 250)); } }
-      if (!contents) throw Error('登录已通过，但没有找到账号凭据。请重试。');
-      const imported = await importOrUpdateAccount(contents, this.name);
-      this.state = { status: 'completed', accountName: imported?.name || imported?.email || this.name || '新账号', message: imported?.updated ? '原有账号的登录已经更新，可以继续使用。' : '新账号已加入账号列表，可以直接使用。' };
-    } catch (error) {
-      this.state = { status: 'failed', message: humanError(error) };
-    } finally { await this.cleanup(); }
-  }
-  async cancel() {
-    try { if (this.loginId) await this.request('account/login/cancel', { loginId: this.loginId }); } catch {}
-    this.state = { status: 'canceled', message: '已取消这次登录。' };
-    await this.cleanup();
-  }
-  async cleanup() {
-    try { this.proc?.kill(); } catch {}
-    const root = path.resolve(appDir, 'device-login') + path.sep;
-    const target = path.resolve(this.home);
-    if (target.startsWith(root)) await fs.rm(target, { recursive: true, force: true }).catch(() => {});
-  }
-}
-
 async function startDeviceLogin(name) {
   if (deviceLogin && ['starting', 'waiting', 'importing'].includes(deviceLogin.state.status)) return deviceLogin.publicState();
   if (loginBusy()) throw Error('还有 Companion 任务正在运行或等待确认。请先处理任务，再登录或更新账号。');
-  deviceLogin = new DeviceLoginSession(name);
+  deviceLogin = new DeviceLoginSession(name, { homeRoot: appDir, importAccount: (contents, name) => importOrUpdateAccount(contents, name) });
   try { return await deviceLogin.start(); }
   catch (error) { deviceLogin.state = { status: 'failed', message: humanError(error) }; await deviceLogin.cleanup(); throw error; }
 }

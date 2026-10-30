@@ -23,6 +23,7 @@ const state = {
   lastHitAt: 0,
   lastWindow: '',
   lastMethod: '',
+  lastWindowState: '',
   skipped: 0,
   lastError: '',
 };
@@ -72,6 +73,7 @@ export function applyDesktopRetryEvent(payload) {
     state.lastHitAt = Date.now();
     state.lastWindow = String(payload.window || '').slice(0, 80);
     state.lastMethod = String(payload.method || '').slice(0, 20);
+    state.lastWindowState = String(payload.windowState || '').slice(0, 20);
     return;
   }
   // "mouse" means the button refused UI Automation, so the pointer had to be
