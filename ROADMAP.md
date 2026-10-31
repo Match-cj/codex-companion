@@ -2,8 +2,8 @@
 
 > 目的：把产品方向、已完成事项、待办事项和验证步骤固定在仓库内。后续继续开发时，以本文件为准，不依赖聊天上下文。
 
-最后更新：2026-10-30
-当前版本：**v1.0.18**
+最后更新：2026-10-31
+当前版本：**v1.0.20**
 
 ## 本轮验收与开源推进
 
@@ -20,7 +20,9 @@
 - [x] 企业微信「应用消息」（需要 corpid/secret，可主动推给个人）作为 webhook 之外的第二种微信通道。v1.0.19 —— 单人企业微信建不了群（内部群要 3 人），应用消息是唯一能用的微信通道。
 - [ ] 观察真机：下次容量错误时确认点击方式是否为「系统消息」、鼠标是否不再被抢。
 - [x] 拆分 server.mjs 第一批：human-error / desktop-client / device-login 三个模块，3594 → 3369 行，测试全过。v1.0.18
-- [ ] 拆分第二批：auth-utils（oauthPortStatus、jwt 工具）、native-usage（IsolatedUsageSession 与预热）。
+- [x] 拆分第二批：auth-utils（oauthPortStatus、jwt 工具）、native-usage（IsolatedUsageSession 与预热）。v1.0.19 —— 3369 → 3080 行。
+- [x] 飞书消息收件箱：收到的飞书消息落盘到本机（md + jsonl），让本机 AI 无需管理员审核即可读取；网页可复制给 AI / 清空，飞书回复「收件箱」。v1.0.20
+- [ ] 通用提醒（待定，见下）：把本机 Windows 通知中心里其他应用（WorkBuddy / matchtools 等）的通知按白名单转发到手机。已验证本机通知库 `wpndatabase.db` 可只读解析（192 条：Codex 100 / matchtools 68 / WorkBuddy 22）；官方 `UserNotificationListener` 需要应用身份（MSIX），普通 exe 用不了。风险：私有格式、Windows 更新可能失效；只覆盖进通知中心的 toast，自绘弹窗抓不到。
 - [ ] 拆分第三批：先抽 app-paths.mjs，再搬账号库（upsertNativeAccount / switchNativeAccount / 备份加解密）。
 - [ ] 拆分第四批（需同步改测试）：路由 handle、会话监视、飞书、额度。改前先把对应 vm 切片测试换成 import 新模块。
 - [ ] 确认窗口最小化时自动重试是否仍然生效（看网页「点击时窗口：最小化也能点到」）。

@@ -1,6 +1,19 @@
 # Codex Companion 交接文档
 
-## 最新状态：v1.0.19（2026-10-31）
+## 最新状态：v1.0.20（2026-10-31）
+
+### 新增：飞书消息收件箱（`feishu-inbox.mjs`）
+
+**动机**：用户想让本机 AI（Codex / WorkBuddy 等）读到飞书消息，但第三方飞书连接器要企业管理员审核，一直没通过。解决办法是不走审批——Companion 自己就在收飞书消息（自建应用 + 长连接），把它落盘即可。
+
+- 落地两个文件：`%APPDATA%\CodexCompanion\feishu-inbox.jsonl`（原文）与 `feishu-inbox.md`（可读版，最新在最后，最多 200 条）。**只在本机，不上传任何地方**。
+- 模块无 Companion 状态，`createFeishuInbox({ dir })` 注入目录；写操作用 promise 串行队列，避免飞书突发消息时并发读改写丢数据。
+- 接入点：`Lark.EventDispatcher` 的 `im.message.receive_v1` 改为 `receiveFeishuMessage`（先落盘，再判断是否「收件箱」命令，最后才交给 `handleFeishuMessage`）。**这样改是为了不动 vm 测试切片**：`handleFeishuMessage` 被 `security.test.mjs` 切片覆盖，切片里没有 import 的新函数，在里面直接调会 ReferenceError。
+- 飞书命令「收件箱 / 消息 / 最近消息 / inbox」回发最近 10 条（限已绑定的操作者）。
+- 路由：`GET /api/feishu/inbox?limit=`、`POST /api/feishu/inbox/clear`。网页区块含「复制给 AI / 刷新 / 清空」。
+- 107 项测试（新增 5 项收件箱）。
+
+## 上一版：v1.0.19（2026-10-31）
 
 ### 新增：企业微信应用消息（一个人也能用的渠道）
 

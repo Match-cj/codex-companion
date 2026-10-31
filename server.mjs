@@ -19,13 +19,14 @@ import { validateWebhooks, activeWebhookTargets, sendWebhooks, kindLabel as webh
 import { contextWarning, contextRatio, formatTokenCount, trimContextLedger } from './context-budget.mjs';
 import { humanError } from './human-error.mjs';
 import { base64Url, decodeJwtPayload, jwtExpiry, oauthPortStatus } from './auth-utils.mjs';
+import { createFeishuInbox, inboxEntryFromEvent } from './feishu-inbox.mjs';
 import { createNativeUsage } from './native-usage.mjs';
 import { DeviceLoginSession } from './device-login.mjs';
 import { codexLaunch, closeCodexDesktop, codexDesktopPids, isCodexDesktopRunning, launchCodexDesktop, execPowershellShort, isQuotaWidgetRunning, findQuotaWidgetWindow, focusQuotaWidgetWindow, killQuotaWidgetProcesses, openQuotaWidget } from './desktop-client.mjs';
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '1.0.19';
+const APP_VERSION = '1.0.20';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -41,6 +42,7 @@ const sourceDir = path.dirname(fileURLToPath(import.meta.url));
 const widgetScriptPath = path.join(sourceDir, 'Quota Widget WPF.ps1');
 const widgetLauncherPath = path.join(sourceDir, 'Launch Quota Widget.vbs');
 const dashboardHtml = await fs.readFile(new URL('./dashboard.html', import.meta.url), 'utf8');
+const feishuInbox = createFeishuInbox({ dir: appDir });
 // The handoff wording lives in one place: the page shows it and Feishu can send
 // it, so the two can never drift apart.
 export const HANDOFF_PROMPT = '请把当前对话做一次收尾交接，只输出这份摘要，不要改动任何文件、不要继续做新任务：\n1. 已完成的工作（按改动的文件或模块列要点）\n2. 关键决策与约定（技术选型、命名规则、不能动的地方）\n3. 未完成事项与下一步\n4. 新对话需要知道的背景（当前进度、卡在哪）\n用中文，控制在 400 字以内。';
@@ -1135,10 +1137,35 @@ async function startFeishuLongConnection() {
     onError: error => { feishuState = { ...feishuState, state: 'failed', error: humanError(error) }; },
   });
   const dispatcher = new Lark.EventDispatcher({}).register({
-    'im.message.receive_v1': handleFeishuMessage,
+    'im.message.receive_v1': data => receiveFeishuMessage(data),
     'im.message.reaction.created_v1': handleFeishuReaction,
   });
   feishuWsClient.start({ eventDispatcher: dispatcher }).catch(error => { feishuState = { ...feishuState, state: 'failed', error: humanError(error) }; });
+}
+// Every incoming message is written to a local file before anything else
+// happens: an AI running on this PC can then read it, without waiting for a
+// Feishu admin to approve an app.
+async function receiveFeishuMessage(data) {
+  const entry = inboxEntryFromEvent(data);
+  if (entry) await feishuInbox.append(entry).catch(error => console.error('[feishu inbox]', humanError(error)));
+  if (await replyFeishuInbox(data, entry)) return;
+  return handleFeishuMessage(data);
+}
+// "收件箱" lets the phone read back what this PC received.
+async function replyFeishuInbox(data, entry) {
+  if (!/^(收件箱|消息|最近消息|inbox)$/i.test(String(entry?.text || '').trim())) return false;
+  const senderId = String(data?.sender?.sender_id?.open_id || '');
+  const allow = Array.isArray(config.feishuAllowedUserIds) ? config.feishuAllowedUserIds : [];
+  if (!allow.includes(senderId)) return false;
+  const recent = await feishuInbox.recent(10);
+  const lines = recent.length
+    ? recent.map((item, index) => {
+      const when = new Date(Number(item.at) || Date.now());
+      return `${index + 1}. ${when.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })} ${String(item.text || '').slice(0, 120)}`;
+    }).join('\n')
+    : '还没有收到任何消息。';
+  await sendFeishuAppText(`飞书消息收件箱（最近 ${recent.length} 条）\n\n${lines}\n\n完整记录在本机：${feishuInbox.paths.mdPath}`, { replyTo: entry.messageId });
+  return true;
 }
 function authFileFromSwitcherAccount(account) {
   const source = account?.auth_data || {};
@@ -2996,6 +3023,15 @@ async function handle(req, res) {
       config.notificationHistory = [];
       await saveConfig();
       return send(res, 200, { ok: true });
+    }
+    if (req.method==='GET'&&u.pathname==='/api/feishu/inbox'){
+      const limit = Math.min(Math.max(Number(u.searchParams.get('limit')) || 30, 1), 200);
+      const items = await feishuInbox.recent(limit);
+      return send(res, 200, { items, paths: feishuInbox.paths });
+    }
+    if (req.method==='POST'&&u.pathname==='/api/feishu/inbox/clear'){
+      await feishuInbox.clear();
+      return send(res, 200, { ok: true, message: '本机飞书消息收件箱已清空。' });
     }
     const m=u.pathname.match(/^\/api\/task\/([^/]+)\/(continue|stop)$/);if(req.method==='POST'&&m){const t=tasks.get(m[1]);if(!t)throw Error('任务不存在');if(m[2]==='continue')await codex.continueTask(t,String(data.text||'继续完成当前任务，并汇报结果。'));else await codex.stopTask(t);return send(res,200,{ok:true});}
     const a=u.pathname.match(/^\/api\/approval\/([^/]+)$/);if(req.method==='POST'&&a){codex.respondApproval(a[1],String(data.decision||'accept'),data.answers||{});return send(res,200,{ok:true});}
