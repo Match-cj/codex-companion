@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
-import { KINDS, friendlyWebhookReason, buildWebhookRequest, normalizeWebhookTarget, validateWebhooks, trimBytes, isAllowedWebhookUrl, webhookBodyRejected, sendWebhook, sendWebhooks, activeWebhookTargets } from '../webhook-notify.mjs';
+import { KINDS, friendlyWebhookReason, buildWebhookRequest, normalizeWebhookTarget, validateWebhooks, trimBytes, isAllowedWebhookUrl, webhookBodyRejected, sendWebhook, sendWebhooks, activeWebhookTargets, resetWecomAppTokens } from '../webhook-notify.mjs';
 
 test('every channel explains its limits and how to get the address', () => {
   // The whole point of the comparison table: nobody should have to sign up for
@@ -21,6 +21,12 @@ test('every channel explains its limits and how to get the address', () => {
 
 test('every supported channel builds a request its own API accepts', () => {
   const cases = [
+    ['wecom-app', 'https://qyapi.weixin.qq.com/cgi-bin/message/send?corpid=CORP&agentid=100&touser=me', 'SECRET', payload => {
+      assert.equal(payload.msgtype, 'text');
+      assert.equal(payload.agentid, 100);
+      assert.equal(payload.touser, 'me');
+      assert.equal(payload.text.content, 'hello');
+    }],
     ['wecom', 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abc', '', payload => {
       assert.equal(payload.msgtype, 'text');
       assert.equal(payload.text.content, 'hello');
@@ -57,9 +63,58 @@ test('every supported channel builds a request its own API accepts', () => {
   assert.deepEqual(cases.map(item => item[0]).sort(), KINDS.map(item => item.id).sort());
   for (const [kind, url, token, check] of cases) {
     const request = buildWebhookRequest({ kind, url, token }, 'hello', { title: 'T' });
-    assert.equal(request.url, url, kind);
+    // The WeCom app endpoint is only known after a token exchange, so it
+    // carries the app coordinates instead of a final URL.
+    if (kind === 'wecom-app') {
+      assert.equal(request.url, '', kind);
+      assert.equal(request.wecomApp.corpid, 'CORP');
+    } else assert.equal(request.url, url, kind);
     assert.equal(request.headers['Content-Type'], 'application/json', kind);
     check(request.body);
+  }
+});
+
+// A single-person WeCom workspace has no group to add a bot to, so app
+// messages are the only way in. They need a token exchange first.
+test('wecom app message exchanges a token once, then posts to the app endpoint', async () => {
+  const original = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async url => {
+    calls.push(String(url));
+    if (String(url).includes('gettoken')) return { ok: true, json: async () => ({ access_token: 'TK', expires_in: 7200 }) };
+    return { ok: true, json: async () => ({ errcode: 0, errmsg: 'ok' }) };
+  };
+  try {
+    const target = { id: 'a', kind: 'wecom-app', name: '应用消息', url: 'https://qyapi.weixin.qq.com/cgi-bin/message/send?corpid=CORP&agentid=100&touser=me', token: 'SECRET' };
+    const first = await sendWebhook(target, 'hello', { title: 'T' });
+    assert.equal(first.ok, true);
+    assert.equal(calls.length, 2);
+    assert.match(calls[0], /gettoken\?corpid=CORP&corpsecret=SECRET/);
+    assert.match(calls[1], /message\/send\?access_token=TK/);
+    const second = await sendWebhook(target, 'again', { title: 'T' });
+    assert.equal(second.ok, true);
+    assert.equal(calls.length, 3, 'cached token must not trigger another exchange');
+  } finally {
+    globalThis.fetch = original;
+    resetWecomAppTokens();
+  }
+});
+
+test('wecom app credential problems come back in plain Chinese', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async url => {
+    if (String(url).includes('gettoken')) return { ok: true, json: async () => ({ errcode: 40001, errmsg: 'invalid credential' }) };
+    return { ok: true, json: async () => ({ errcode: 0 }) };
+  };
+  try {
+    const target = { id: 'a', kind: 'wecom-app', name: '应用消息', url: 'https://qyapi.weixin.qq.com/cgi-bin/message/send?corpid=CORP&agentid=1&touser=me', token: 'BAD' };
+    const result = await sendWebhook(target, 'hello');
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /Secret/);
+    assert.doesNotMatch(result.reason, /invalid credential/);
+  } finally {
+    globalThis.fetch = original;
+    resetWecomAppTokens();
   }
 });
 

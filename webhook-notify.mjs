@@ -9,10 +9,22 @@
 
 export const KINDS = [
   {
-    id: 'wecom', label: '企业微信群机器人', recommend: true,
+    id: 'wecom-app', label: '企业微信应用消息（一个人也能用）', recommend: true,
+    hint: '地址里填 corpid / agentid / userid，密钥框填应用的 Secret',
+    howto: '① 电脑打开 work.weixin.qq.com，用手机企业微信扫码登录（企业名称随便填、行业选“其他”、人数选 1-50，不需要营业执照）。'
+      + '②「我的企业 → 企业信息」最下面复制 <b>CorpID</b>。'
+      + '③「应用管理 → 自建 → 创建应用」，随便传个图标、起个名字，创建后点进去复制 <b>AgentId</b> 和 <b>Secret</b>。'
+      + '④「通讯录」点你自己的名字，“账号”那一栏就是 <b>userid</b>（一般是手机号或拼音）。'
+      + '⑤ 回到这里：地址填 <code>https://qyapi.weixin.qq.com/cgi-bin/message/send?corpid=你的CorpID&amp;agentid=你的AgentId&amp;touser=你的userid</code>，Secret 填在“密钥”框里。'
+      + '⑥ 想用个人微信收：企业微信手机端「消息 → 微信插件」按提示开启，应用消息会转到微信。',
+    limit: '免费；<b>不需要建群，一个人也能发给自己</b>。缺点：要建一次自建应用（约 10 分钟），Secret 只存在本机，不上传。',
+    needsToken: true, maxBytes: 1800,
+  },
+  {
+    id: 'wecom', label: '企业微信群机器人',
     hint: '群设置 → 群机器人 → 添加 → 复制 Webhook 地址',
-    howto: '装一个企业微信 App（个人也能注册，企业名称随便填，不需要营业执照）→ 新建一个只有你自己的内部群 → 群设置 → 群机器人 → 添加 → 复制地址。大约 5 分钟。不想装 App 的话，注册后到「微信插件」用个人微信扫码绑定，消息就会转到微信。',
-    limit: '免费；每分钟 20 条，没有每日上限。缺点是要装一个 App，消息默认只在企业微信里。',
+    howto: '装一个企业微信 App（个人也能注册，企业名称随便填，不需要营业执照）→ 新建一个内部群 → 群设置 → 群机器人 → 添加 → 复制地址。用个人微信收：注册后在「微信插件」扫码绑定。',
+    limit: '免费；每分钟 20 条。<b>前提是你得有一个内部群：企业微信内部群至少 3 人，只有自己一个人建不了群。</b>只有自己用请选上面的“应用消息”，或直接用飞书 / Server酱。',
     needsToken: false, maxBytes: 1800,
   },
   {
@@ -166,6 +178,23 @@ export function buildWebhookRequest(target, text, opts = {}) {
       return { url, headers, body: { title, body, group: 'Codex Companion' } };
     case 'telegram':
       return { url, headers, body: { chat_id: String(target.token || ''), text: body, disable_web_page_preview: true } };
+    case 'wecom-app': {
+      // The CorpID / AgentId / userid travel in the address the user pasted;
+      // the app Secret stays in the token field and is only used to fetch a
+      // short-lived access token (never sent anywhere else).
+      const params = new URL(url).searchParams;
+      return {
+        url: '',
+        headers,
+        body: {
+          touser: String(params.get('touser') || ''),
+          msgtype: 'text',
+          agentid: Number(params.get('agentid') || 0),
+          text: { content: body },
+        },
+        wecomApp: { corpid: String(params.get('corpid') || '') },
+      };
+    }
     case 'discord':
       return { url, headers, body: { content: body } };
     default:
@@ -192,6 +221,53 @@ export function friendlyWebhookReason(reason) {
   return text;
 }
 
+// WeCom app messages need a 2-hour access token; keep one per app so a burst of
+// notifications does not re-authenticate every time.
+const WECOM_TOKEN_ENDPOINT = 'https://qyapi.weixin.qq.com/cgi-bin/gettoken';
+const WECOM_SEND_ENDPOINT = 'https://qyapi.weixin.qq.com/cgi-bin/message/send';
+const WECOM_ERRORS = {
+  40001: 'Secret 不对，或者这个应用不属于这个企业',
+  40013: 'CorpID 不对',
+  40014: 'access_token 无效',
+  41001: '缺少 access_token（一般是 Secret 填错了）',
+  45009: '企业微信接口调用太频繁，稍后再试',
+  48002: '这个应用没有权限，或 userid 不在应用可见范围里',
+  60020: 'IP 不在企业微信白名单里，请到应用设置里清空或加上本机 IP',
+};
+const wecomAppTokens = new Map();
+// Tests need a clean slate between cases.
+export function resetWecomAppTokens() { wecomAppTokens.clear(); }
+
+function wecomAppError(payload, fallback) {
+  const code = Number(payload?.errcode ?? payload?.code);
+  const detail = String(payload?.errmsg || payload?.message || '').trim();
+  if (Number.isFinite(code) && WECOM_ERRORS[code]) return `企业微信：${WECOM_ERRORS[code]}`;
+  return detail ? `企业微信：${detail}` : fallback;
+}
+async function wecomAppAccessToken(corpid, secret, signal) {
+  if (!corpid || !secret) throw Error('企业微信应用消息缺少 CorpID 或 Secret。');
+  const key = `${corpid}|${secret}`;
+  const cached = wecomAppTokens.get(key);
+  if (cached && cached.expiresAt > Date.now() + 60 * 1000) return cached.token;
+  const url = `${WECOM_TOKEN_ENDPOINT}?corpid=${encodeURIComponent(corpid)}&corpsecret=${encodeURIComponent(secret)}`;
+  const response = await fetch(url, { signal });
+  const payload = await response.json().catch(() => null);
+  const token = String(payload?.access_token || '');
+  if (!token) throw Error(wecomAppError(payload, '企业微信没有返回调用凭据。'));
+  wecomAppTokens.set(key, { token, expiresAt: Date.now() + Number(payload?.expires_in || 7200) * 1000 });
+  return token;
+}
+async function postJson(url, request, opts = {}) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: request.headers,
+    body: JSON.stringify(request.body),
+    signal: opts.signal,
+  });
+  const payload = await response.json().catch(() => null);
+  return { response, payload };
+}
+
 export async function sendWebhook(target, text, opts = {}) {
   let request;
   try {
@@ -199,20 +275,22 @@ export async function sendWebhook(target, text, opts = {}) {
   } catch (error) {
     return { ok: false, id: target.id, kind: target.kind, name: target.name, reason: error.message };
   }
-  if (!request.url) {
+  if (!request.url && !request.wecomApp) {
     return { ok: false, id: target.id, kind: target.kind, name: target.name, reason: '缺少推送地址' };
   }
   try {
-    const response = await fetch(request.url, {
-      method: 'POST',
-      headers: request.headers,
-      body: JSON.stringify(request.body),
-      signal: opts.signal,
-    });
-    const payload = await response.json().catch(() => null);
+    let delivery;
+    if (request.wecomApp) {
+      const accessToken = await wecomAppAccessToken(request.wecomApp.corpid, String(target.token || '').trim(), opts.signal);
+      delivery = await postJson(`${WECOM_SEND_ENDPOINT}?access_token=${encodeURIComponent(accessToken)}`, request, opts);
+    } else {
+      delivery = await postJson(request.url, request, opts);
+    }
+    const { response, payload } = delivery;
     const rejected = webhookBodyRejected(target.kind, payload);
     if (!response.ok || rejected) {
-      return { ok: false, id: target.id, kind: target.kind, name: target.name, reason: rejected || `HTTP ${response.status}` };
+      const reason = target.kind === 'wecom-app' && payload ? wecomAppError(payload, rejected) : rejected || `HTTP ${response.status}`;
+      return { ok: false, id: target.id, kind: target.kind, name: target.name, reason };
     }
     return { ok: true, id: target.id, kind: target.kind, name: target.name };
   } catch (error) {

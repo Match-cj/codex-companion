@@ -1,8 +1,37 @@
 # Codex Companion 交接文档
 
-## 最新状态：v1.0.18（2026-10-30）
+## 最新状态：v1.0.19（2026-10-31）
 
-**`server.mjs` 拆分第一批已完成**（这是本轮主要工作）：
+### 新增：企业微信应用消息（一个人也能用的渠道）
+
+企业微信**群机器人要求内部群至少 3 人**，只有自己一个人的企业微信建不了群，所以群机器人对单人用户不可用。为此新增 `wecom-app` 渠道（`webhook-notify.mjs`）：走自建应用消息，一个人也能发给自己；想用个人微信收就开「微信插件」。
+
+- 用户填的地址带 `corpid` / `agentid` / `touser`，应用 Secret 放在 `token` 字段（**不回显到网页**）。
+- `sendWebhook()` 里 `request.wecomApp` 分支：先用 `gettoken` 换 access_token（`wecomAppTokens` 缓存，提前 60 秒过期），再 POST `message/send`。
+- 企业微信错误码翻成中文（`WECOM_ERRORS`：40001 Secret 不对、40013 CorpID 不对、45009 太频繁、48002 不在可见范围、60020 IP 白名单等）。
+- 测试跟着加了 2 项（token 只换一次、错误码说人话），共 102 项。
+
+### `server.mjs` 拆分第二批已完成
+
+| 新模块 | 内容 | 行数 |
+|---|---|---|
+| `auth-utils.mjs` | `decodeJwtPayload()`、`jwtExpiry()`、`base64Url()`、`oauthPortStatus()` | ~80 |
+| `native-usage.mjs` | `IsolatedUsageSession`（隔离 CODEX_HOME 的 Codex 子进程）、`officialUsageToLegacy()`、`readResetCreditDetails()`，以及 `createNativeUsage()` 工厂 | ~280 |
+
+`server.mjs`：**3369 → 3080 行**，102 项测试全过，功能与界面零变化。
+
+两个模块的分工方式不同，后面照抄即可：
+
+- `auth-utils.mjs`：纯函数，无 Companion 状态，import 回来直接用，调用点一行没改。
+- `native-usage.mjs`：需要 Companion 状态（`appDir`、`config`、`accounts`、三个缓存 Map、账号库读写）。做法是 `createNativeUsage({ ... })` 一次性注入，其中 `config` / `accounts` 会因为重载配置、刷新账号被整体重新赋值，所以传的是 `getConfig: () => config`、`getAccounts: () => accounts`，**不能传引用**。
+
+### 锁屏与自动重试（用户问过，已写进网页）
+
+Windows 锁屏（Win+L、屏保恢复需输密码）、远程桌面断开、睡眠/休眠之后，桌面被切走，UI Automation 拿不到按钮，自动重试点不到。只让显示器熄屏不影响，锁屏才影响。网页「桌面端自动重试」区块底部已加这段说明。
+
+## 上一版：v1.0.18（2026-10-30）
+
+**`server.mjs` 拆分第一批已完成**：
 
 | 新模块 | 内容 | 行数 |
 |---|---|---|
@@ -18,7 +47,7 @@
 - 把某块搬走前，先确认它不在任何切片区间内；搬走后必须跑全量测试确认。
 - 已被切片覆盖的大块（路由 `handle`、会话监视、飞书、额度、账号库）要搬走，必须**同步把对应测试改成 import 新模块**，这属于下一批工作，不要在第一批里顺手做。
 
-**下一批建议顺序**（按耦合从低到高）：① `oauthPortStatus` + `decodeJwtPayload`/`jwtExpiry` → `auth-utils.mjs`；② `IsolatedUsageSession` + 预热 → `native-usage.mjs`；③ 账号库（依赖 `config`/`readJson`/`queueNativeVaultWrite`，建议先抽 `app-paths.mjs` 统一路径常量）；④ 最后才是路由和会话监视（要改测试）。
+**下一批建议顺序**（① ② 已完成）：① ~~`oauthPortStatus` + `decodeJwtPayload`/`jwtExpiry` → `auth-utils.mjs`~~（v1.0.19 完成）；② ~~`IsolatedUsageSession` + 预热 → `native-usage.mjs`~~（v1.0.19 完成）；③ 账号库（依赖 `config`/`readJson`/`queueNativeVaultWrite`，建议先抽 `app-paths.mjs` 统一路径常量）；④ 最后才是路由和会话监视（要改测试）。
 
 另外：自动重试命中时会记录 `windowState`（`Minimized`/`Normal`），网页显示「点击时窗口：最小化也能点到」——用来回答"窗口最小化后还能不能自动点"。
 
@@ -160,6 +189,13 @@ Codex Switcher 不再是运行依赖。若机器上已有 Switcher，Companion �
 | 文件 | 用途 |
 | --- | --- |
 | `server.mjs` | 本地后台、账号/额度、任务、通知和 API |
+| `auth-utils.mjs` | JWT 解析、base64url、OAuth 回调端口检查（无 Companion 状态的纯函数） |
+| `native-usage.mjs` | 原生账号额度读取与预热：隔离 CODEX_HOME 的 Codex 子进程 + `createNativeUsage()` 工厂 |
+| `webhook-notify.mjs` | 通用 Webhook 通知层（含企业微信应用消息/群机器人、钉钉、PushPlus、Server酱、Bark、Telegram、Discord、自定义） |
+| `desktop-retry.mjs` | 桌面端自动重试的托管与状态 |
+| `desktop-client.mjs` | Codex 桌面端与浮窗的进程管理 |
+| `device-login.mjs` | 设备码登录会话 |
+| `human-error.mjs` | 错误翻译成人话 |
 | `dashboard.html` | 完整网页控制台 |
 | `Quota Widget WPF.ps1` | WPF 圆形浮窗及账号面板 |
 | `Launch Quota Widget.vbs` | 隐藏启动浮窗 |

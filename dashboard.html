@@ -70,6 +70,7 @@
 <div class="row"><label><input id="desktopRetryEnabled" type="checkbox" style="min-width:0">开启桌面端自动重试</label><label>每次点击后间隔：<input id="desktopRetryCooldown" type="number" min="3" max="120" style="width:90px"> 秒</label><label>连续繁忙时多久提醒一次：<input id="desktopRetryQuiet" type="number" min="1" max="120" style="width:90px"> 分钟</label><button onclick="saveDesktopRetry()">保存重试设置</button><span id="desktopRetryState" class="muted"></span></div>
 <p class="muted">自动重试期间，「模型繁忙」这类失败<b>不再逐条通知</b>，只在超过上面设定的时间还没跑完时提醒一次，真正跑完再通知结果。点击优先走系统消息通道（<b>不动鼠标</b>）；只有客户端不支持时才改用鼠标，用完立刻把指针放回原位，而且你正在移动鼠标时它会跳过、等下一轮。</p>
 <div class="row"><label><input id="desktopTakeoverEnabled" type="checkbox" style="min-width:0">容量不足时自动接管到后台</label><span class="muted">接管会关闭 Codex 桌面端、把对话转到 Companion 后台继续；与上面的自动重试互斥，二选一。</span></div>
+<p class="muted"><b>什么时候点不到：</b>Windows <b>锁屏</b>（Win+L、屏保恢复时需要输入密码）之后桌面被切走，自动重试会点不到按钮；远程桌面断开、电脑<b>睡眠/休眠</b>同理。想让它一直工作：电源设置里把「睡眠」设为从不、关闭需要密码的锁屏，只让显示器自己熄屏即可（熄屏不影响，锁屏才影响）。</p>
 </details></section>
   <section><details><summary>对话收尾：上下文快满时怎么办</summary>
 <p class="muted">主对话上下文用到 <b>70% / 85% / 95%</b> 时，Companion 会各提醒一次（通知类型「上下文接近上限」，可在通知表格里关掉）。它<b>只提醒，不会自动开新对话、也不会自动往你的对话里插话</b>——自动插话可能打断正在跑的任务，还可能改坏内容。收尾由你决定，但提示词已经准备好了：</p>
@@ -148,9 +149,12 @@
   async function bindLatestThread(button){button.disabled=true;const result=await api('/api/feishu/thread/bind-latest',{method:'POST',body:'{}'});button.disabled=false;if(!result.failed){toast(result.message);load()}}
   function toggleWebhook(){$('feishu').type=$('feishu').type==='password'?'text':'password'}
   const WEBHOOK_KINDS=[
-{id:'wecom',label:'企业微信群机器人',recommend:true,needsToken:false,hint:'群设置 → 群机器人 → 添加 → 复制 Webhook 地址',
- howto:'装一个企业微信 App（个人也能注册，企业名称随便填，不需要营业执照）→ 新建一个只有你自己的<b>内部群</b> → 群设置 → 群机器人 → 添加 → 复制地址。大约 5 分钟。不想装 App：注册后到「微信插件」用个人微信扫码绑定，消息会转到微信。',
- limit:'免费；每分钟 20 条，没有每日上限。缺点：要装一个 App，消息默认只在企业微信里。'},
+{id:'wecom-app',label:'企业微信应用消息（一个人也能用）',recommend:true,needsToken:true,hint:'地址里填 corpid / agentid / userid，密钥框填应用的 Secret',
+ howto:'① 电脑打开 work.weixin.qq.com，用手机企业微信扫码登录（企业名称随便填、行业选“其他”、人数选 1-50，<b>不需要营业执照</b>）。②「我的企业 → 企业信息」最下面复制 <b>CorpID</b>。③「应用管理 → 自建 → 创建应用」，随便传个图标、起个名字，创建后点进去复制 <b>AgentId</b> 和 <b>Secret</b>。④「通讯录」点你自己的名字，“账号”那一栏就是 <b>userid</b>（一般是手机号或拼音）。⑤ 回到这里：地址填 <code>https://qyapi.weixin.qq.com/cgi-bin/message/send?corpid=你的CorpID&amp;agentid=你的AgentId&amp;touser=你的userid</code>，Secret 填在下面的“密钥”框。⑥ 想用个人微信收：企业微信手机端「消息 → 微信插件」按提示开启，应用消息会转到微信。',
+ limit:'免费；<b>不需要建群，一个人也能发给自己</b>。缺点：要建一次自建应用（约 10 分钟），Secret 只存在本机，不外传。'},
+{id:'wecom',label:'企业微信群机器人',needsToken:false,hint:'群设置 → 群机器人 → 添加 → 复制 Webhook 地址',
+ howto:'装一个企业微信 App（个人也能注册，企业名称随便填，不需要营业执照）→ 新建一个<b>内部群</b> → 群设置 → 群机器人 → 添加 → 复制地址。想用个人微信收：注册后到「微信插件」用个人微信扫码绑定。',
+ limit:'免费；每分钟 20 条，没有每日上限。<b>但前提是你得有一个内部群：企业微信内部群至少 3 人，只有自己一个人建不了群。</b>只有自己用请改选上面的「应用消息」，或继续用飞书 / Server酱。'},
 {id:'dingtalk',label:'钉钉群机器人',needsToken:false,hint:'群设置 → 智能群助手 → 添加机器人 → 自定义 → 复制 Webhook 地址',
  howto:'装钉钉（个人可注册）→ 建群 → 群设置 → 智能群助手 → 添加机器人 → 自定义 → 复制地址。',
  limit:'免费；每分钟 20 条。缺点：要装钉钉，消息只在钉钉里。'},
