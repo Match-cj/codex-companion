@@ -1,6 +1,13 @@
 # Codex Companion 交接文档
 
-## 最新状态：v1.0.20（2026-10-31）
+## 最新状态：v1.0.21（2026-11-01）
+
+**「转发 Windows 通知到飞书」开关**（本轮主要功能）：
+
+- 原来代码里就有一个 `monitorWindowsNotifications()`（`server.mjs`，每 15 秒轮询 `wpndatabase.db`），一直在**无开关全量转发**。v1.0.21 加了三道闸：`windowsNotifyForward`（默认 false）、`windowsNotifyApps` 白名单（空 = 全部）、`windowsNotifyIncludeBody`（默认 false，只发标题第一条文本）。
+- 单轮最多转发 12 条，超出合并为一条汇总。`listWindowsNotificationApps()` 扫描通知中心 distinct handler 供网页勾选（排除 Codex）。
+- 路由：`GET/POST /api/windows-notifications`；网页在「通知管理」里，`loadWindowsNotify()/saveWindowsNotify()`。
+- 每轮仍会因 Codex 的 skip 而不转发，但白名单过滤发生在 Codex skip 之后，白名单匹配的是 `formatNotificationAppName()` 的可读名（如 `WorkBuddy`、`Match Tools`）。
 
 ### 新增：飞书消息收件箱（`feishu-inbox.mjs`）
 

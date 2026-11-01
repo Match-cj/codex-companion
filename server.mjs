@@ -26,7 +26,7 @@ import { codexLaunch, closeCodexDesktop, codexDesktopPids, isCodexDesktopRunning
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '1.0.20';
+const APP_VERSION = '1.0.21';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -75,6 +75,9 @@ const defaultConfig = {
   desktopRetryAutoClick: false,
   desktopRetryCooldownSeconds: 8,
   desktopRetryQuietMinutes: 10,
+  windowsNotifyForward: false,
+  windowsNotifyApps: [],
+  windowsNotifyIncludeBody: false,
   webhooks: [],
   contextPressureLedger: {},
   autoFallbackModel: '',
@@ -2457,19 +2460,57 @@ async function monitorWindowsNotifications() {
        order by n.[Order]`
     ).all(lastWindowsNotificationOrder);
     lastWindowsNotificationOrder = Math.max(lastWindowsNotificationOrder, newest);
-    const baseline = rows.length ? activeQuotaSnapshot() : null;
+    if (!rows.length) return;
+    if (config.windowsNotifyForward !== true) return;
+    const whitelist = Array.isArray(config.windowsNotifyApps) ? config.windowsNotifyApps.map(n => String(n || '').trim()).filter(Boolean) : [];
+    const baseline = activeQuotaSnapshot();
+    let forwarded = 0, overflow = 0;
     for (const row of rows) {
       const texts = [...String(row.payload || '').matchAll(/<text(?:\s[^>]*)?>([\s\S]*?)<\/text>/gi)].map(match => decodeXmlText(match[1])).filter(Boolean);
       if (!texts.length) continue;
       const appName = formatNotificationAppName(row.handlerId);
       if (codexSessionWatcherReady && appName === 'Codex') continue;
-      await notify(`Windows 通知 · ${appName}\n${texts.join('\n')}`, { appName });
+      if (whitelist.length && !whitelist.includes(appName)) continue;
+      if (forwarded >= 12) { overflow++; continue; }
+      // 默认只发标题（第一条文本）；正文开关打开后才带全部内容，避免私聊内容整段转发。
+      const content = config.windowsNotifyIncludeBody === true ? texts.join('\n') : texts[0];
+      await notify(`Windows 通知 · ${appName}\n${content}`, { appName });
+      forwarded++;
     }
-    if (rows.length) refreshQuotaFromBaseline(baseline, { source: 'desktop', title: 'Windows 通知' }).catch(error => console.error('[desktop quota]', error.message));
+    if (overflow) await notify(`Windows 通知 · 汇总\n本轮还有 ${overflow} 条通知未转发（单轮最多 12 条），防止刷屏。`, { appName: 'Windows 通知' });
+    refreshQuotaFromBaseline(baseline, { source: 'desktop', title: 'Windows 通知' }).catch(error => console.error('[desktop quota]', error.message));
   } catch (error) {
     console.error('[windows notifications]', error.message);
     try { notificationDb?.close(); } catch {}
     notificationDb = null;
+  }
+}
+
+async function listWindowsNotificationApps() {
+  try {
+    if (!notificationDb) {
+      const { DatabaseSync } = await import('node:sqlite');
+      const dbPath = path.join(process.env.LOCALAPPDATA || '', 'Microsoft', 'Windows', 'Notifications', 'wpndatabase.db');
+      notificationDb = new DatabaseSync(dbPath, { readOnly: true });
+    }
+    const rows = notificationDb.prepare(
+      `select h.PrimaryId as handlerId, count(*) as total
+       from Notification n join NotificationHandler h on n.HandlerId = h.RecordId
+       group by h.PrimaryId order by total desc limit 60`
+    ).all();
+    const agg = new Map();
+    for (const row of rows) {
+      const name = formatNotificationAppName(row.handlerId);
+      if (!name || name === 'Codex') continue;
+      const slot = agg.get(name) || { name, count: 0 };
+      slot.count += Number(row.total) || 0;
+      agg.set(name, slot);
+    }
+    return { ok: true, apps: [...agg.values()].sort((a, b) => b.count - a.count) };
+  } catch (error) {
+    try { notificationDb?.close(); } catch {}
+    notificationDb = null;
+    return { ok: false, apps: [], error: humanError(error) };
   }
 }
 
@@ -2965,6 +3006,20 @@ async function handle(req, res) {
     if (req.method==='POST'&&u.pathname==='/api/feishu/thread/bind-latest'){
       const thread=await bindLatestFeishuThread();
       return send(res,200,{ok:true,thread,message:`已绑定最近的 Codex 对话：${thread.name}`});
+    }
+    if (req.method==='GET'&&u.pathname==='/api/windows-notifications'){
+      const scan = await listWindowsNotificationApps();
+      return send(res,200,{ok:true,enabled:config.windowsNotifyForward===true,includeBody:config.windowsNotifyIncludeBody===true,apps:Array.isArray(config.windowsNotifyApps)?config.windowsNotifyApps:[],knownApps:scan.apps,scanOk:scan.ok,scanError:scan.error||''});
+    }
+    if (req.method==='POST'&&u.pathname==='/api/windows-notifications'){
+      if (data.enabled!==undefined) config.windowsNotifyForward=data.enabled===true;
+      if (data.includeBody!==undefined) config.windowsNotifyIncludeBody=data.includeBody===true;
+      if (data.apps!==undefined){
+        if(!Array.isArray(data.apps)) throw Error('应用列表格式不正确');
+        config.windowsNotifyApps=data.apps.map(n=>String(n||'').trim()).filter(Boolean).slice(0,30);
+      }
+      await saveConfig();
+      return send(res,200,{ok:true,enabled:config.windowsNotifyForward===true,includeBody:config.windowsNotifyIncludeBody===true,apps:config.windowsNotifyApps});
     }
     if (req.method==='GET'&&u.pathname==='/api/notifications/apps'){
       ensureHistory();
