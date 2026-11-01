@@ -26,7 +26,7 @@ import { codexLaunch, closeCodexDesktop, codexDesktopPids, isCodexDesktopRunning
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '1.0.21';
+const APP_VERSION = '1.0.22';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -1161,13 +1161,26 @@ async function replyFeishuInbox(data, entry) {
   const allow = Array.isArray(config.feishuAllowedUserIds) ? config.feishuAllowedUserIds : [];
   if (!allow.includes(senderId)) return false;
   const recent = await feishuInbox.recent(10);
-  const lines = recent.length
-    ? recent.map((item, index) => {
-      const when = new Date(Number(item.at) || Date.now());
-      return `${index + 1}. ${when.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })} ${String(item.text || '').slice(0, 120)}`;
-    }).join('\n')
-    : '还没有收到任何消息。';
-  await sendFeishuAppText(`飞书消息收件箱（最近 ${recent.length} 条）\n\n${lines}\n\n完整记录在本机：${feishuInbox.paths.mdPath}`, { replyTo: entry.messageId });
+  // 手机上打不开本机路径，所以这里直接把内容发全：每条最多 400 字，整条控制在 2200 字内。
+  let budget = 2200;
+  const shown = [];
+  for (const item of recent) {
+    const text = String(item.text || '').replace(/\s+/g, ' ').trim() || '（无文字内容）';
+    const when = new Date(Number(item.at) || Date.now());
+    const stamp = when.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    const clipped = text.length > 400 ? `${text.slice(0, 400)}…` : text;
+    const line = `${shown.length + 1}. ${stamp} ${clipped}`;
+    if (shown.length && line.length > budget) break;
+    budget -= line.length;
+    shown.push(line);
+  }
+  const hidden = recent.length - shown.length;
+  const body = shown.length ? shown.join('\n') : '还没有收到任何消息。';
+  const tail = [
+    hidden > 0 ? `还有 ${hidden} 条没显示完（内容较长），完整记录在本机：${feishuInbox.paths.mdPath}` : '',
+    `想让 AI 处理：让 Codex / WorkBuddy 读取 ${feishuInbox.paths.mdPath}`,
+  ].filter(Boolean).join('\n');
+  await sendFeishuAppText(`飞书消息收件箱（最近 ${shown.length} 条${hidden ? ` / 共 ${recent.length} 条` : ''}）\n\n${body}${tail ? `\n\n${tail}` : ''}`, { replyTo: entry.messageId });
   return true;
 }
 function authFileFromSwitcherAccount(account) {
