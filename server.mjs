@@ -20,6 +20,7 @@ import { humanError } from './human-error.mjs';
 import { base64Url, decodeJwtPayload, jwtExpiry, oauthPortStatus } from './auth-utils.mjs';
 import { createFeishuInbox, inboxEntryFromEvent } from './feishu-inbox.mjs';
 import { createNativeUsage } from './native-usage.mjs';
+import { validNativeVault, createNativeVaultStore } from './native-vault.mjs';
 import { DeviceLoginSession } from './device-login.mjs';
 import { codexLaunch, closeCodexDesktop, codexDesktopPids, isCodexDesktopRunning, launchCodexDesktop, execPowershellShort, isQuotaWidgetRunning, findQuotaWidgetWindow, focusQuotaWidgetWindow, killQuotaWidgetProcesses, openQuotaWidget } from './desktop-client.mjs';
 import { appDir, configPath, widgetSwitchTracePath, nativeAccountsPath, nativeAccountsBackupPath, switcherAccountsPath, liveAuthPath, widgetScriptPath, widgetLauncherPath } from './app-paths.mjs';
@@ -27,7 +28,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.24';
+const APP_VERSION = '1.0.26';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -376,48 +377,25 @@ async function atomicJsonWrite(file, value) {
     await fs.rm(replacementBackup, { force: true }).catch(() => {});
   }
 }
-function validNativeVault(vault) {
-  return vault && vault.version === 1 && Array.isArray(vault.accounts)
-    && vault.accounts.every(entry => entry && entry.id && typeof entry.protected_auth === 'string' && entry.protected_auth.length > 20);
-}
-async function readEffectiveNativeVault() {
-  const primary = await readJson(nativeAccountsPath);
-  if (validNativeVault(primary)) return { vault: primary, source: 'primary', error: '' };
-  const primaryError = jsonReadErrors.get(nativeAccountsPath) || '主账号库格式无效';
-  const backup = await readJson(nativeAccountsBackupPath);
-  if (validNativeVault(backup)) return { vault: backup, source: 'backup', error: primaryError };
-  const backupError = jsonReadErrors.get(nativeAccountsBackupPath) || '备份账号库格式无效';
-  return { vault: {}, source: 'none', error: `主库：${primaryError}；备份：${backupError}` };
-}
-async function writeNativeVault(vault, { preserveCurrent = true } = {}) {
-  if (!validNativeVault(vault)) throw Error('原生账号库校验失败，已阻止写入。');
-  if (preserveCurrent && existsSync(nativeAccountsPath)) {
-    const current = await readJson(nativeAccountsPath);
-    if (validNativeVault(current)) await atomicJsonWrite(nativeAccountsBackupPath, current);
+let nativeVaultStore = null;
+function getNativeVaultStore() {
+  if (!nativeVaultStore) {
+    nativeVaultStore = createNativeVaultStore({
+      accountsPath: nativeAccountsPath,
+      backupPath: nativeAccountsBackupPath,
+      readJson,
+      jsonReadErrors,
+      atomicJsonWrite,
+      queueWrite: action => queueNativeVaultWrite(action),
+      afterRestore: async () => nativeUsageCache.clear(),
+    });
   }
-  await atomicJsonWrite(nativeAccountsPath, vault);
-  const written = await readJson(nativeAccountsPath);
-  if (!validNativeVault(written) || written.accounts.length !== vault.accounts.length) throw Error('原生账号库写入后的完整性校验失败。');
+  return nativeVaultStore;
 }
-async function backupNativeVault() {
-  return queueNativeVaultWrite(async () => {
-    const vault = await readJson(nativeAccountsPath);
-    if (!validNativeVault(vault)) throw Error('当前原生账号库不可用，不能创建备份。');
-    await atomicJsonWrite(nativeAccountsBackupPath, vault);
-    return { ok: true, count: vault.accounts.length, backupUpdatedAt: new Date().toISOString() };
-  });
-}
-async function restoreNativeVault() {
-  return queueNativeVaultWrite(async () => {
-    const backup = await readJson(nativeAccountsBackupPath);
-    if (!validNativeVault(backup)) throw Error('没有找到可恢复的有效账号备份。');
-    const current = await readJson(nativeAccountsPath);
-    if (validNativeVault(current)) await atomicJsonWrite(path.join(appDir, 'accounts.vault.before-restore.json'), current);
-    await writeNativeVault(backup, { preserveCurrent: false });
-    nativeUsageCache.clear();
-    return { ok: true, count: backup.accounts.length };
-  });
-}
+async function readEffectiveNativeVault() { return getNativeVaultStore().readEffective(); }
+async function writeNativeVault(vault, options) { return getNativeVaultStore().write(vault, options); }
+async function backupNativeVault() { return getNativeVaultStore().backup(); }
+async function restoreNativeVault() { return getNativeVaultStore().restore(); }
 async function createPortableAccountBackup(password) {
   const vault = await readJson(nativeAccountsPath);
   if (!validNativeVault(vault) || !vault.accounts.length) throw Error('当前没有可导出的 Companion 账号。');
