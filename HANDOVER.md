@@ -1,6 +1,6 @@
 # Codex Companion 交接文档
 
-## 最新状态：v1.0.21（2026-11-01）
+## 最新状态：v1.0.24（2026-11-02）
 
 **「转发 Windows 通知到飞书」开关**（本轮主要功能）：
 
@@ -58,6 +58,9 @@ Windows 锁屏（Win+L、屏保恢复需输密码）、远程桌面断开、睡�
 | `human-error.mjs` | `humanError()`——错误翻译成人话 | ~22 |
 | `desktop-client.mjs` | 桌面端/浮窗的进程管理（`closeCodexDesktop`、`codexDesktopPids`、`isCodexDesktopRunning`、`launchCodexDesktop`、`execPowershellShort`、`isQuotaWidgetRunning`、`findQuotaWidgetWindow`、`focusQuotaWidgetWindow`、`killQuotaWidgetProcesses`、`openQuotaWidget`、`codexLaunch`、`WIDGET_*`） | ~150 |
 | `device-login.mjs` | `DeviceLoginSession` 类 | ~95 |
+| `app-paths.mjs` | 全部本机路径常量（`appDir`/`configPath`/`nativeAccountsPath`/`liveAuthPath`/浮窗脚本路径…），保留 `CODEX_COMPANION_DATA_DIR` 覆盖规则 | ~25 |
+| `credential-crypto.mjs` | `runWithInput()`、`dpapiTransform()`、`protectCredential`/`unprotectCredential`（DPAPI，值走 stdin 不进命令行） | ~35 |
+| `portable-backup.mjs` | `encryptPortablePayload()`、`decryptPortableAccountBackup()`、`validatePortablePassword()`（AES-256-GCM + scrypt） | ~85 |
 
 `server.mjs`：**3594 → 3369 行**，100 项测试全过，功能与界面零变化。做法是用 import 把同名函数引回来，调用点一行没改。
 
@@ -67,7 +70,7 @@ Windows 锁屏（Win+L、屏保恢复需输密码）、远程桌面断开、睡�
 - 把某块搬走前，先确认它不在任何切片区间内；搬走后必须跑全量测试确认。
 - 已被切片覆盖的大块（路由 `handle`、会话监视、飞书、额度、账号库）要搬走，必须**同步把对应测试改成 import 新模块**，这属于下一批工作，不要在第一批里顺手做。
 
-**下一批建议顺序**（① ② 已完成）：① ~~`oauthPortStatus` + `decodeJwtPayload`/`jwtExpiry` → `auth-utils.mjs`~~（v1.0.19 完成）；② ~~`IsolatedUsageSession` + 预热 → `native-usage.mjs`~~（v1.0.19 完成）；③ 账号库（依赖 `config`/`readJson`/`queueNativeVaultWrite`，建议先抽 `app-paths.mjs` 统一路径常量）；④ 最后才是路由和会话监视（要改测试）。
+**下一批建议顺序**（①②③ 已完成）：① ~~`oauthPortStatus` + `decodeJwtPayload`/`jwtExpiry` → `auth-utils.mjs`~~（v1.0.19）；② ~~`IsolatedUsageSession` + 预热 → `native-usage.mjs`~~（v1.0.19）；③ ~~路径常量 → `app-paths.mjs`、DPAPI → `credential-crypto.mjs`、便携备份 crypto → `portable-backup.mjs`~~（v1.0.24，`server.mjs` 3095 行）；④ 剩下账号库业务函数（`upsertNativeAccount`/`switchNativeAccount`/`writeNativeVault`，依赖 `config`/`readJson`/`queueNativeVaultWrite`，可用 `createAccountVault({...})` 注入），以及路由与会话监视（**必须先改对应 vm 切片测试**）。
 
 另外：自动重试命中时会记录 `windowState`（`Minimized`/`Normal`），网页显示「点击时窗口：最小化也能点到」——用来回答"窗口最小化后还能不能自动点"。
 

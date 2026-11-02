@@ -5,8 +5,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { createHash, createCipheriv, createDecipheriv, randomBytes, randomUUID, timingSafeEqual, scrypt as scryptCallback } from 'node:crypto';
-import { fileURLToPath } from 'node:url';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import os from 'node:os';
 import * as Lark from '@larksuiteoapi/node-sdk';
 import { finalImagePaths, relayFinalImages, validateImageRoot } from './image-relay.mjs';
@@ -23,24 +22,15 @@ import { createFeishuInbox, inboxEntryFromEvent } from './feishu-inbox.mjs';
 import { createNativeUsage } from './native-usage.mjs';
 import { DeviceLoginSession } from './device-login.mjs';
 import { codexLaunch, closeCodexDesktop, codexDesktopPids, isCodexDesktopRunning, launchCodexDesktop, execPowershellShort, isQuotaWidgetRunning, findQuotaWidgetWindow, focusQuotaWidgetWindow, killQuotaWidgetProcesses, openQuotaWidget } from './desktop-client.mjs';
+import { appDir, configPath, widgetSwitchTracePath, nativeAccountsPath, nativeAccountsBackupPath, switcherAccountsPath, liveAuthPath, widgetScriptPath, widgetLauncherPath } from './app-paths.mjs';
+import { protectCredential, unprotectCredential } from './credential-crypto.mjs';
+import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '1.0.23';
+const APP_VERSION = '1.0.24';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
-const appDir = process.env.CODEX_COMPANION_DATA_DIR
-  ? path.resolve(process.env.CODEX_COMPANION_DATA_DIR)
-  : path.join(process.env.APPDATA || path.join(process.env.USERPROFILE, 'AppData', 'Roaming'), 'CodexCompanion');
-const configPath = path.join(appDir, 'config.json');
-const widgetSwitchTracePath = path.join(appDir, 'widget-switch-trace.jsonl');
-const nativeAccountsPath = path.join(appDir, 'accounts.vault.json');
-const nativeAccountsBackupPath = path.join(appDir, 'accounts.vault.backup.json');
-const switcherAccountsPath = path.join(process.env.USERPROFILE || '', '.codex-switcher', 'accounts.json');
-const liveAuthPath = path.join(process.env.USERPROFILE || '', '.codex', 'auth.json');
-const sourceDir = path.dirname(fileURLToPath(import.meta.url));
-const widgetScriptPath = path.join(sourceDir, 'Quota Widget WPF.ps1');
-const widgetLauncherPath = path.join(sourceDir, 'Launch Quota Widget.vbs');
+// 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
 const dashboardHtml = await fs.readFile(new URL('./dashboard.html', import.meta.url), 'utf8');
 const feishuInbox = createFeishuInbox({ dir: appDir });
 // The handoff wording lives in one place: the page shows it and Feishu can send
@@ -428,18 +418,6 @@ async function restoreNativeVault() {
     return { ok: true, count: backup.accounts.length };
   });
 }
-const PORTABLE_BACKUP_TYPE = 'codex-companion-portable-backup';
-const PORTABLE_BACKUP_AAD = Buffer.from('CodexCompanion/portable-backup/v1', 'utf8');
-const PORTABLE_SCRYPT = Object.freeze({ N: 32768, r: 8, p: 1 });
-function validatePortablePassword(password) {
-  const value = String(password || '');
-  if (value.length < 8) throw Error('迁移备份密码至少需要 8 个字符。');
-  if (Buffer.byteLength(value, 'utf8') > 256) throw Error('迁移备份密码过长。');
-  return value;
-}
-async function derivePortableBackupKey(password, salt) {
-  return await scryptAsync(validatePortablePassword(password), salt, 32, { ...PORTABLE_SCRYPT, maxmem: 64 * 1024 * 1024 });
-}
 async function createPortableAccountBackup(password) {
   const vault = await readJson(nativeAccountsPath);
   if (!validNativeVault(vault) || !vault.accounts.length) throw Error('当前没有可导出的 Companion 账号。');
@@ -451,53 +429,7 @@ async function createPortableAccountBackup(password) {
     const { protected_auth, ...metadata } = entry;
     portableAccounts.push({ metadata, alias: String(aliases[entry.id] || ''), auth });
   }
-  const plaintext = Buffer.from(JSON.stringify({ version: 1, created_at: new Date().toISOString(), accounts: portableAccounts }), 'utf8');
-  const salt = randomBytes(16);
-  const iv = randomBytes(12);
-  const key = await derivePortableBackupKey(password, salt);
-  try {
-    const cipher = createCipheriv('aes-256-gcm', key, iv);
-    cipher.setAAD(PORTABLE_BACKUP_AAD);
-    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-    return {
-      type: PORTABLE_BACKUP_TYPE,
-      version: 1,
-      encryption: { cipher: 'AES-256-GCM', kdf: 'scrypt', N: PORTABLE_SCRYPT.N, r: PORTABLE_SCRYPT.r, p: PORTABLE_SCRYPT.p, salt: salt.toString('base64'), iv: iv.toString('base64'), tag: cipher.getAuthTag().toString('base64') },
-      ciphertext: ciphertext.toString('base64'),
-    };
-  } finally { key.fill(0); plaintext.fill(0); }
-}
-function decodePortableField(value, expectedLength, label) {
-  let decoded;
-  try { decoded = Buffer.from(String(value || ''), 'base64'); } catch { throw Error(`迁移备份的${label}无效。`); }
-  if (decoded.length !== expectedLength) throw Error(`迁移备份的${label}无效。`);
-  return decoded;
-}
-async function decryptPortableAccountBackup(envelope, password) {
-  if (!envelope || envelope.type !== PORTABLE_BACKUP_TYPE || envelope.version !== 1) throw Error('这不是受支持的 Codex Companion 迁移备份。');
-  if (envelope.encryption?.cipher !== 'AES-256-GCM' || envelope.encryption?.kdf !== 'scrypt') throw Error('迁移备份使用了不支持的加密方式。');
-  if (String(envelope.ciphertext || '').length > 8 * 1024 * 1024) throw Error('迁移备份文件过大。');
-  const salt = decodePortableField(envelope.encryption.salt, 16, '盐值');
-  const iv = decodePortableField(envelope.encryption.iv, 12, '随机数');
-  const tag = decodePortableField(envelope.encryption.tag, 16, '校验值');
-  const ciphertext = Buffer.from(String(envelope.ciphertext || ''), 'base64');
-  const key = await derivePortableBackupKey(password, salt);
-  let plaintext;
-  try {
-    const decipher = createDecipheriv('aes-256-gcm', key, iv);
-    decipher.setAAD(PORTABLE_BACKUP_AAD);
-    decipher.setAuthTag(tag);
-    plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-    const payload = JSON.parse(plaintext.toString('utf8'));
-    if (payload?.version !== 1 || !Array.isArray(payload.accounts) || !payload.accounts.length || payload.accounts.length > 100) throw Error('迁移备份内没有有效账号。');
-    for (const account of payload.accounts) {
-      if (!account?.auth?.tokens?.id_token || !account.auth.tokens.access_token || !account.auth.tokens.refresh_token) throw Error('迁移备份内有不完整的账号凭据。');
-    }
-    return payload;
-  } catch (error) {
-    if (/迁移备份/.test(String(error?.message || ''))) throw error;
-    throw Error('密码不正确，或迁移备份已经损坏。');
-  } finally { key.fill(0); if (plaintext) plaintext.fill(0); }
+  return encryptPortablePayload(portableAccounts, password);
 }
 async function importPortableAccountBackup(envelope, password) {
   const payload = await decryptPortableAccountBackup(envelope, password);
@@ -517,30 +449,6 @@ async function importPortableAccountBackup(envelope, password) {
   refreshAccounts({ forceNative: true, awaitNative: false }).catch(error => console.error('[portable import refresh]', error.message));
   return { ok: true, imported: imported.length, accounts: accounts.length };
 }
-function runWithInput(executable, args, input) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(executable, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', chunk => { stdout += chunk; });
-    child.stderr.on('data', chunk => { stderr += chunk; });
-    child.on('error', reject);
-    child.on('close', code => code === 0 ? resolve(stdout.trim()) : reject(new Error(stderr.trim() || `凭据加密进程退出（${code}）`)));
-    child.stdin.end(String(input || ''), 'utf8');
-  });
-}
-async function dpapiTransform(value, protect) {
-  if (process.platform !== 'win32') throw Error('原生账号库目前需要 Windows。');
-  const script = protect
-    ? "$ErrorActionPreference='Stop';Add-Type -AssemblyName System.Security;$v=[Console]::In.ReadToEnd();$b=[Text.Encoding]::UTF8.GetBytes($v);$e=[Text.Encoding]::UTF8.GetBytes('CodexCompanion/auth/v1');[Console]::Out.Write([Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Protect($b,$e,[Security.Cryptography.DataProtectionScope]::CurrentUser)))"
-    : "$ErrorActionPreference='Stop';Add-Type -AssemblyName System.Security;$v=[Console]::In.ReadToEnd();$b=[Convert]::FromBase64String($v);$e=[Text.Encoding]::UTF8.GetBytes('CodexCompanion/auth/v1');[Console]::Out.Write([Text.Encoding]::UTF8.GetString([Security.Cryptography.ProtectedData]::Unprotect($b,$e,[Security.Cryptography.DataProtectionScope]::CurrentUser)))";
-  return runWithInput('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], value);
-}
-const protectCredential = value => dpapiTransform(String(value), true);
-const unprotectCredential = value => dpapiTransform(String(value), false);
-
 function publicFeishuState() {
   return {
     configured: Boolean(config.feishuAppId && config.feishuAppSecretProtected),

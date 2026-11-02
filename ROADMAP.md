@@ -23,7 +23,8 @@
 - [x] 拆分第二批：auth-utils（oauthPortStatus、jwt 工具）、native-usage（IsolatedUsageSession 与预热）。v1.0.19 —— 3369 → 3080 行。
 - [x] 飞书消息收件箱：收到的飞书消息落盘到本机（md + jsonl），让本机 AI 无需管理员审核即可读取；网页可复制给 AI / 清空，飞书回复「收件箱」。v1.0.20
 - [x] 通用提醒：做成 Companion 内「转发 Windows 通知到飞书」开关（默认关闭，应用白名单，默认只发标题，单轮 12 条防刷屏）。本机通知库 `wpndatabase.db` 只读解析；官方 `UserNotificationListener` 需要应用身份（MSIX），普通 exe 用不了。风险仍在：私有格式、Windows 更新可能失效；只覆盖进通知中心的 toast，自绘弹窗抓不到。v1.0.21
-- [ ] 拆分第三批：先抽 app-paths.mjs，再搬账号库（upsertNativeAccount / switchNativeAccount / 备份加解密）。
+- [x] 拆分第三批（部分）：app-paths.mjs（路径常量）、credential-crypto.mjs（DPAPI）、portable-backup.mjs（备份 crypto）。v1.0.24，server.mjs 3095 行。
+- [ ] 拆分第三批剩余：账号库业务函数 upsertNativeAccount / switchNativeAccount / writeNativeVault（需注入 config/readJson/queueNativeVaultWrite）。
 - [ ] 拆分第四批（需同步改测试）：路由 handle、会话监视、飞书、额度。改前先把对应 vm 切片测试换成 import 新模块。
 - [ ] 确认窗口最小化时自动重试是否仍然生效（看网页「点击时窗口：最小化也能点到」）。
 - [ ] 观察真机：连续繁忙 10 分钟以上时，确认只收到一条汇总提醒。
