@@ -22,6 +22,10 @@
 .stat .v{font-size:15px;font-weight:500;margin-top:1px}
 .tab .dot{display:inline-block;min-width:17px;padding:0 5px;margin-left:6px;border-radius:999px;background:var(--red);color:#fff;font-size:11px;vertical-align:1px}
 .muted{font-size:12.5px;color:#8a95a8;line-height:1.5}
+.qmark{display:inline-block;min-width:16px;height:16px;line-height:16px;text-align:center;border-radius:50%;background:#3a4657;color:#d6dee9;font-size:11px;cursor:help;vertical-align:0;position:relative;margin-left:5px;user-select:none;outline:none}
+.qmark:hover,.qmark:focus{background:#4b8cf0;color:#fff}
+.qmark .pop{display:none;position:absolute;left:0;top:22px;z-index:40;width:min(340px,72vw);background:#232c3b;color:#d6dee9;border:1px solid #4b8cf0;border-radius:9px;padding:8px 11px;font-size:12.5px;line-height:1.6;text-align:left;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+.qmark:hover .pop,.qmark:focus .pop{display:block}
 details.note{margin:6px 0 0}
 details.note summary{cursor:pointer;color:#8a95a8;font-size:12.5px}
 #setupWizard.done #setupSteps,#setupWizard.done>.row{display:none}
@@ -247,14 +251,16 @@ section h2{font-size:16px}
   (function renderChannelComparison(){const box=[...document.querySelectorAll('div')].find(el=>el.textContent.includes('Webhook 与应用机器人区别'));if(!box)return;box.innerHTML='<b>Webhook 与应用机器人区别</b><table style="width:100%;margin-top:8px"><thead><tr><th>项目</th><th>Webhook 自定义机器人</th><th>飞书自建应用机器人</th></tr></thead><tbody><tr><td>方向</td><td>只能发通知</td><td>可收发消息</td></tr><tr><td>配置</td><td>复制地址</td><td>App ID、Secret、发布应用、长连接</td></tr><tr><td>回复控制</td><td>不支持</td><td>支持继续、停止、状态、切换</td></tr><tr><td>图片/文件</td><td>不支持</td><td>支持</td></tr></tbody></table><p class="muted">你当前使用的是右侧的自建应用机器人方式，不是 Webhook。</p>'})();
   (function moveFeishuOrganizationSetting(){const mode=$('feishuThreadMode');const feishu=[...document.querySelectorAll('main>section')].find(section=>section.textContent.includes('飞书通知'));const row=mode?.closest('.row');if(feishu&&row)feishu.insertBefore(row,feishu.querySelector('details')||null)})();
   (function addFeishuPermissionGuide(){const feishu=[...document.querySelectorAll('main>section')].find(section=>section.textContent.includes('飞书通知'));if(!feishu||feishu.querySelector('.permission-guide'))return;const details=document.createElement('details');details.className='permission-guide';details.innerHTML='<summary>自建应用机器人权限清单（申请时照此配置）</summary><p class="muted">必需：接收消息事件 <code>im.message.receive_v1</code>；发送消息；回复消息/话题；读取群聊和机器人所在群信息。</p><p class="muted">图片/文件回传时追加：读取消息资源、上传图片、上传文件。</p><p class="muted">事件订阅：开启长连接，订阅“接收消息”事件；发布应用并把机器人加入目标群。Webhook 仅用于单向通知，不需要这些事件权限。</p>';feishu.appendChild(details)})();
-  (function collapseLongNotes(){document.querySelectorAll('main>section').forEach(section=>{
-    [...section.querySelectorAll('p.muted')].filter(p=>!p.closest('details')).forEach((p,index)=>{
-      const text=p.textContent.trim();if(text.length<(index===0?110:70))return;
-      const box=document.createElement('details');box.className='note';
-      const title=document.createElement('summary');title.textContent=index===0?text.slice(0,46)+'…':'展开说明';
-      const body=p.cloneNode(true);
-      box.appendChild(title);box.appendChild(body);
-      p.parentNode.replaceChild(box,p)})})})();
+  (function shortenNotes(){document.querySelectorAll('main>section').forEach(section=>{
+    [...section.querySelectorAll('p.muted')].filter(p=>!p.closest('details')&&!p.closest('.empty')).forEach(p=>{
+      const full=p.textContent.trim();
+      if(full.length<38)return;
+      const firstSentence=(full.split(/(?<=[。！？；;])/)[0]||full).trim();
+      const lead=firstSentence.length<=34?firstSentence:full.slice(0,30)+'…';
+      p.textContent=lead;
+      const q=document.createElement('span');q.className='qmark';q.tabIndex=0;q.setAttribute('role','note');q.textContent='？';
+      const pop=document.createElement('span');pop.className='pop';pop.textContent=full;
+      q.appendChild(pop);p.appendChild(q)})})})();
   const tabLayout={today:['setup','approval','activity','tasks'],chat:['newtask','threads','context'],quota:['accounts'],notify:['feishu','notify','channels','inbox'],settings:['diagnostics','advanced','retry','security']};
   const tabLabels={today:'今日',chat:'对话',quota:'额度',notify:'通知',settings:'设置'};
   const knownPanels=new Set(Object.values(tabLayout).flat());
