@@ -26,7 +26,7 @@ import { codexLaunch, closeCodexDesktop, codexDesktopPids, isCodexDesktopRunning
 
 const execFileAsync = promisify(execFile);
 const scryptAsync = promisify(scryptCallback);
-const APP_VERSION = '1.0.22';
+const APP_VERSION = '1.0.23';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 const appDir = process.env.CODEX_COMPANION_DATA_DIR
@@ -46,7 +46,10 @@ const feishuInbox = createFeishuInbox({ dir: appDir });
 // The handoff wording lives in one place: the page shows it and Feishu can send
 // it, so the two can never drift apart.
 export const HANDOFF_PROMPT = '请把当前对话做一次收尾交接，只输出这份摘要，不要改动任何文件、不要继续做新任务：\n1. 已完成的工作（按改动的文件或模块列要点）\n2. 关键决策与约定（技术选型、命名规则、不能动的地方）\n3. 未完成事项与下一步\n4. 新对话需要知道的背景（当前进度、卡在哪）\n用中文，控制在 400 字以内。';
-const dashboardPage = dashboardHtml.replace('HANDOFF_PROMPT_TEXT', JSON.stringify(HANDOFF_PROMPT));
+// replaceAll 是关键：占位符在页面里出现两次（typeof 判断 + 三元取值）。
+// 以前用 replace() 只换掉第一个，第二个留在原处变成未定义变量，整页脚本当场崩掉。
+// $ 替换成 $$ 防止 JSON 文本里的 $ 被当成替换模式特殊符号。
+const dashboardPage = dashboardHtml.replaceAll('HANDOFF_PROMPT_TEXT', JSON.stringify(HANDOFF_PROMPT).replaceAll('$', '$$$$'));
 const defaultConfig = {
   port: 17841,
   remoteAccessEnabled: false,
