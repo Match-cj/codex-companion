@@ -28,7 +28,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.31';
+const APP_VERSION = '1.0.32';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -694,11 +694,17 @@ function desktopRetryStatusText() {
 }
 
 // The watcher found a retry button whose error is not a capacity problem
-// (for example a conversation stuck on a retired model). Clicking cannot help,
-// so it stays away and says so - once every 10 minutes at most.
+// (for example a conversation opened under a different login/provider). Clicking
+// cannot help, so it stays away and says so - once every 10 minutes at most.
 setDesktopRetryNotifier(({ window, text }) => {
   const detail = String(text || '').trim() || '（没能读到错误原文，可能需要你在客户端里看一眼）';
-  notify(`这个「重试」不是模型繁忙，我没有自动点\n窗口：${window}\n错误内容：${detail}\n\n点了也不会好（常见原因是选的模型太旧、已经不能用了）。需要你换个模型再试；换成可用的模型后我会照常自动重试。`, { appName: 'Codex 任务', notificationType: 'task_approval' }).catch(() => {});
+  let advice = '点了也不会好。最常见的是模型不可用或账号/登录方式不匹配，需要你在客户端里处理一下。';
+  if (/provider/i.test(detail)) {
+    advice = '这是账号/登录方式不匹配：这个对话是用另一种登录方式创建的。按提示切回原来的登录方式/账号（在两个账号之间切换试试），或新开一个对话，就能继续。';
+  } else if (/model\s*(is\s*)?(unavailable|deprecated|retired)|模型.*(不可用|停用|下线|太旧|过旧|已弃用)/i.test(detail)) {
+    advice = '这个对话用的模型已经不可用。在底部模型下拉里换一个可用模型即可继续，不用点重试。';
+  }
+  notify(`这个「重试」不是模型繁忙，我没有自动点\n窗口：${window}\n错误内容：${detail}\n\n${advice}`, { appName: 'Codex 任务', notificationType: 'task_approval' }).catch(() => {});
 });
 
 async function handleFeishuControlCommand(text, message) {

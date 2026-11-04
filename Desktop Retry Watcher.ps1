@@ -19,6 +19,13 @@ param(
 )
 
 $ErrorActionPreference = 'SilentlyContinue'
+# The JSON protocol carries Chinese error text back to the Node parent. Without
+# this line PowerShell writes it in the legacy OEM codepage and the parent
+# would show mojibake (English survives, Chinese turns into replacement chars).
+try {
+  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+  [Console]::InputEncoding = [System.Text.Encoding]::UTF8
+} catch { }
 [void][System.Reflection.Assembly]::LoadWithPartialName('UIAutomationClient')
 [void][System.Reflection.Assembly]::LoadWithPartialName('UIAutomationTypes')
 

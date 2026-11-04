@@ -90,6 +90,9 @@ test('the watcher decides by the error text, and keeps clicking capacity errors 
   assert.match(watcherScript, /at capacity/);
   assert.match(watcherScript, /type = 'ignored'/);
   assert.match(watcherScript, /Get-ButtonContext/);
+  // Chinese error text must reach the Node parent intact: the watcher has to
+  // switch its console to UTF-8 or the parent shows mojibake.
+  assert.match(watcherScript, /\[Console\]::OutputEncoding = \[System\.Text\.Encoding\]::UTF8/);
   // The 5-click cap is gone: a genuine capacity retry may be pressed forever.
   assert.doesNotMatch(watcherScript, /stallMaxClicks/);
   assert.doesNotMatch(watcherScript, /stallWindowMs/);
