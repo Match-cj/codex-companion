@@ -63,6 +63,8 @@ npm start
 | 第三方来源与许可证 | [THIRD_PARTY.md](THIRD_PARTY.md) |
 | 公开发行进度 | [docs/OPEN_SOURCE_RELEASE.md](docs/OPEN_SOURCE_RELEASE.md) |
 
+如果这个工具帮到了你，欢迎点一个 ⭐ Star；用出问题或有想法，欢迎[提 Issue](https://github.com/Match-cj/codex-companion/issues)。
+
 以下为详细说明（行为细节、安装器机制、命令行用法等），按需查阅。
 
 ## 行为细节

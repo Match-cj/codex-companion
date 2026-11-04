@@ -28,7 +28,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.28';
+const APP_VERSION = '1.0.29';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -1662,6 +1662,8 @@ async function notify(text, opts = {}) {
     saveConfig().catch(()=>{});
     return {ok:false,reason:'type-disabled'};
   }
+  const notificationEmoji={quota_early:'🎉',quota_reset_soon:'⏰',quota_exhausted:'🚫',quota_expiry:'⌛',context_pressure:'📊',takeover_start:'🤖',task_retry:'🔁',task_approval:'🙋',task_stalled:'🐌',service_exit:'🛑',task_failed:'❌',task_completed:'✅',task_started:'▶️',windows:'🪟'};
+  if(type&&notificationEmoji[type]) text=`${notificationEmoji[type]} ${text}`;
   const appName = normalizeAppName(opts.appName);
   const extraTargets = Array.isArray(config.webhooks) ? config.webhooks.filter(item => item && item.enabled !== false && item.url) : [];
   const hasFeishu = !!(config.feishuWebhookUrl || (feishuClient && config.feishuBoundChatId));

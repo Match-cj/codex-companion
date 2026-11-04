@@ -27,7 +27,7 @@ export function notificationType(text, appName, explicit) {
   if (body.startsWith('Windows 通知')) return 'windows';
   for (const [pattern,id] of [
     [/^Codex 额度已提前恢复/,'quota_early'],[/^Codex 额度即将重置/,'quota_reset_soon'],[/^Codex 额度已用尽/,'quota_exhausted'],[/^Codex 重置次数将在 7 天内到期/,'quota_expiry'],
-    [/上下文已用约/,'context_pressure'],[/开始自动接管/,'takeover_start'],[/正在自动重试/,'task_retry'],[/等待确认\n/,'task_approval'],[/长时间没有进展/,'task_stalled'],[/后台服务已退出/,'service_exit'],
+    [/上下文已用约/,'context_pressure'],[/开始自动接管/,'takeover_start'],[/正在自动重试/,'task_retry'],[/^Codex 还在排队，已自动重试/,'task_retry'],[/等待确认\n/,'task_approval'],[/长时间没有进展/,'task_stalled'],[/后台服务已退出/,'service_exit'],
     [/状态：失败|自动接管重试没有成功|因 429 限流中断/,'task_failed'],[/状态：已完成|状态：已中断/,'task_completed'],[/Codex 对话已开始|Codex 任务已启动/,'task_started']
   ]) if(pattern.test(body)) return id;
   return '';
