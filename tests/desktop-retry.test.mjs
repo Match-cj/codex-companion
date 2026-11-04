@@ -67,31 +67,35 @@ test('recent hit rates show the real workload, not just the cumulative count', (
   assert.ok(after.hitsLast60Minutes <= after.hits);
 });
 
-test('a stalled retry button is reported once and can notify the user', () => {
+test('a non-capacity retry is skipped and reported, never clicked blindly', () => {
   const seen = [];
   setDesktopRetryNotifier(event => seen.push(event));
   const before = desktopRetryState();
-  applyDesktopRetryEvent({ type: 'stalled', window: 'ChatGPT', count: 5 });
+  applyDesktopRetryEvent({ type: 'ignored', window: 'ChatGPT', text: '所选模型已不可用，请选择其他模型' });
   const after = desktopRetryState();
-  assert.equal(after.stalled, before.stalled + 1);
-  assert.equal(after.lastStallWindow, 'ChatGPT');
-  assert.equal(after.lastStallCount, 5);
-  assert.ok(after.lastStallAt > 0);
+  assert.equal(after.ignored, before.ignored + 1);
+  assert.equal(after.lastIgnoredWindow, 'ChatGPT');
+  assert.match(after.lastIgnoredText, /模型已不可用/);
+  assert.ok(after.lastIgnoredAt > 0);
+  assert.equal(after.hits, before.hits, 'an ignored button must not count as a retry');
   assert.equal(seen.length, 1);
-  assert.equal(seen[0].count, 5);
-  assert.equal(seen[0].window, 'ChatGPT');
+  assert.match(seen[0].text, /模型已不可用/);
   setDesktopRetryNotifier(null);
-  applyDesktopRetryEvent({ type: 'stalled', window: 'ChatGPT', count: 5 });
+  applyDesktopRetryEvent({ type: 'ignored', window: 'ChatGPT', text: 'x' });
   assert.equal(seen.length, 1, 'notifier must not fire after being removed');
 });
 
-test('the watcher script has a stall guard so a popup retry cannot be clicked forever', () => {
-  assert.match(watcherScript, /\$stallMaxClicks\s*=\s*5/);
-  assert.match(watcherScript, /\$stallWindowMs\s*=\s*600000/);
-  assert.match(watcherScript, /type = 'stalled'/);
-  assert.match(watcherScript, /GetRuntimeId/);
-  // The stall check must happen before the click stamp is written.
-  assert.ok(watcherScript.indexOf('stallMaxClicks') < watcherScript.indexOf('CodexCompanionDesktopRetry.json'));
+test('the watcher decides by the error text, and keeps clicking capacity errors without a cap', () => {
+  assert.match(watcherScript, /capacityPattern/, 'capacity whitelist missing');
+  assert.match(watcherScript, /at capacity/);
+  assert.match(watcherScript, /type = 'ignored'/);
+  assert.match(watcherScript, /Get-ButtonContext/);
+  // The 5-click cap is gone: a genuine capacity retry may be pressed forever.
+  assert.doesNotMatch(watcherScript, /stallMaxClicks/);
+  assert.doesNotMatch(watcherScript, /stallWindowMs/);
+  assert.doesNotMatch(watcherScript, /type = 'stalled'/);
+  // The text check must run before any click is performed.
+  assert.ok(watcherScript.indexOf('capacityPattern') < watcherScript.indexOf('InvokePattern'));
 });
 
 test('floating window exposes the retry switch through the same config field', () => {

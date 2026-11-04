@@ -28,7 +28,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.30';
+const APP_VERSION = '1.0.31';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -686,18 +686,19 @@ function desktopRetryStatusText() {
     if (retry.lastHitAt) lines.push(`最近一次：${new Date(retry.lastHitAt).toLocaleString('zh-CN', { hour12: false })}`);
     if (retry.lastMethod) lines.push(`点击方式：${retry.lastMethod === 'mouse' ? '鼠标（用完已放回原位）' : '系统消息，不动鼠标'}`);
     if (retry.skipped) lines.push(`因为你在用鼠标，跳过 ${retry.skipped} 次`);
-    if (retry.lastStallAt) lines.push(`最近卡住：「${retry.lastStallWindow}」里的重试按钮点了 ${retry.lastStallCount} 次没反应，已暂停；按钮消失后自动恢复`);
+    if (retry.lastIgnoredAt) lines.push(`最近没点：不是模型繁忙的重试（${retry.lastIgnoredText || '没读到错误原文'}），需要你手动处理`);
     if (retry.lastError) lines.push(`最近错误：${retry.lastError}`);
     lines.push(`繁忙提示：已静默，每 ${Math.max(1, Math.round(Number(config.desktopRetryQuietMinutes) || 10))} 分钟最多提醒一次`);
   }
   return lines.join('\n');
 }
 
-// The watcher stopped pressing a retry button that never goes away (usually a
-// Retry inside a popup like the usage panel). Tell the user once - it needs a
-// human look, and clicking forever would only inflate the retry counter.
-setDesktopRetryNotifier(({ window, count }) => {
-  notify(`自动重试已暂停：同一个「重试」按钮点了 ${count} 次都没反应\n窗口：${window}\n\n这种按钮多半在弹窗里，再点只是空转，需要你手动看一眼。按钮消失后我会自动恢复点击。`, { appName: 'Codex 任务', notificationType: 'task_stalled' }).catch(() => {});
+// The watcher found a retry button whose error is not a capacity problem
+// (for example a conversation stuck on a retired model). Clicking cannot help,
+// so it stays away and says so - once every 10 minutes at most.
+setDesktopRetryNotifier(({ window, text }) => {
+  const detail = String(text || '').trim() || '（没能读到错误原文，可能需要你在客户端里看一眼）';
+  notify(`这个「重试」不是模型繁忙，我没有自动点\n窗口：${window}\n错误内容：${detail}\n\n点了也不会好（常见原因是选的模型太旧、已经不能用了）。需要你换个模型再试；换成可用的模型后我会照常自动重试。`, { appName: 'Codex 任务', notificationType: 'task_approval' }).catch(() => {});
 });
 
 async function handleFeishuControlCommand(text, message) {

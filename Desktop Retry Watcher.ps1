@@ -9,6 +9,7 @@
 # Output protocol (one JSON object per line on stdout):
 #   {"type":"ready"}
 #   {"type":"hit","at":"...","window":"...","proc":"..."}
+#   {"type":"ignored","at":"...","window":"...","text":"..."}   (not a capacity error)
 #   {"type":"error","message":"..."}
 param(
   [int]$ParentPid = 0,
@@ -69,16 +70,54 @@ try {
 
 $skipStreak = 0
 
-# A retry button that keeps coming back no matter how often it is pressed
-# (for example a Retry inside a usage popup) must not soak up clicks forever.
-# Per button: at most this many clicks inside the stall window; after that the
-# button is left alone and reported once, and clicking resumes when the button
-# disappears or the window of clicks ages out.
-$stallMaxClicks = 5
-$stallWindowMs = 600000
-$clickHistory = @{}
-$stallReported = @{}
+# Only a retry that belongs to a capacity error ("model is busy") is worth
+# pressing. A Retry shown for any other failure (for example a conversation
+# stuck on a retired model) cannot succeed, so the watcher reads the error
+# text near the button and leaves those alone, reporting them once instead.
+$capacityPattern = 'at capacity|temporarily unavailable|high demand|overloaded|capacity|暂时不可用|稍后再试|请稍后|繁忙|满载|过载|高负载|正忙|排队|容量|限流|429|rate limit'
+$reportedIgnored = @{}
 $seenButtonIds = New-Object 'System.Collections.Generic.HashSet[string]'
+
+$textCondition = New-Object System.Windows.Automation.PropertyCondition(
+  [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+  [System.Windows.Automation.ControlType]::Text)
+
+# Walk up from the button and collect the first meaningful text (the message
+# and the button usually share a nearby container). Parts that are just the
+# button label itself do not count.
+function Get-ButtonContext {
+  param($button)
+  $parts = New-Object 'System.Collections.Generic.List[string]'
+  $node = $button
+  for ($i = 0; $i -lt 8; $i++) {
+    try { $node = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($node) } catch { break }
+    if (-not $node) { break }
+    try {
+      $own = [string]$node.Current.Name
+      if ($own -and $own -ne $script:retryName -and $own -ne 'Retry' -and $own.Length -ge 2) { $parts.Add($own) }
+      $texts = $node.FindAll([System.Windows.Automation.TreeScope]::Descendants, $textCondition)
+      foreach ($text in $texts) {
+        $value = [string]$text.Current.Name
+        if ($value -and $value -ne $script:retryName -and $value -ne 'Retry' -and $value.Length -ge 2) { $parts.Add($value) }
+      }
+    } catch { }
+    if ($parts.Count -ge 1) { break }
+  }
+  return ($parts -join ' ')
+}
+
+function Get-WindowText {
+  param($window)
+  $parts = New-Object 'System.Collections.Generic.List[string]'
+  try {
+    $texts = $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $textCondition)
+    foreach ($text in $texts) {
+      $value = [string]$text.Current.Name
+      if ($value -and $value.Length -ge 2) { $parts.Add($value) }
+    }
+  } catch { }
+  return ($parts -join ' ')
+}
 
 function ParentAlive {
   if ($ParentPid -le 0) { return $true }
@@ -124,19 +163,25 @@ while (ParentAlive) {
         try { $buttonId = ($button.GetRuntimeId() | ForEach-Object { [string]$_ }) -join '.' } catch { }
         [void]$seenButtonIds.Add($buttonId)
         $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-        # Drop clicks that aged out of the stall window, then count the rest.
-        $recentClicks = @()
-        if ($clickHistory.ContainsKey($buttonId)) {
-          $recentClicks = @($clickHistory[$buttonId] | Where-Object { $now - $_ -lt $stallWindowMs })
+        # Decide by the error text, never by the button label alone.
+        $context = Get-ButtonContext -button $button
+        $isCapacity = $context -match $capacityPattern
+        if (-not $isCapacity -and -not $context) {
+          # The local structure exposed nothing readable; fall back to the
+          # window, which still keeps a stale popup from being clicked while
+          # the conversation itself shows a capacity error.
+          $windowText = Get-WindowText -window $window
+          if ($windowText -match $capacityPattern) { $isCapacity = $true } else { $context = $windowText }
         }
-        if ($recentClicks.Count -ge $stallMaxClicks) {
-          if (-not $stallReported.ContainsKey($buttonId)) {
-            $stallReported[$buttonId] = $true
-            Emit @{ type = 'stalled'; at = (Get-Date).ToUniversalTime().ToString('o'); window = $window.Current.Name; count = $recentClicks.Count }
+        if (-not $isCapacity) {
+          if (-not $reportedIgnored.ContainsKey($buttonId)) {
+            $reportedIgnored[$buttonId] = $true
+            $excerpt = ''
+            if ($context) { $excerpt = $context.Substring(0, [Math]::Min(160, $context.Length)) }
+            Emit @{ type = 'ignored'; at = (Get-Date).ToUniversalTime().ToString('o'); window = $window.Current.Name; text = $excerpt }
           }
           continue
         }
-        $clickHistory[$buttonId] = $recentClicks
         # Even if two watchers ever end up running (an orphaned instance from a
         # previous Companion process), only one click may happen per window.
         $stamp = Join-Path $env:TEMP 'CodexCompanionDesktopRetry.json'
@@ -193,9 +238,6 @@ while (ParentAlive) {
           }
         }
         $skipStreak = 0
-        # Record this click so the stall guard can see how often the same
-        # button has been pressed recently.
-        $clickHistory[$buttonId] = @($clickHistory[$buttonId]) + $now
         # Report whether the client was on screen at all. If hits keep arriving
         # while it says Minimized, we know the click works without the user
         # having to keep the window open.
@@ -208,16 +250,13 @@ while (ParentAlive) {
   } catch {
     Emit @{ type = 'error'; message = $_.Exception.Message }
   }
-  # Buttons that vanished (popup closed, retry finally succeeded) get a clean
-  # slate: next time they appear they may be clicked again. Only trust this
-  # cleanup on polls where at least one watched window was actually seen, so a
-  # transient empty desktop does not reset the stall guard.
+  # Buttons that vanished (popup closed, error gone) get a clean slate: next
+  # time they appear the user is told again if they still cannot be retried.
+  # Only trust this cleanup on polls where at least one retry button was seen,
+  # so a transient empty desktop does not wipe the record.
   if ($seenButtonIds.Count -gt 0) {
-    foreach ($knownId in @($clickHistory.Keys)) {
-      if (-not $seenButtonIds.Contains($knownId)) {
-        $clickHistory.Remove($knownId)
-        $stallReported.Remove($knownId)
-      }
+    foreach ($knownId in @($reportedIgnored.Keys)) {
+      if (-not $seenButtonIds.Contains($knownId)) { $reportedIgnored.Remove($knownId) }
     }
   }
   $seenButtonIds.Clear()

@@ -25,10 +25,10 @@ const state = {
   lastMethod: '',
   lastWindowState: '',
   skipped: 0,
-  stalled: 0,
-  lastStallAt: 0,
-  lastStallWindow: '',
-  lastStallCount: 0,
+  ignored: 0,
+  lastIgnoredAt: 0,
+  lastIgnoredWindow: '',
+  lastIgnoredText: '',
   lastError: '',
 };
 
@@ -37,6 +37,7 @@ const state = {
 // cumulative number since process start.
 const hitTimes = [];
 let stallNotifier = null;
+let lastIgnoredNotifiedAt = 0;
 
 export function setDesktopRetryNotifier(fn) {
   stallNotifier = typeof fn === 'function' ? fn : null;
@@ -111,16 +112,18 @@ export function applyDesktopRetryEvent(payload) {
     recordHit();
     return;
   }
-  // "stalled" means the same retry button was pressed too often without the
-  // button ever going away - typically a Retry inside a popup that cannot be
-  // resolved by clicking. The watcher has already stopped pressing it.
-  if (payload.type === 'stalled') {
-    state.stalled += 1;
-    state.lastStallAt = Date.now();
-    state.lastStallWindow = String(payload.window || '').slice(0, 80);
-    state.lastStallCount = Number(payload.count) || 0;
-    if (stallNotifier) {
-      try { stallNotifier({ window: state.lastStallWindow, count: state.lastStallCount }); } catch { }
+  // "ignored" means a retry button was found but its error is not a capacity
+  // problem (a retired model, a broken request...), so pressing it cannot
+  // help. The watcher left it alone and tells the user once in a while.
+  if (payload.type === 'ignored') {
+    state.ignored += 1;
+    state.lastIgnoredAt = Date.now();
+    state.lastIgnoredWindow = String(payload.window || '').slice(0, 80);
+    state.lastIgnoredText = String(payload.text || '').slice(0, 160);
+    const now = Date.now();
+    if (stallNotifier && now - lastIgnoredNotifiedAt > 600000) {
+      lastIgnoredNotifiedAt = now;
+      try { stallNotifier({ window: state.lastIgnoredWindow, text: state.lastIgnoredText }); } catch { }
     }
     return;
   }
