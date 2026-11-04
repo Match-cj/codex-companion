@@ -277,7 +277,7 @@ section h2{font-size:16px}
     const used=Number(usage.primary_used_percent);const remain=used>0?Math.round(100-used):null;
     const cards=[['后台',status.taskEngineReady?'运行正常':'额度与账号正常',status.taskEngineReady?'ok':'warn','today'],
       ['飞书',fs.state==='connected'?'已连接':(fs.configured?'正在连接':'未配置'),fs.state==='connected'?'ok':'warn','notify'],
-      ['自动重试',dr.running?'运行中（已点 '+(dr.hits||0)+' 次）':(dr.enabled?'正在启动':'未运行'),dr.running?'ok':'muted','settings'],
+      ['自动重试',dr.running?'运行中（已点 '+(dr.hits||0)+' 次，10 分钟内 '+(dr.hitsLast10Minutes||0)+' 次）':(dr.enabled?'正在启动':'未运行'),dr.running?'ok':'muted','settings'],
       ['5 小时额度',remain==null?'暂未返回':'剩余 '+remain+'%',remain==null?'muted':(remain<=15?'bad':remain<=35?'warn':'ok'),'quota']];
     el.innerHTML=cards.map(([k,v,tone,tab])=>`<div class="stat" data-tab="${tab}"><div class="k">${esc(k)}</div><div class="v ${tone}">${esc(v)}</div></div>`).join('')}
   function updateTabBadges(status){const approvals=(status.approvals||[]).length;const running=Object.values(status.tasks||{}).filter(task=>['starting','running','waiting_confirmation'].includes(task.status)).length;

@@ -13,7 +13,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 import { observeEarlyQuotaReset } from './quota-reset.mjs';
 import { notificationRules, notificationEnabled, notificationType, resetReminderLeads, validateNotificationSettings, nextResetReminder } from './notification-settings.mjs';
 import { recoverReplyTarget } from './feishu-reply-recovery.mjs';
-import { desktopRetryState, desktopTakeoverAllowed, syncDesktopRetryWatcher, startDesktopRetryWatcher, stopDesktopRetryWatcher } from './desktop-retry.mjs';
+import { desktopRetryState, desktopTakeoverAllowed, syncDesktopRetryWatcher, startDesktopRetryWatcher, stopDesktopRetryWatcher, setDesktopRetryNotifier } from './desktop-retry.mjs';
 import { validateWebhooks, activeWebhookTargets, sendWebhooks, kindLabel as webhookKindLabel, friendlyWebhookReason } from './webhook-notify.mjs';
 import { contextWarning, contextRatio, formatTokenCount, trimContextLedger } from './context-budget.mjs';
 import { humanError } from './human-error.mjs';
@@ -28,7 +28,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.29';
+const APP_VERSION = '1.0.30';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -682,15 +682,23 @@ function desktopRetryStatusText() {
   if (!retry.supported) return `${lines[0]}\n\n这个功能只在 Windows 桌面端可用。`;
   if (retry.enabled) {
     lines.push(`后台监视器：${retry.running ? '运行中' : '没在跑（可能刚启动或被关掉了）'}`);
-    lines.push(`已自动点击：${retry.hits} 次`);
+    lines.push(`已自动点击：${retry.hits} 次（最近 10 分钟 ${retry.hitsLast10Minutes || 0} 次，最近 1 小时 ${retry.hitsLast60Minutes || 0} 次）`);
     if (retry.lastHitAt) lines.push(`最近一次：${new Date(retry.lastHitAt).toLocaleString('zh-CN', { hour12: false })}`);
     if (retry.lastMethod) lines.push(`点击方式：${retry.lastMethod === 'mouse' ? '鼠标（用完已放回原位）' : '系统消息，不动鼠标'}`);
     if (retry.skipped) lines.push(`因为你在用鼠标，跳过 ${retry.skipped} 次`);
+    if (retry.lastStallAt) lines.push(`最近卡住：「${retry.lastStallWindow}」里的重试按钮点了 ${retry.lastStallCount} 次没反应，已暂停；按钮消失后自动恢复`);
     if (retry.lastError) lines.push(`最近错误：${retry.lastError}`);
     lines.push(`繁忙提示：已静默，每 ${Math.max(1, Math.round(Number(config.desktopRetryQuietMinutes) || 10))} 分钟最多提醒一次`);
   }
   return lines.join('\n');
 }
+
+// The watcher stopped pressing a retry button that never goes away (usually a
+// Retry inside a popup like the usage panel). Tell the user once - it needs a
+// human look, and clicking forever would only inflate the retry counter.
+setDesktopRetryNotifier(({ window, count }) => {
+  notify(`自动重试已暂停：同一个「重试」按钮点了 ${count} 次都没反应\n窗口：${window}\n\n这种按钮多半在弹窗里，再点只是空转，需要你手动看一眼。按钮消失后我会自动恢复点击。`, { appName: 'Codex 任务', notificationType: 'task_stalled' }).catch(() => {});
+});
 
 async function handleFeishuControlCommand(text, message) {
   const command = String(text || '').trim().replace(/[：:]/g, ' ');

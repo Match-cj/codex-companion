@@ -69,6 +69,17 @@ try {
 
 $skipStreak = 0
 
+# A retry button that keeps coming back no matter how often it is pressed
+# (for example a Retry inside a usage popup) must not soak up clicks forever.
+# Per button: at most this many clicks inside the stall window; after that the
+# button is left alone and reported once, and clicking resumes when the button
+# disappears or the window of clicks ages out.
+$stallMaxClicks = 5
+$stallWindowMs = 600000
+$clickHistory = @{}
+$stallReported = @{}
+$seenButtonIds = New-Object 'System.Collections.Generic.HashSet[string]'
+
 function ParentAlive {
   if ($ParentPid -le 0) { return $true }
   $proc = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue
@@ -107,10 +118,28 @@ while (ParentAlive) {
       foreach ($button in $buttons) {
         $name = $button.Current.Name
         if ($name -ne $retryName -and $name -ne 'Retry') { continue }
+        # Identify the exact button instance so a stuck one (a popup Retry that
+        # never resolves) can be told apart from a fresh retry elsewhere.
+        $buttonId = $name
+        try { $buttonId = ($button.GetRuntimeId() | ForEach-Object { [string]$_ }) -join '.' } catch { }
+        [void]$seenButtonIds.Add($buttonId)
+        $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        # Drop clicks that aged out of the stall window, then count the rest.
+        $recentClicks = @()
+        if ($clickHistory.ContainsKey($buttonId)) {
+          $recentClicks = @($clickHistory[$buttonId] | Where-Object { $now - $_ -lt $stallWindowMs })
+        }
+        if ($recentClicks.Count -ge $stallMaxClicks) {
+          if (-not $stallReported.ContainsKey($buttonId)) {
+            $stallReported[$buttonId] = $true
+            Emit @{ type = 'stalled'; at = (Get-Date).ToUniversalTime().ToString('o'); window = $window.Current.Name; count = $recentClicks.Count }
+          }
+          continue
+        }
+        $clickHistory[$buttonId] = $recentClicks
         # Even if two watchers ever end up running (an orphaned instance from a
         # previous Companion process), only one click may happen per window.
         $stamp = Join-Path $env:TEMP 'CodexCompanionDesktopRetry.json'
-        $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
         $last = 0
         if (Test-Path $stamp) {
           try { $last = [int64](Get-Content $stamp -Raw | ConvertFrom-Json).at } catch { $last = 0 }
@@ -164,6 +193,9 @@ while (ParentAlive) {
           }
         }
         $skipStreak = 0
+        # Record this click so the stall guard can see how often the same
+        # button has been pressed recently.
+        $clickHistory[$buttonId] = @($clickHistory[$buttonId]) + $now
         # Report whether the client was on screen at all. If hits keep arriving
         # while it says Minimized, we know the click works without the user
         # having to keep the window open.
@@ -176,5 +208,18 @@ while (ParentAlive) {
   } catch {
     Emit @{ type = 'error'; message = $_.Exception.Message }
   }
+  # Buttons that vanished (popup closed, retry finally succeeded) get a clean
+  # slate: next time they appear they may be clicked again. Only trust this
+  # cleanup on polls where at least one watched window was actually seen, so a
+  # transient empty desktop does not reset the stall guard.
+  if ($seenButtonIds.Count -gt 0) {
+    foreach ($knownId in @($clickHistory.Keys)) {
+      if (-not $seenButtonIds.Contains($knownId)) {
+        $clickHistory.Remove($knownId)
+        $stallReported.Remove($knownId)
+      }
+    }
+  }
+  $seenButtonIds.Clear()
   Start-Sleep -Seconds 3
 }

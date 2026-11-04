@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { desktopRetryEnabled, desktopTakeoverAllowed, desktopRetryCooldownSeconds, parseDesktopRetryLine, applyDesktopRetryEvent, desktopRetryState } from '../desktop-retry.mjs';
+import { desktopRetryEnabled, desktopTakeoverAllowed, desktopRetryCooldownSeconds, parseDesktopRetryLine, applyDesktopRetryEvent, desktopRetryState, setDesktopRetryNotifier } from '../desktop-retry.mjs';
 const widget = fs.readFileSync(new URL('../Quota Widget WPF.ps1', import.meta.url), 'utf8');
+const watcherScript = fs.readFileSync(new URL('../Desktop Retry Watcher.ps1', import.meta.url), 'utf8');
 
 test('desktop retry stays off unless explicitly enabled on Windows', () => {
   assert.equal(desktopRetryEnabled({}), false);
@@ -54,6 +55,43 @@ test('skipped clicks (user is using the mouse) are counted, not treated as hits'
   assert.equal(after.skipped, before.skipped + 1);
   assert.equal(after.hits, before.hits);
   assert.equal(after.lastError, before.lastError);
+});
+
+test('recent hit rates show the real workload, not just the cumulative count', () => {
+  const before = desktopRetryState();
+  for (let i = 0; i < 3; i++) applyDesktopRetryEvent({ type: 'hit', window: 'ChatGPT', method: 'invoke' });
+  const after = desktopRetryState();
+  assert.ok(after.hits >= before.hits + 3);
+  assert.ok(after.hitsLast10Minutes >= 3, `expected at least 3 recent hits, got ${after.hitsLast10Minutes}`);
+  assert.ok(after.hitsLast10Minutes <= after.hitsLast60Minutes);
+  assert.ok(after.hitsLast60Minutes <= after.hits);
+});
+
+test('a stalled retry button is reported once and can notify the user', () => {
+  const seen = [];
+  setDesktopRetryNotifier(event => seen.push(event));
+  const before = desktopRetryState();
+  applyDesktopRetryEvent({ type: 'stalled', window: 'ChatGPT', count: 5 });
+  const after = desktopRetryState();
+  assert.equal(after.stalled, before.stalled + 1);
+  assert.equal(after.lastStallWindow, 'ChatGPT');
+  assert.equal(after.lastStallCount, 5);
+  assert.ok(after.lastStallAt > 0);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].count, 5);
+  assert.equal(seen[0].window, 'ChatGPT');
+  setDesktopRetryNotifier(null);
+  applyDesktopRetryEvent({ type: 'stalled', window: 'ChatGPT', count: 5 });
+  assert.equal(seen.length, 1, 'notifier must not fire after being removed');
+});
+
+test('the watcher script has a stall guard so a popup retry cannot be clicked forever', () => {
+  assert.match(watcherScript, /\$stallMaxClicks\s*=\s*5/);
+  assert.match(watcherScript, /\$stallWindowMs\s*=\s*600000/);
+  assert.match(watcherScript, /type = 'stalled'/);
+  assert.match(watcherScript, /GetRuntimeId/);
+  // The stall check must happen before the click stamp is written.
+  assert.ok(watcherScript.indexOf('stallMaxClicks') < watcherScript.indexOf('CodexCompanionDesktopRetry.json'));
 });
 
 test('floating window exposes the retry switch through the same config field', () => {

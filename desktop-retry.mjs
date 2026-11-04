@@ -25,8 +25,38 @@ const state = {
   lastMethod: '',
   lastWindowState: '',
   skipped: 0,
+  stalled: 0,
+  lastStallAt: 0,
+  lastStallWindow: '',
+  lastStallCount: 0,
   lastError: '',
 };
+
+// Timestamps of recent clicks so the dashboard can show the real workload
+// ("how many retries happened in the last 10 minutes") instead of only a
+// cumulative number since process start.
+const hitTimes = [];
+let stallNotifier = null;
+
+export function setDesktopRetryNotifier(fn) {
+  stallNotifier = typeof fn === 'function' ? fn : null;
+}
+
+function recordHit() {
+  const now = Date.now();
+  hitTimes.push(now);
+  if (hitTimes.length > 1000) hitTimes.splice(0, hitTimes.length - 1000);
+}
+
+function recentHits(withinMs) {
+  const now = Date.now();
+  let count = 0;
+  for (let i = hitTimes.length - 1; i >= 0; i--) {
+    if (now - hitTimes[i] > withinMs) break;
+    count++;
+  }
+  return count;
+}
 
 let child = null;
 let restartTimer = null;
@@ -63,7 +93,11 @@ export function parseDesktopRetryLine(line) {
 }
 
 export function desktopRetryState() {
-  return { ...state };
+  return {
+    ...state,
+    hitsLast10Minutes: recentHits(600000),
+    hitsLast60Minutes: recentHits(3600000),
+  };
 }
 
 export function applyDesktopRetryEvent(payload) {
@@ -74,6 +108,20 @@ export function applyDesktopRetryEvent(payload) {
     state.lastWindow = String(payload.window || '').slice(0, 80);
     state.lastMethod = String(payload.method || '').slice(0, 20);
     state.lastWindowState = String(payload.windowState || '').slice(0, 20);
+    recordHit();
+    return;
+  }
+  // "stalled" means the same retry button was pressed too often without the
+  // button ever going away - typically a Retry inside a popup that cannot be
+  // resolved by clicking. The watcher has already stopped pressing it.
+  if (payload.type === 'stalled') {
+    state.stalled += 1;
+    state.lastStallAt = Date.now();
+    state.lastStallWindow = String(payload.window || '').slice(0, 80);
+    state.lastStallCount = Number(payload.count) || 0;
+    if (stallNotifier) {
+      try { stallNotifier({ window: state.lastStallWindow, count: state.lastStallCount }); } catch { }
+    }
     return;
   }
   // "mouse" means the button refused UI Automation, so the pointer had to be
