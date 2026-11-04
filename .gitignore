@@ -21,6 +21,14 @@ PAYLOAD-MANIFEST.json
 runtime/
 node_modules/
 
+# Development scratch files
+.blk*.mjs
+.chk.mjs
+.dash-check.mjs
+.split-batch*.py
+.make-probe.py
+.dash-probe*.html
+
 # Editor and OS files
 .vscode/
 .idea/
