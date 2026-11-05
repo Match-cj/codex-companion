@@ -5,7 +5,7 @@
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
-$package = Get-Content -LiteralPath (Join-Path $root 'package.json') -Raw | ConvertFrom-Json
+$package = Get-Content -LiteralPath (Join-Path $root 'package.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $appVersion = [string]$package.version
 $outputRoot = [IO.Path]::GetFullPath((Split-Path $root -Parent))
 $output = Join-Path $outputRoot "CodexCompanion-Setup-v$appVersion.exe"
