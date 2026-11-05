@@ -40,6 +40,7 @@ section h2{font-size:16px}
   <div class="top"><div><h1>Codex Companion <span id="version" class="version"></span></h1><div class="sub">任务、额度和通知集中在这里</div></div><div class="row"><button class="plain small" onclick="openWidget()">打开额度浮窗</button><button class="plain small" onclick="refreshAll()">立即刷新</button></div></div>
   <div id="health" class="health">正在连接后台……</div>
   <div id="network" class="health" style="display:none"></div>
+  <div id="updateBanner" class="health" style="display:none"></div>
   <div id="stats" class="stats"></div>
   <section data-panel="diagnostics"><p id="orphanHint" class="warn" hidden></p><details><summary>状态诊断与处理建议</summary><div id="diagnosticIssues">正在检查……</div><p class="muted">诊断分类来自当前状态，不代表已确定故障根因。</p></details></section>
   <section data-panel="setup" id="setupWizard"><h2>首次使用检查</h2><div id="setupSteps">正在检查……</div><div class="row"><button onclick="importLocalAccount(this)">导入已登录账号</button><button onclick="$('feishuAppId').closest('section').scrollIntoView({behavior:'smooth'})">设置飞书机器人</button><button onclick="$('securitySection').scrollIntoView({behavior:'smooth'})">验证操作者</button><button onclick="repairCompanion(this)">一键自检并修复</button><button onclick="exportDiagnostics(this)">导出脱敏诊断</button></div><p class="muted">自检会检查后台引擎、Codex 对话监听、飞书长连接和话题映射；只清理已确认属于旧群聊/旧版本的本地映射，不会删除飞书消息。</p><p class="muted">账号未登录时也可查看已有对话，但不能据此判断已登录。飞书只发通知可使用 Webhook；回复控制需要自建应用机器人并 @ 它验证。导出后浏览器会下载 JSON 文件，不包含原始日志和对话内容。</p></section>
@@ -285,6 +286,31 @@ section h2{font-size:16px}
       if(count){if(!dot){dot=document.createElement('span');dot.className='dot';button.appendChild(dot)}dot.textContent=count}else if(dot)dot.remove()})}
   document.querySelectorAll('#recentThreads,#tasks,#taskActivity').forEach(element=>element.classList.add('list-scroll'));
   if($('stats'))$('stats').addEventListener('click',event=>{const card=event.target.closest('.stat');if(card)activateTab(card.dataset.tab)});
+  // ---- 应用内更新（只替换程序文件，不重装）----
+  let updateStatus=null;
+  function renderUpdateBanner(status){
+    updateStatus=status;const el=$('updateBanner');if(!el)return;
+    if(!status||!status.available){el.style.display='none';el.innerHTML='';return}
+    el.style.display='';
+    const size=status.patch?`补丁约 ${Math.max(1,Math.round(status.patch.size/1024))} KB`:'需要下载完整安装包';
+    const action=status.canApply
+      ?`<button class="small primary" onclick="applyUpdate(this)">立即更新</button>`
+      :`<a href="${esc(status.htmlUrl||'https://github.com/Match-cj/codex-companion/releases/latest')}" target="_blank" rel="noopener"><button class="small">打开下载页</button></a>`;
+    const note=status.notes?status.notes.split('\n')[0]:'';
+    el.innerHTML=`<b>有新版本 v${esc(status.latest)}</b> · 当前 v${esc(status.current)} · ${esc(size)}<br><span class="muted">${esc(note)}${status.reason?'　'+esc(status.reason):''}</span><div class="row" style="margin-top:8px">${action}<button class="small plain" onclick="dismissUpdate()">本次先不更新</button></div><span id="updateState" class="muted"></span>`;
+  }
+  async function checkUpdate(force){const status=await api('/api/update/status'+(force?'?force=1':''));if(status&&!status.failed)renderUpdateBanner(status);return status}
+  function dismissUpdate(){const el=$('updateBanner');if(el){el.style.display='none';el.innerHTML=''}}
+  async function applyUpdate(button){
+    if(!confirm('更新会下载一个小补丁并自动重启软件，浮窗会消失约 10 秒后回来。现在继续吗？'))return;
+    if(button){button.disabled=true;button.textContent='更新中…'}
+    const result=await api('/api/update/apply',{method:'POST',body:'{}'});
+    if(result&&!result.failed){
+      const el=$('updateState');if(el)el.textContent=`正在更新到 v${result.to}，软件会自动重启…`;
+      toast('正在更新，软件会自动重启…');
+    }else if(button){button.disabled=false;button.textContent='立即更新'}
+  }
+  checkUpdate(false);setInterval(()=>checkUpdate(false),10*60*1000);
   const hashTab=(location.hash||'').replace('#tab=','').trim();
   const remembered=localStorage.getItem('codexCompanionTab');
   activateTab(tabLayout[hashTab]?hashTab:(tabLayout[remembered]?remembered:'today'));

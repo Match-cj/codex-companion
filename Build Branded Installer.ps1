@@ -41,7 +41,7 @@ $npm = (Get-Command npm.cmd -ErrorAction Stop).Source
 $appFiles = @(
     'Codex Companion Launcher.vbs','Codex Companion Worker.vbs','companion.ico','dashboard.html','HANDOVER.md',
     'Install Companion.cmd','Install Companion.ps1','Install Startup Task.ps1','Launch Quota Widget.vbs',
-    'package.json','package-lock.json','Quota Widget WPF.ps1','README.md','server.mjs','image-relay.mjs','file-relay.mjs','quota-reset.mjs','notification-settings.mjs','feishu-reply-recovery.mjs',
+    'package.json','package-lock.json','Quota Widget WPF.ps1','README.md','server.mjs','update.mjs','image-relay.mjs','file-relay.mjs','quota-reset.mjs','notification-settings.mjs','feishu-reply-recovery.mjs',
     'Start Codex Companion Background.cmd','Start Codex Companion.cmd','Start Codex Companion.ps1',
     'Start Quota Widget.cmd','Stop Codex Companion.cmd','Stop Codex Companion.ps1',
     'Uninstall Companion.cmd','Uninstall Companion.ps1'

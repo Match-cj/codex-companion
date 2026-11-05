@@ -58,7 +58,32 @@ node --test tests/security.test.mjs
 - 每次改代码升 patch 版本，三处同步：`server.mjs` 的 `APP_VERSION`、`package.json` 的 `version`、`Quota Widget WPF.ps1` 的 `$script:AppVersion`。
 - `CHANGELOG.md` 同步记录用户可见变化。
 - 打包：安装 **Inno Setup 7 x64** 后运行 `Build Branded Installer.ps1`，产出同级目录的 `CodexCompanion-Setup-v<版本>.exe`（会自动下载并内置指定版本的 Codex CLI，可用 `-CodexVersion` 指定）。
+- 打补丁：双击 `Build Update Patch.cmd`（或 `node tools/make-patch.mjs`），产出同级目录的 `CodexCompanion-Patch-v<版本>.zip`，终端会打印 `sha256`。
 - 建议攒够一批用户可见变化再发 Release，不必每个 patch 都打包。
+
+### 发版时必须挂两个附件
+
+| 附件 | 作用 | 谁在用 |
+|---|---|---|
+| `CodexCompanion-Setup-v<版本>.exe` | 全新安装 / 依赖变化时升级 | 新用户、旧版本跨太大的人 |
+| `CodexCompanion-Patch-v<版本>.zip` | 应用内更新（几百 KB） | 已安装用户点「立即更新」 |
+
+Release 说明里必须有一行 `PATCH-SHA256: <补丁的 sha256 小写十六进制>`。程序下载补丁后会先比对它，不一致就拒绝替换。没有补丁附件时，界面会退回「打开下载页」，不会报错。
+
+## 应用内更新（技术细节）
+
+体积账：安装目录约 500 MB，其中 `runtime\node.exe` 约 88 MB、`runtime\codex` 约 370 MB，项目自己的程序文件约 600 KB。所以补丁只装程序文件，压缩后约 200 KB。
+
+流程：
+
+1. 后台启动 1 分钟后检查一次 `releases/latest`（之后每 6 小时），超时 5 秒即放弃；同一版本只通知一次。
+2. 用户点「立即更新」→ `POST /api/update/apply`（仅允许本机）→ 下载补丁 → 校验 SHA256 → 解压到 `%TEMP%` → 逐文件校验 → 比对依赖指纹 → 备份旧文件到 `_update-backup\` → 覆盖 → 写 `update-state.json` → 退出。
+3. 退出前启动 `Update Watchdog.ps1`（先复制到 `%TEMP%`，避免被自己的清理逻辑杀掉）。看门狗走计划任务拉起新版本，最多等 90 秒；新版本没回应 `/api/health` 就还原备份、删状态、再启动一次旧版本，日志在 `%TEMP%\CodexCompanion-update-watchdog.log`。
+4. 正常启动时 `recoverUpdateState()` 再核对一次：版本等于目标就清理备份并通知成功；否则回滚。
+
+不会自动更新的情况：依赖（`package.json` 的 dependencies）发生变化、安装目录不可写（例如装在 `Program Files`）、Release 没有补丁附件。这三种都会提示改用完整安装包。
+
+调试用环境变量：`CC_UPDATE_FEED` 可把检查地址指到本地假接口（返回一个 GitHub release 形状的 JSON），配合本地静态服务器即可离线演练整条更新链路。
 
 ## 安装器机制（技术细节）
 

@@ -41,7 +41,9 @@ $excludeFiles = @(
     'NODE-LICENSE.txt',
     '.gitignore',
     'Build Branded Installer.ps1',
-    'Install Portable.ps1'
+    'Build Update Patch.cmd',
+    'Install Portable.ps1',
+    'update-state.json'
 )
 $excludePatterns = @('*.log')
 

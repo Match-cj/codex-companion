@@ -23,12 +23,13 @@ import { createNativeUsage } from './native-usage.mjs';
 import { validNativeVault, createNativeVaultStore } from './native-vault.mjs';
 import { DeviceLoginSession } from './device-login.mjs';
 import { codexLaunch, closeCodexDesktop, codexDesktopPids, isCodexDesktopRunning, launchCodexDesktop, execPowershellShort, isQuotaWidgetRunning, findQuotaWidgetWindow, focusQuotaWidgetWindow, killQuotaWidgetProcesses, openQuotaWidget } from './desktop-client.mjs';
-import { appDir, configPath, widgetSwitchTracePath, nativeAccountsPath, nativeAccountsBackupPath, switcherAccountsPath, liveAuthPath, widgetScriptPath, widgetLauncherPath } from './app-paths.mjs';
+import { appDir, configPath, widgetSwitchTracePath, nativeAccountsPath, nativeAccountsBackupPath, switcherAccountsPath, liveAuthPath, widgetScriptPath, widgetLauncherPath, sourceDir } from './app-paths.mjs';
+import { DEFAULT_FEED as DEFAULT_UPDATE_FEED, MANIFEST_NAME as UPDATE_MANIFEST_NAME, normalizeVersion, summarizeRelease, depsFingerprint, isSafeRelativePath } from './update.mjs';
 import { protectCredential, unprotectCredential } from './credential-crypto.mjs';
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.37';
+const APP_VERSION = '1.0.38';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -1400,6 +1401,8 @@ async function switchNativeAccount(id) {
       throw error;
     }
     accounts = accounts.map(account => ({ ...account, is_active: String(account.id) === String(id) }));
+    // Our own write to auth.json must not look like an external account switch.
+    await rememberLocalAuth(targetAuth);
     officialRateLimits = null;
     if (codex) { codex.close(); codex = null; }
     await startTaskEngine();
@@ -2645,6 +2648,16 @@ async function handle(req, res) {
       if(!isLoopback(req.socket.remoteAddress))return send(res,403,{error:'一键修复仅允许本机操作'});
       return send(res,200,await repairCompanion());
     }
+    if (req.method==='GET'&&u.pathname==='/api/update/status') return send(res,200,await updateStatusPayload(u.searchParams.get('force')==='1'));
+    if (req.method==='POST'&&u.pathname==='/api/update/apply') {
+      if(!isLoopback(req.socket.remoteAddress))return send(res,403,{error:'更新只允许在本机操作'});
+      const result=await applyUpdate();
+      send(res,200,result);
+      // Give the response time to flush, then step aside so the scheduled task
+      // can bring the new version up.
+      setTimeout(()=>process.exit(0),1200).unref?.();
+      return;
+    }
     if (req.method==='POST'&&u.pathname==='/api/feishu/topics/rebuild') {
       if(!isLoopback(req.socket.remoteAddress))return send(res,403,{error:'话题重建仅允许本机操作'});
       config.feishuTaskTopicRoots = {};
@@ -2729,6 +2742,7 @@ async function handle(req, res) {
       if(!auth?.tokens?.id_token||!auth?.tokens?.access_token||!auth?.tokens?.refresh_token)throw Error('没有找到可导入的本机文件凭据，请使用通用网页登录。客户端已登录不代表凭据存储在文件中。');
       const account=await upsertNativeAccount(auth,{is_active:true});
       if(!account)throw Error('该账号已被删除。若确实需要恢复，请重新登录后添加。');
+      await rememberLocalAuth(auth);
       nativeUsageCache.delete(String(account.id));
       await refreshAccounts({forceNative:true,awaitNative:false});
       return send(res,200,{ok:true,message:'已导入本机账号，额度正在后台刷新。'});
@@ -3015,40 +3029,64 @@ async function handle(req, res) {
 function send(res,status,value,type='application/json; charset=utf-8'){const b=Buffer.from(typeof value==='string'?value:JSON.stringify(value));res.writeHead(status,{'content-type':type,'content-length':b.length});res.end(b);}
 
 async function startTaskEngine(){if(codex?.proc)return;codex=new CodexServer();try{await codex.start()}catch(e){taskEngineError=humanError(e);console.error('[task engine]',e.message);codex.close();codex.proc=null;}}
+function localAuthIdentity(auth) {
+  const claims = decodeJwtPayload(auth?.tokens?.id_token || '') || {};
+  const authClaims = claims['https://api.openai.com/auth'] || {};
+  const accountId = auth?.tokens?.account_id || authClaims.chatgpt_account_id || null;
+  const email = claims.email || null;
+  return {
+    accountId,
+    email,
+    identity: String(accountId || email || '').toLowerCase(),
+    credentials: createHash('sha256').update(String(auth?.tokens?.refresh_token || '')).digest('hex').slice(0, 32),
+  };
+}
+
+// Called when Companion itself wrote auth.json (account switch), so the watcher
+// below does not mistake our own write for an external account change.
+async function rememberLocalAuth(auth) {
+  const { identity, credentials } = localAuthIdentity(auth);
+  config.lastLocalAuthIdentity = identity;
+  config.lastLocalAuthCredHash = credentials;
+  await saveConfig().catch(() => {});
+}
+
 // Fresh-install convenience: if this machine is already logged in to the Codex
 // client, pull those file credentials into the encrypted vault so the user skips
 // manual login. Re-checked on startup and on a timer, so switching accounts in
-// the Codex client brings the new account over too; the fingerprint stops us
-// from rewriting the vault when nothing changed. Accounts the user deleted are
-// still refused by upsertNativeAccount (deletedAccountKeys).
+// the Codex client brings the new account over too. An identity change follows
+// the client (and moves the active account); a plain token refresh updates the
+// stored credentials quietly so it never overrides a choice made in the UI.
+// Accounts the user deleted are still refused by upsertNativeAccount.
 async function autoImportLocalAuth() {
   try {
     const auth = await readJson(liveAuthPath).catch(() => null);
     if (!auth?.tokens?.id_token || !auth?.tokens?.access_token || !auth?.tokens?.refresh_token) return;
-    const claims = decodeJwtPayload(auth.tokens.id_token);
-    const authClaims = claims['https://api.openai.com/auth'] || {};
-    const accountId = auth.tokens.account_id || authClaims.chatgpt_account_id || null;
-    const email = claims.email || null;
-    const fingerprint = createHash('sha256')
-      .update(`${accountId || ''}|${String(email || '').toLowerCase()}|${auth.tokens.refresh_token}`)
-      .digest('hex').slice(0, 32);
-    if (config.lastLocalAuthFingerprint === fingerprint) return;
+    const { accountId, email, identity, credentials } = localAuthIdentity(auth);
+    const identityChanged = config.lastLocalAuthIdentity !== identity;
+    const credentialsChanged = config.lastLocalAuthCredHash !== credentials;
+    if (!identityChanged && !credentialsChanged) return;
     const known = await loadNativeAccountsSnapshot().catch(() => []);
     const isNew = !known.some(item =>
       (accountId && item.account_id === accountId)
       || (email && String(item.email || '').toLowerCase() === String(email).toLowerCase()));
-    const account = await upsertNativeAccount(auth, isNew ? { is_active: true } : {});
-    config.lastLocalAuthFingerprint = fingerprint;
+    const account = await upsertNativeAccount(auth, (isNew || identityChanged) ? { is_active: true } : {});
+    config.lastLocalAuthIdentity = identity;
+    config.lastLocalAuthCredHash = credentials;
     config.autoImportLocalAuthDone = true; // kept for config compatibility
     await saveConfig();
-    if (account && isNew) {
+    if (!account) return; // deleted on purpose: stay silent
+    if (isNew) {
       nativeUsageCache.delete(String(account.id));
       await refreshAccounts({ forceNative: true, awaitNative: false }).catch(() => {});
       await notify(`已自动导入本机 Codex 登录\n账号：${account.name || account.email || 'ChatGPT 账号'}\n无需重新登录，额度约 1 分钟后显示。`, { appName: 'Codex Companion' });
       console.log('[auto import] imported local codex auth:', account.id);
-    } else if (account) {
-      // Same account, refreshed tokens: keep the vault copy fresh, stay quiet,
-      // and do not steal the active-account choice the user made in the UI.
+    } else if (identityChanged) {
+      nativeUsageCache.delete(String(account.id));
+      await refreshAccounts({ forceNative: true, awaitNative: false }).catch(() => {});
+      await notify(`已跟随 Codex 客户端切换账号\n当前账号：${account.name || account.email || 'ChatGPT 账号'}`, { appName: 'Codex Companion' });
+      console.log('[auto import] followed account switch:', account.id);
+    } else {
       console.log('[auto import] refreshed local codex credentials:', account.id);
     }
   } catch (error) {
@@ -3056,9 +3094,217 @@ async function autoImportLocalAuth() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// In-app updates
+//
+// A release carries two assets: the full installer (bundles Node + Codex CLI)
+// and a small patch zip with just this project's own files. Everything below
+// only touches the patch: download -> verify every hash -> back up -> replace ->
+// restart through the scheduled task. If the new version does not show up after
+// the restart, the next boot rolls the files back from _update-backup.
+// ---------------------------------------------------------------------------
+const updateFeedUrl = process.env.CC_UPDATE_FEED || DEFAULT_UPDATE_FEED;
+const updateStatePath = path.join(sourceDir, 'update-state.json');
+const updateBackupDir = path.join(sourceDir, '_update-backup');
+const updateCheckIntervalMs = 6 * 60 * 60 * 1000;
+let updateCache = { checkedAt: 0, release: null, error: null };
+let updateApplying = false;
+
+async function fetchUpdateRelease(url, timeoutMs) {
+  const response = await fetch(url, {
+    headers: { accept: 'application/vnd.github+json', 'user-agent': `CodexCompanion/${APP_VERSION}` },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) throw Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+async function refreshUpdateRelease(force = false) {
+  const fresh = updateCache.checkedAt && Date.now() - updateCache.checkedAt < updateCheckIntervalMs;
+  if (!force && fresh && updateCache.release) return updateCache.release;
+  try {
+    const release = await fetchUpdateRelease(updateFeedUrl, 5000);
+    updateCache = { checkedAt: Date.now(), release, error: null };
+    return release;
+  } catch (error) {
+    // Being offline or blocked must never be an error the user has to think about.
+    updateCache = { ...updateCache, checkedAt: Date.now(), error: humanError(error) };
+    return updateCache.release;
+  }
+}
+
+async function installDirWritable() {
+  // 2 === W_OK. The installer lives under %LOCALAPPDATA%, so this is normally
+  // true; a Program Files install needs the full installer instead.
+  try { await fs.access(sourceDir, 2); return true; } catch { return false; }
+}
+
+async function updateStatusPayload(force = false) {
+  const release = await refreshUpdateRelease(force);
+  const summary = summarizeRelease(release || {}, APP_VERSION);
+  const writable = await installDirWritable();
+  return {
+    ...summary,
+    canApply: Boolean(summary.patch) && writable,
+    checkedAt: updateCache.checkedAt,
+    error: updateCache.error || null,
+    reason: !summary.available ? '' : (summary.requiresFullInstaller ? '这次更新包含依赖变化，需要下载完整安装包。' : (!writable ? '安装目录不可写，需要用安装包升级。' : '')),
+  };
+}
+
+async function notifyOnceAboutUpdate(status) {
+  if (!status.available) return;
+  if (config.lastNotifiedUpdateVersion === status.latest) return;
+  config.lastNotifiedUpdateVersion = status.latest;
+  await saveConfig().catch(() => {});
+  const how = status.canApply ? `约 ${Math.max(1, Math.round((status.patch?.size || 0) / 1024))} KB，点一下就更新` : '请下载完整安装包';
+  await notify(`有新版本 v${status.latest}（当前 v${status.current}）\n${how}${status.notes ? '\n' + status.notes.split('\n')[0] : ''}\n打开 Companion 网页即可更新。`, { appName: 'Codex Companion' }).catch(() => {});
+}
+
+async function downloadPatch(asset, target) {
+  const response = await fetch(asset.url, {
+    headers: { 'user-agent': `CodexCompanion/${APP_VERSION}` },
+    signal: AbortSignal.timeout(180000),
+  });
+  if (!response.ok) throw Error(`下载更新包失败：HTTP ${response.status}`);
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (asset.size && buffer.length !== asset.size) throw Error('更新包下载不完整，请重试。');
+  if (buffer.length > 64 * 1024 * 1024) throw Error('更新包体积异常，已停止。');
+  await fs.writeFile(target, buffer);
+  return createHash('sha256').update(buffer).digest('hex');
+}
+
+async function extractZip(zipPath, targetDir) {
+  await fs.mkdir(targetDir, { recursive: true });
+  // Windows ships Expand-Archive with PowerShell 5.1, so no extra dependency.
+  await execFileAsync('powershell.exe', [
+    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
+    `Expand-Archive -LiteralPath '${zipPath.replace(/'/g, "''")}' -DestinationPath '${targetDir.replace(/'/g, "''")}' -Force`,
+  ], { timeout: 120000, windowsHide: true });
+}
+
+function validateUpdateManifest(manifest, expectedVersion) {
+  if (!manifest || typeof manifest !== 'object') throw Error('更新清单无效。');
+  if (normalizeVersion(manifest.version) !== normalizeVersion(expectedVersion)) throw Error('更新包版本与最新版本不一致，已停止。');
+  if (!Array.isArray(manifest.files) || manifest.files.length === 0) throw Error('更新清单里没有文件。');
+  if (manifest.files.length > 400) throw Error('更新清单文件数量异常，已停止。');
+  for (const file of manifest.files) {
+    if (!isSafeRelativePath(file?.path)) throw Error(`更新清单包含非法路径：${file?.path}`);
+    if (!/^[0-9a-f]{64}$/i.test(String(file?.sha256 || ''))) throw Error(`更新清单缺少校验值：${file?.path}`);
+  }
+  return manifest;
+}
+
+async function scheduleRestart(stageDir, targetVersion) {
+  // The only sanctioned restart path is the scheduled task: it owns the process
+  // tree, so the new backend survives this one exiting. The watchdog runs from
+  // %TEMP% and rolls the files back if the new version never answers /api/health.
+  const watchdog = path.join(sourceDir, 'Update Watchdog.ps1');
+  if (!existsSync(watchdog)) return;
+  const copy = path.join(stageDir, 'Update Watchdog.ps1');
+  await fs.copyFile(watchdog, copy);
+  const child = spawn('powershell.exe', [
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', copy,
+    '-InstallDir', sourceDir,
+    '-TargetVersion', normalizeVersion(targetVersion),
+    '-Port', String(config.port || 17841),
+  ], { detached: true, stdio: 'ignore', windowsHide: true });
+  child.unref();
+}
+
+async function applyUpdate() {
+  if (updateApplying) throw Error('更新正在进行中，请稍等。');
+  const status = await updateStatusPayload(true);
+  if (!status.available) throw Error('当前已经是最新版本。');
+  if (!status.patch) throw Error(status.reason || '这次更新需要下载完整安装包。');
+  const stage = path.join(os.tmpdir(), 'CodexCompanionUpdate', `v${status.latest}-${Date.now()}`);
+  updateApplying = true;
+  try {
+    await fs.mkdir(stage, { recursive: true });
+    const zipPath = path.join(stage, 'patch.zip');
+    const actual = await downloadPatch(status.patch, zipPath);
+    if (status.patch.sha256 && actual !== status.patch.sha256) throw Error('更新包校验失败（SHA256 不一致），已停止。');
+    const filesDir = path.join(stage, 'files');
+    await extractZip(zipPath, filesDir);
+    const manifest = validateUpdateManifest(
+      JSON.parse(await fs.readFile(path.join(filesDir, UPDATE_MANIFEST_NAME), 'utf8')), status.latest);
+    for (const file of manifest.files) {
+      const bytes = await fs.readFile(path.join(filesDir, file.path));
+      if (createHash('sha256').update(bytes).digest('hex') !== String(file.sha256).toLowerCase()) {
+        throw Error(`文件校验失败：${file.path}`);
+      }
+    }
+    const localPackage = JSON.parse(await fs.readFile(path.join(sourceDir, 'package.json'), 'utf8'));
+    if (manifest.depsFingerprint && manifest.depsFingerprint !== depsFingerprint(localPackage)) {
+      throw Error('这次更新包含依赖变化，需要下载完整安装包。');
+    }
+    await fs.rm(updateBackupDir, { recursive: true, force: true });
+    await fs.mkdir(updateBackupDir, { recursive: true });
+    const replaced = [];
+    try {
+      for (const file of manifest.files) {
+        const target = path.join(sourceDir, file.path);
+        if (existsSync(target)) {
+          await fs.mkdir(path.dirname(path.join(updateBackupDir, file.path)), { recursive: true });
+          await fs.copyFile(target, path.join(updateBackupDir, file.path));
+        }
+        await fs.mkdir(path.dirname(target), { recursive: true });
+        await fs.copyFile(path.join(filesDir, file.path), target);
+        replaced.push(file.path);
+      }
+    } catch (error) {
+      for (const relative of replaced) {
+        const backup = path.join(updateBackupDir, relative);
+        if (existsSync(backup)) await fs.copyFile(backup, path.join(sourceDir, relative)).catch(() => {});
+      }
+      throw Error(`替换文件失败，已还原：${humanError(error)}`);
+    }
+    await fs.writeFile(updateStatePath, JSON.stringify({
+      from: APP_VERSION, to: manifest.version, notes: status.notes,
+      files: replaced, appliedAt: new Date().toISOString(),
+    }, null, 2), 'utf8');
+    await scheduleRestart(stage, manifest.version);
+    return { ok: true, restarting: true, from: APP_VERSION, to: manifest.version };
+  } finally {
+    updateApplying = false;
+  }
+}
+
+// Runs before anything else on boot: a finished update is confirmed and cleaned
+// up, an unfinished one is rolled back so the app always starts on known files.
+async function recoverUpdateState() {
+  if (!existsSync(updateStatePath)) {
+    if (existsSync(updateBackupDir)) await fs.rm(updateBackupDir, { recursive: true, force: true }).catch(() => {});
+    return;
+  }
+  try {
+    const state = JSON.parse(await fs.readFile(updateStatePath, 'utf8'));
+    if (normalizeVersion(state.to) === normalizeVersion(APP_VERSION)) {
+      await fs.rm(updateStatePath, { force: true });
+      await fs.rm(updateBackupDir, { recursive: true, force: true }).catch(() => {});
+      console.log(`[update] applied v${state.from} -> v${state.to}`);
+      await notify(`已更新到 v${APP_VERSION}\n${state.notes || '常规修复与改进'}`, { appName: 'Codex Companion' }).catch(() => {});
+      return;
+    }
+    for (const relative of Array.isArray(state.files) ? state.files : []) {
+      if (!isSafeRelativePath(relative)) continue;
+      const backup = path.join(updateBackupDir, relative);
+      if (existsSync(backup)) await fs.copyFile(backup, path.join(sourceDir, relative)).catch(() => {});
+    }
+    await fs.rm(updateStatePath, { force: true });
+    await fs.rm(updateBackupDir, { recursive: true, force: true }).catch(() => {});
+    console.error(`[update] rolled back to v${APP_VERSION} (target was v${state.to})`);
+    await notify(`更新到 v${state.to} 没有成功，已自动回滚到 v${APP_VERSION}。`, { appName: 'Codex Companion' }).catch(() => {});
+  } catch (error) {
+    console.error('[update state]', error.message);
+  }
+}
+
 async function main() {
   const storedConfig = await readJson(configPath);
   config = { ...defaultConfig, ...storedConfig };
+  // Before anything else: confirm a finished in-place update, or undo a broken one.
+  await recoverUpdateState();
   if (storedConfig.feishuTopicRootSchemaVersion !== 2) {
     // Roots created by older releases did not record their chat. Reusing one
     // can report success while the result lands in an old/hidden topic. Keep a
@@ -3103,6 +3349,14 @@ async function main() {
   autoImportLocalAuth();
   // Pick up an account switch made in the Codex client without a restart.
   setInterval(autoImportLocalAuth, 5 * 60 * 1000).unref?.();
+  // Update checks are lazy and quiet: the first one waits a minute so it never
+  // delays startup, and a blocked network just leaves the banner hidden.
+  setTimeout(() => {
+    updateStatusPayload().then(status => notifyOnceAboutUpdate(status)).catch(() => {});
+    setInterval(() => {
+      updateStatusPayload().then(status => notifyOnceAboutUpdate(status)).catch(() => {});
+    }, updateCheckIntervalMs).unref?.();
+  }, 60 * 1000).unref?.();
   startTaskEngine().catch(e => console.error('[task engine]', e.message));
   startFeishuLongConnection().catch(e => console.error('[feishu connection]', e.message));
   startCodexSessionMonitor().catch(e => console.error('[codex session monitor]', e.message));
