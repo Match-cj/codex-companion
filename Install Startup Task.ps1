@@ -1,4 +1,4 @@
-param([switch]$StartNow)
+﻿param([switch]$StartNow)
 
 $ErrorActionPreference = 'Stop'
 $taskName = 'Codex Companion'
@@ -11,10 +11,13 @@ try {
     if ($env:CODEX_COMPANION_FORCE_STARTUP_FALLBACK -eq '1') { throw '启动项回退测试。' }
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     $action = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\wscript.exe') -Argument ('"' + $worker + '"') -WorkingDirectory $PSScriptRoot
-    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
+    $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
+    # Repeat trigger: heal a dead backend within 5 minutes even if something
+    # killed it (crash, AV, external script). Healthy backend = cheap no-op.
+    $healTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
     $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -Hidden -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Days 3650)
-    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description '独立、隐藏地启动 Codex Companion 后台和额度浮窗。' -Force | Out-Null
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -Hidden -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($logonTrigger, $healTrigger) -Principal $principal -Settings $settings -Description '独立、隐藏地启动 Codex Companion 后台和额度浮窗；每 5 分钟自检一次，后台挂了自动拉起。' -Force | Out-Null
     if (Test-Path -LiteralPath $legacyShortcut) { [IO.File]::Delete($legacyShortcut) }
 }
 catch {
