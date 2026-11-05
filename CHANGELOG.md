@@ -2,6 +2,10 @@
 
 项目遵循“用户可见变化优先”的记录方式。开发中的改动会先进入 `ROADMAP.md`，发布时再归档到这里。
 
+## [1.0.37] - 2026-11-05
+
+- **自动导入改为「跟随当前登录账号」**：1.0.36 的自动导入是每台机器只跑一次，如果之后在 Codex 客户端退出并从另一个账号登录，新账号不会进 Companion。现在改为启动时 + 每 5 分钟检查 `~/.codex/auth.json`，发现账号变了（账号 ID / 邮箱 / refresh token 任一变化）就自动导入新账号并推一条通知；同一个账号只是 token 轮换时静默更新凭据，不弹通知、也不改动你在界面里选的活动账号。手动删除过的账号依旧不会被自动恢复。
+
 ## [1.0.36] - 2026-11-05
 
 - **修复全新电脑安装失败**（同事机器实测复现）：`Install Companion.ps1` 用 Windows PowerShell 5.1 读取含中文的 `package.json` 时因未指定 UTF-8 编码而解析报错，导致安装器在最后一步弹出「Runtime error (at 1:932)」并回滚。现已给 `Install Companion.ps1`、`Install Portable.ps1`、`Start Codex Companion.ps1`、`Desktop Retry Watcher.ps1` 的 JSON 读取统一加 `-Encoding UTF8`。1.0.35 及更早的安装包在中文 Windows 上全新安装都会踩中此问题；已安装过的机器不受影响。

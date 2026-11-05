@@ -28,7 +28,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.36';
+const APP_VERSION = '1.0.37';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -3015,27 +3015,41 @@ async function handle(req, res) {
 function send(res,status,value,type='application/json; charset=utf-8'){const b=Buffer.from(typeof value==='string'?value:JSON.stringify(value));res.writeHead(status,{'content-type':type,'content-length':b.length});res.end(b);}
 
 async function startTaskEngine(){if(codex?.proc)return;codex=new CodexServer();try{await codex.start()}catch(e){taskEngineError=humanError(e);console.error('[task engine]',e.message);codex.close();codex.proc=null;}}
-// Fresh-install convenience: if this machine already logged in to the Codex
-// client, import those file credentials once so the user skips manual login.
-// Runs at most once per machine (flag persisted in config.json), so accounts
-// the user deliberately deleted are never silently restored on later boots.
-async function autoImportLocalAuthOnce() {
+// Fresh-install convenience: if this machine is already logged in to the Codex
+// client, pull those file credentials into the encrypted vault so the user skips
+// manual login. Re-checked on startup and on a timer, so switching accounts in
+// the Codex client brings the new account over too; the fingerprint stops us
+// from rewriting the vault when nothing changed. Accounts the user deleted are
+// still refused by upsertNativeAccount (deletedAccountKeys).
+async function autoImportLocalAuth() {
   try {
-    if (config.autoImportLocalAuthDone) return;
     const auth = await readJson(liveAuthPath).catch(() => null);
-    if (!auth?.tokens?.id_token || !auth?.tokens?.access_token || !auth?.tokens?.refresh_token) {
-      config.autoImportLocalAuthDone = true;
-      await saveConfig();
-      return;
-    }
-    const account = await upsertNativeAccount(auth, { is_active: true });
-    config.autoImportLocalAuthDone = true;
+    if (!auth?.tokens?.id_token || !auth?.tokens?.access_token || !auth?.tokens?.refresh_token) return;
+    const claims = decodeJwtPayload(auth.tokens.id_token);
+    const authClaims = claims['https://api.openai.com/auth'] || {};
+    const accountId = auth.tokens.account_id || authClaims.chatgpt_account_id || null;
+    const email = claims.email || null;
+    const fingerprint = createHash('sha256')
+      .update(`${accountId || ''}|${String(email || '').toLowerCase()}|${auth.tokens.refresh_token}`)
+      .digest('hex').slice(0, 32);
+    if (config.lastLocalAuthFingerprint === fingerprint) return;
+    const known = await loadNativeAccountsSnapshot().catch(() => []);
+    const isNew = !known.some(item =>
+      (accountId && item.account_id === accountId)
+      || (email && String(item.email || '').toLowerCase() === String(email).toLowerCase()));
+    const account = await upsertNativeAccount(auth, isNew ? { is_active: true } : {});
+    config.lastLocalAuthFingerprint = fingerprint;
+    config.autoImportLocalAuthDone = true; // kept for config compatibility
     await saveConfig();
-    if (account) {
+    if (account && isNew) {
       nativeUsageCache.delete(String(account.id));
       await refreshAccounts({ forceNative: true, awaitNative: false }).catch(() => {});
       await notify(`已自动导入本机 Codex 登录\n账号：${account.name || account.email || 'ChatGPT 账号'}\n无需重新登录，额度约 1 分钟后显示。`, { appName: 'Codex Companion' });
       console.log('[auto import] imported local codex auth:', account.id);
+    } else if (account) {
+      // Same account, refreshed tokens: keep the vault copy fresh, stay quiet,
+      // and do not steal the active-account choice the user made in the UI.
+      console.log('[auto import] refreshed local codex credentials:', account.id);
     }
   } catch (error) {
     console.error('[auto import local auth]', error.message);
@@ -3086,7 +3100,9 @@ async function main() {
     if (ts) console.log(`  Tailscale detected: ${ts}`);
   });
   refreshAccounts().catch(e => console.error('[accounts]', e.message));
-  autoImportLocalAuthOnce();
+  autoImportLocalAuth();
+  // Pick up an account switch made in the Codex client without a restart.
+  setInterval(autoImportLocalAuth, 5 * 60 * 1000).unref?.();
   startTaskEngine().catch(e => console.error('[task engine]', e.message));
   startFeishuLongConnection().catch(e => console.error('[feishu connection]', e.message));
   startCodexSessionMonitor().catch(e => console.error('[codex session monitor]', e.message));
