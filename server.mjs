@@ -28,7 +28,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.35';
+const APP_VERSION = '1.0.36';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -3015,6 +3015,33 @@ async function handle(req, res) {
 function send(res,status,value,type='application/json; charset=utf-8'){const b=Buffer.from(typeof value==='string'?value:JSON.stringify(value));res.writeHead(status,{'content-type':type,'content-length':b.length});res.end(b);}
 
 async function startTaskEngine(){if(codex?.proc)return;codex=new CodexServer();try{await codex.start()}catch(e){taskEngineError=humanError(e);console.error('[task engine]',e.message);codex.close();codex.proc=null;}}
+// Fresh-install convenience: if this machine already logged in to the Codex
+// client, import those file credentials once so the user skips manual login.
+// Runs at most once per machine (flag persisted in config.json), so accounts
+// the user deliberately deleted are never silently restored on later boots.
+async function autoImportLocalAuthOnce() {
+  try {
+    if (config.autoImportLocalAuthDone) return;
+    const auth = await readJson(liveAuthPath).catch(() => null);
+    if (!auth?.tokens?.id_token || !auth?.tokens?.access_token || !auth?.tokens?.refresh_token) {
+      config.autoImportLocalAuthDone = true;
+      await saveConfig();
+      return;
+    }
+    const account = await upsertNativeAccount(auth, { is_active: true });
+    config.autoImportLocalAuthDone = true;
+    await saveConfig();
+    if (account) {
+      nativeUsageCache.delete(String(account.id));
+      await refreshAccounts({ forceNative: true, awaitNative: false }).catch(() => {});
+      await notify(`已自动导入本机 Codex 登录\n账号：${account.name || account.email || 'ChatGPT 账号'}\n无需重新登录，额度约 1 分钟后显示。`, { appName: 'Codex Companion' });
+      console.log('[auto import] imported local codex auth:', account.id);
+    }
+  } catch (error) {
+    console.error('[auto import local auth]', error.message);
+  }
+}
+
 async function main() {
   const storedConfig = await readJson(configPath);
   config = { ...defaultConfig, ...storedConfig };
@@ -3059,6 +3086,7 @@ async function main() {
     if (ts) console.log(`  Tailscale detected: ${ts}`);
   });
   refreshAccounts().catch(e => console.error('[accounts]', e.message));
+  autoImportLocalAuthOnce();
   startTaskEngine().catch(e => console.error('[task engine]', e.message));
   startFeishuLongConnection().catch(e => console.error('[feishu connection]', e.message));
   startCodexSessionMonitor().catch(e => console.error('[codex session monitor]', e.message));

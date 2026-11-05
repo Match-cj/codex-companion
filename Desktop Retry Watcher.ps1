@@ -194,7 +194,7 @@ while (ParentAlive) {
         $stamp = Join-Path $env:TEMP 'CodexCompanionDesktopRetry.json'
         $last = 0
         if (Test-Path $stamp) {
-          try { $last = [int64](Get-Content $stamp -Raw | ConvertFrom-Json).at } catch { $last = 0 }
+          try { $last = [int64](Get-Content $stamp -Raw -Encoding UTF8 | ConvertFrom-Json).at } catch { $last = 0 }
         }
         if ($last -and ($now - $last) -lt 5000) { continue }
         '{ "at": ' + $now + ' }' | Set-Content -Path $stamp -Encoding ASCII

@@ -64,7 +64,7 @@ function Test-HttpReady($url) {
 }
 
 $version = 'unknown'
-try { $version = (Get-Content (Join-Path $root 'package.json') -Raw -ErrorAction Stop | ConvertFrom-Json).version } catch {}
+try { $version = (Get-Content (Join-Path $root 'package.json') -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json).version } catch {}
 Write-Log "=== Launcher starting (v$version) ==="
 Write-Log "Data directory: $companionDataRoot"
 

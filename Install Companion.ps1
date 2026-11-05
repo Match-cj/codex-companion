@@ -2,7 +2,7 @@
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
-$package = Get-Content -LiteralPath (Join-Path $root 'package.json') -Raw | ConvertFrom-Json
+$package = Get-Content -LiteralPath (Join-Path $root 'package.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $appVersion = [string]$package.version
 $uninstallRegistryPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexCompanion'
 $uninstallScript = Join-Path $root 'Uninstall Companion.ps1'

@@ -43,7 +43,7 @@ try {
 
     $manifestPath = Join-Path $staging 'PAYLOAD-MANIFEST.json'
     if (-not (Test-Path -LiteralPath $manifestPath)) { throw '安装包缺少完整性清单。' }
-    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if ([int]$manifest.format -ne 1 -or [string]$manifest.algorithm -ne 'SHA256') { throw '安装包完整性清单格式不受支持。' }
     $destinationPrefix = $staging.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
     $expectedRelativePaths = @{}
