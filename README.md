@@ -10,7 +10,7 @@
 
 全部在本机运行，账号凭据用 Windows DPAPI 加密，不经过任何第三方服务器。
 
-![Companion 网页首屏](docs/images/dashboard-first-run.png)
+![Codex Companion 桌面额度浮窗](docs/images/widget-hero.png)
 
 ## 适合谁
 
@@ -36,6 +36,10 @@
 3. 装完双击桌面「Codex 助手」——右下角出现圆形浮窗就算成功，控制台网页在 `http://127.0.0.1:17841/`
 
 安装包已内置 **Node.js 运行时（v24）** 和 **OpenAI Codex CLI**，**不需要另外安装任何东西**。账号和配置存在 `%APPDATA%\CodexCompanion`，升级不会覆盖。
+
+装完打开的网页控制台长这样：
+
+![Companion 网页首屏](docs/images/dashboard-first-run.png)
 
 ## 从源码运行（开发者）
 

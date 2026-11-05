@@ -63,8 +63,35 @@ function Test-HttpReady($url) {
     }
 }
 
-Write-Log "=== Launcher starting (v1.0.15) ==="
+$version = 'unknown'
+try { $version = (Get-Content (Join-Path $root 'package.json') -Raw -ErrorAction Stop | ConvertFrom-Json).version } catch {}
+Write-Log "=== Launcher starting (v$version) ==="
 Write-Log "Data directory: $companionDataRoot"
+
+# Some tools leave both HTTP_PROXY and http_proxy in the environment block.
+# .NET cannot build the child-process dictionary from that (duplicate key),
+# and Start-Process then throws. Normalize: keep one entry per variable name.
+foreach ($proxyName in @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY')) {
+    $proxyValue = $null
+    try { $proxyValue = [Environment]::GetEnvironmentVariable($proxyName) } catch {}
+    $removed = $false
+    foreach ($spelling in @($proxyName, $proxyName.ToLower())) {
+        try {
+            Remove-Item -Path ("Env:" + $spelling) -ErrorAction Stop
+            $removed = $true
+        } catch {}
+        if ($removed) { break }
+    }
+    if ($removed) {
+        # remove the other casing too, then restore a single canonical entry
+        try { Remove-Item -Path ("Env:" + $proxyName.ToLower()) -ErrorAction SilentlyContinue } catch {}
+        try { Remove-Item -Path ("Env:" + $proxyName) -ErrorAction SilentlyContinue } catch {}
+        if (-not [string]::IsNullOrWhiteSpace($proxyValue)) {
+            [Environment]::SetEnvironmentVariable($proxyName, $proxyValue)
+        }
+        Write-Log ("Normalized duplicate proxy env var: " + $proxyName)
+    }
+}
 
 # Already healthy? Then this launch is a no-op. The scheduled task fires
 # periodically to heal a dead backend, not to restart a live one.
