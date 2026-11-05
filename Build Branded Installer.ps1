@@ -41,16 +41,35 @@ $npm = (Get-Command npm.cmd -ErrorAction Stop).Source
 $appFiles = @(
     'Codex Companion Launcher.vbs','Codex Companion Worker.vbs','companion.ico','dashboard.html','HANDOVER.md',
     'Install Companion.cmd','Install Companion.ps1','Install Startup Task.ps1','Launch Quota Widget.vbs',
-    'package.json','package-lock.json','Quota Widget WPF.ps1','README.md','server.mjs','update.mjs','image-relay.mjs','file-relay.mjs','quota-reset.mjs','notification-settings.mjs','feishu-reply-recovery.mjs',
+    'package.json','package-lock.json','Quota Widget WPF.ps1','README.md',
     'Start Codex Companion Background.cmd','Start Codex Companion.cmd','Start Codex Companion.ps1',
     'Start Quota Widget.cmd','Stop Codex Companion.cmd','Stop Codex Companion.ps1',
-    'Uninstall Companion.cmd','Uninstall Companion.ps1'
+    'Uninstall Companion.cmd','Uninstall Companion.ps1',
+    'Update Watchdog.ps1','Desktop Retry Watcher.ps1'
     'LICENSE','PRIVACY.md','SECURITY.md','THIRD_PARTY.md','CHANGELOG.md'
 )
 
 try {
     New-Item -ItemType Directory -Force -Path $payloadRoot,$runtimeRoot,$depsRoot,$stageRoot | Out-Null
     foreach ($file in $appFiles) { Copy-Item -LiteralPath (Join-Path $root $file) -Destination $payloadRoot }
+    # All server modules are picked up automatically so a newly added .mjs can
+    # never be forgotten in the payload (that is exactly what broke v1.0.39:
+    # desktop-retry.mjs and 12 other modules were missing on a fresh install).
+    Get-ChildItem -LiteralPath $root -Filter '*.mjs' -File | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $payloadRoot $_.Name)
+    }
+    # Fail the build if any relative import in the payload cannot be resolved.
+    $missingModules = @()
+    foreach ($moduleFile in (Get-ChildItem -LiteralPath $payloadRoot -Filter '*.mjs' -File)) {
+        $text = [IO.File]::ReadAllText($moduleFile.FullName)
+        foreach ($match in [regex]::Matches($text, "(?:from|import)\s+'\./([^']+)'")) {
+            $dependency = $match.Groups[1].Value
+            if (-not (Test-Path -LiteralPath (Join-Path $payloadRoot $dependency))) { $missingModules += $dependency }
+        }
+    }
+    if ($missingModules.Count -gt 0) {
+        throw ('payload 缺少被引用的模块: ' + (($missingModules | Sort-Object -Unique) -join ', '))
+    }
     # Windows PowerShell 5.1 treats UTF-8 files without a BOM as the active ANSI
     # code page. A few Chinese strings can then decode into stray quote bytes and
     # make an otherwise valid script fail to parse on the target computer.
