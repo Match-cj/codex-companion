@@ -1,8 +1,8 @@
-param([int]$Port = 17841,[switch]$SelfTest)
+﻿param([int]$Port = 17841,[switch]$SelfTest)
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 Add-Type 'using System; using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags); [DllImport("user32.dll", EntryPoint="GetWindowLongW")] public static extern int GetWindowLong(IntPtr hwnd, int index); [DllImport("user32.dll", EntryPoint="SetWindowLongW")] public static extern int SetWindowLong(IntPtr hwnd, int index, int value); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); }'
-$script:Port=$Port; $script:AppVersion='1.0.38'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false
+$script:Port=$Port; $script:AppVersion='1.0.39'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false; $script:UpdateInfo=$null; $script:Updating=$false; $script:UpdateCardsBuilt=0; $script:UpdateButtonInvocations=0
 $mutexName=if($SelfTest){'Global\CodexCompanionQuotaWidget_v5_selftest'}else{'Global\CodexCompanionQuotaWidget_v5'}
 $script:Mutex=New-Object System.Threading.Mutex($false,$mutexName); if(-not $script:Mutex.WaitOne(0,$false)){exit}
 $Transparent=[Windows.Media.Brushes]::Transparent
@@ -16,6 +16,8 @@ $Red=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::FromRgb(255
 $White=[Windows.Media.Brushes]::White
 $PlusBadgeBg=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::FromRgb(48,58,92))
 $PlusBadgeFg=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::FromRgb(196,207,255))
+$UpdateBadgeBg=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::FromRgb(47,107,222))
+$UpdateBadgeFg=[Windows.Media.Brushes]::White
 $FreeBadgeBg=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::FromRgb(41,75,71))
 $FreeBadgeFg=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::FromRgb(169,243,221))
 $ProBadgeBg=New-Object Windows.Media.SolidColorBrush([Windows.Media.Color]::FromRgb(77,57,24))
@@ -159,8 +161,36 @@ $Root=New-Object Windows.Controls.Grid;$Window.Content=$Root
 $Back=New-Object Windows.Shapes.Ellipse;$Back.Margin=5;$Back.Fill=$Disc;$Back.Stroke=$Muted;$Back.StrokeThickness=6;$Root.Children.Add($Back)|Out-Null
 $Arc=New-Object Windows.Shapes.Path;$Arc.Stroke=$Green;$Arc.StrokeThickness=6;$Arc.StrokeStartLineCap='Round';$Arc.StrokeEndLineCap='Round';$Root.Children.Add($Arc)|Out-Null
 $Number=New-Text '--' 22 $Green -bold;$Number.HorizontalAlignment='Center';$Number.VerticalAlignment='Center';$Root.Children.Add($Number)|Out-Null
+# 有新版本时，圆环右上角出现一个蓝色 ↑ 小圆标：点一下就是“更新并重启”，
+# 不需要开网页、不需要找菜单。没新版本时它完全不存在，不占地方。
+$script:UpdateBadge=New-Object Windows.Controls.Border
+$script:UpdateBadge.Width=21;$script:UpdateBadge.Height=21;$script:UpdateBadge.CornerRadius=11
+$script:UpdateBadge.Background=$UpdateBadgeBg;$script:UpdateBadge.BorderBrush=$Disc;$script:UpdateBadge.BorderThickness=2
+$script:UpdateBadge.HorizontalAlignment='Right';$script:UpdateBadge.VerticalAlignment='Top'
+$script:UpdateBadge.Cursor=[Windows.Input.Cursors]::Hand;$script:UpdateBadge.Visibility='Collapsed'
+$updateArrow=New-Text '↑' 13 $UpdateBadgeFg -bold;$updateArrow.FontFamily='Segoe UI Symbol'
+$updateArrow.HorizontalAlignment='Center';$updateArrow.VerticalAlignment='Center';$updateArrow.Margin='0,-2,0,0'
+$script:UpdateBadge.Child=$updateArrow
+$updateBadgeHandler={param($sender,$eventArgs)$eventArgs.Handled=$true;Update-Companion}
+$script:UpdateBadge.Add_PreviewMouseLeftButtonDown($updateBadgeHandler)
+if($SelfTest){$script:TestUpdateHandler=$updateBadgeHandler}
+$Root.Children.Add($script:UpdateBadge)|Out-Null
 function Set-Arc($r){if($r-le 0){$Arc.Data=$null;return};$c=36;$radius=28;$start=-90;$end=$start+(3.599*[Math]::Min(99.9,$r));$a1=$start*[Math]::PI/180;$a2=$end*[Math]::PI/180;$p1=New-Object Windows.Point -ArgumentList ($c+$radius*[Math]::Cos($a1)),($c+$radius*[Math]::Sin($a1));$p2=New-Object Windows.Point -ArgumentList ($c+$radius*[Math]::Cos($a2)),($c+$radius*[Math]::Sin($a2));$g=New-Object Windows.Media.StreamGeometry;$ctx=$g.Open();$ctx.BeginFigure($p1,$false,$false);$ctx.ArcTo($p2,(New-Object Windows.Size -ArgumentList $radius,$radius),0,(($end-$start)-gt 180),[Windows.Media.SweepDirection]::Clockwise,$true,$false);$ctx.Close();$g.Freeze();$Arc.Data=$g}
-function Update-Widget{$script:Status=Get-Status;$runningCount=@(Get-RunningTasks $script:Status).Count;$Window.ToolTip="Codex Companion`n运行中对话：$runningCount（含自动接管）";$a=$script:Status.accounts|Where-Object{$_.is_active}|Select-Object -First 1;if(Test-LoginExpired $a){$Number.Text='!';$Number.Foreground=$Red;$Arc.Data=$null;return};$r=Get-Remaining $a 'primary';if($null-eq$r){$r=Get-Remaining $a 'secondary'};if($null-eq$r){$Number.Text='--';$Arc.Data=$null;return};$color=Get-Color $r;$Number.Text=[string]$r;$Number.Foreground=$color;$Arc.Stroke=$color;Set-Arc $r}
+function Update-UpdateBadge($status){
+ $script:UpdateInfo=if($null-ne$status-and$null-ne$status.update){$status.update}else{$null}
+ if($null-ne$status-and$status.PSObject.Properties['version']-and$status.version){$script:AppVersion=[string]$status.version}
+ # 更新重启期间后台会短暂断开；等它带着新版本回来（或不再报新版本）就解除“更新中”。
+ if($script:Updating -and ($null-eq$script:UpdateInfo -or -not[bool]$script:UpdateInfo.available)){$script:Updating=$false}
+ $visible=(-not$script:Updating)-and($null-ne$script:UpdateInfo)-and[bool]$script:UpdateInfo.available
+ if($null-ne$script:UpdateBadge){
+  $script:UpdateBadge.Visibility=if($visible){'Visible'}else{'Collapsed'}
+  if($visible){
+   $script:UpdateBadge.ToolTip=if($script:UpdateInfo.canApply){"有新版本 v$($script:UpdateInfo.latest)（当前 v$script:AppVersion）· 点一下更新并重启"}else{"有新版本 v$($script:UpdateInfo.latest)· 点一下打开下载页"}
+  }
+ }
+ if($null-ne$script:VersionItem){$script:VersionItem.Header="Codex Companion v$script:AppVersion"}
+}
+function Update-Widget{$script:Status=Get-Status;Update-UpdateBadge $script:Status;$runningCount=@(Get-RunningTasks $script:Status).Count;$tip="Codex Companion`n运行中对话：$runningCount（含自动接管）";if($null-ne$script:UpdateInfo-and$script:UpdateInfo.available){$tip+="`n有新版本 v$($script:UpdateInfo.latest)，点右上角 ↑ 更新"};$Window.ToolTip=$tip;$a=$script:Status.accounts|Where-Object{$_.is_active}|Select-Object -First 1;if(Test-LoginExpired $a){$Number.Text='!';$Number.Foreground=$Red;$Arc.Data=$null;return};$r=Get-Remaining $a 'primary';if($null-eq$r){$r=Get-Remaining $a 'secondary'};if($null-eq$r){$Number.Text='--';$Arc.Data=$null;return};$color=Get-Color $r;$Number.Text=[string]$r;$Number.Foreground=$color;$Arc.Stroke=$color;Set-Arc $r}
 function Close-Detail([switch]$Force){if($script:SwitchInProgress -and -not$Force){return};if($null-ne$script:Detail){$d=$script:Detail;$script:Detail=$null;$script:DetailClosedAt=[DateTime]::UtcNow;try{$d.Close()}catch{}}}
 function Test-ScreenPointInsideWindow($floatingWindow,$cursor){
  if($null-eq$floatingWindow -or -not$floatingWindow.IsVisible){return $false}
@@ -226,6 +256,34 @@ function Show-WidgetNotice([string]$message,[double]$seconds=5){
  $script:NoticeTimer.Interval=[TimeSpan]::FromSeconds([Math]::Max(0.1,$seconds))
  $script:NoticeTimer.Add_Tick({Close-WidgetNotice});$script:NoticeTimer.Start()
 }
+function Update-Companion([switch]$Confirmed){
+ if($script:Updating){return}
+ $info=$script:UpdateInfo
+ if($null-eq$info-or-not$info.available){[Windows.MessageBox]::Show('当前已经是最新版本。','Codex Companion','OK','Information')|Out-Null;return}
+ if($SelfTest){$script:UpdateButtonInvocations++;return}
+ if(-not$info.canApply){
+  [Windows.MessageBox]::Show("这次更新需要下载完整安装包。`n`n点确定打开下载页；装好后账号和设置都还在。",'Codex Companion','OK','Information')|Out-Null
+  Start-Process 'https://github.com/Match-cj/codex-companion/releases/latest'
+  return
+ }
+ $running=@(Get-RunningTasks $script:Status).Count
+ $choice=[Windows.MessageBoxResult]::OK
+ if(-not$Confirmed){
+  $question=if($running-gt 0){"现在有 $running 个对话在运行，更新会重启软件并中断它们。`n`n确定现在更新到 v$($info.latest) 吗？"}else{"现在更新到 v$($info.latest) 吗？`n`n只下载一个很小的补丁，浮窗大约 10 秒后自动回来；账号和设置都不受影响。"}
+  $choice=[Windows.MessageBox]::Show($question,'更新 Codex Companion',[Windows.MessageBoxButton]::OKCancel,[Windows.MessageBoxImage]::Question)
+ }
+ if($choice-ne[Windows.MessageBoxResult]::OK){return}
+ $script:Updating=$true
+ if($null-ne$script:UpdateBadge){$script:UpdateBadge.Visibility='Collapsed'}
+ try{
+  Close-Detail -Force
+  Show-WidgetNotice "正在更新到 v$($info.latest)，浮窗大约 10 秒后自动回来…" 25
+  Invoke-RestMethod "http://127.0.0.1:$script:Port/api/update/apply" -Method Post -ContentType 'application/json' -Body '{}' -TimeoutSec 180|Out-Null
+ }catch{
+  $script:Updating=$false
+  [Windows.MessageBox]::Show("更新没有完成：`n$(Get-ApiErrorMessage $_)`n`n当前版本仍可正常使用，可以稍后再试。",'Codex Companion','OK','Error')|Out-Null
+ }
+}
 function Switch-WidgetAccount($accountId,$accountName){
  if($SelfTest){$script:SwitchButtonInvocations++;return}
  Trace-WidgetSwitch 'gesture_received' $accountName ("widget=$script:AppVersion pid=$PID")
@@ -277,6 +335,15 @@ function Show-Detail{
  $outer=New-Object Windows.Controls.Border;$outer.Background=$Disc;$outer.CornerRadius=12;$outer.Padding=9;$stack=New-Object Windows.Controls.StackPanel;$outer.Child=$stack;$d.Content=$outer
  $runningCount=@(Get-RunningTasks $script:Status).Count
  $runningColor=if($runningCount-gt 0){$Green}else{$Muted};$runningText=New-Text "运行中对话：$runningCount（含自动接管）" 11 $runningColor -bold;$runningText.Margin='2,0,0,7';$stack.Children.Add($runningText)|Out-Null
+ if($null-ne$script:UpdateInfo-and[bool]$script:UpdateInfo.available){
+  $updateCard=New-Object Windows.Controls.Border;$updateCard.Background=$CardBrush;$updateCard.CornerRadius=7;$updateCard.Padding='10,7';$updateCard.Margin='0,0,0,7'
+  $updateCard.BorderBrush=$UpdateBadgeBg;$updateCard.BorderThickness=1;$updateCard.Cursor=[Windows.Input.Cursors]::Hand;$updateCard.ToolTip='点这里更新并重启'
+  $updateText=New-Text ("↑ 有新版本 v$($script:UpdateInfo.latest)（当前 v$script:AppVersion）· 点这里更新") 12 $UpdateBadgeFg -bold
+  $updateText.TextWrapping='Wrap'
+  $updateCard.Child=$updateText
+  $updateCard.Add_PreviewMouseLeftButtonDown({param($sender,$eventArgs)$eventArgs.Handled=$true;Update-Companion})
+  $stack.Children.Add($updateCard)|Out-Null;$script:UpdateCardsBuilt++
+ }
  foreach($a in $accounts){
   $card=New-Object Windows.Controls.Border;$card.Background=$CardBrush;$card.CornerRadius=7;$card.Padding='10,7';$card.Margin='0,0,0,7'
   $content=New-Object Windows.Controls.StackPanel;$card.Child=$content
@@ -348,6 +415,11 @@ if($SelfTest){
  $topmostRestored=([CompanionMouse]::GetWindowLong($testHandle,-20)-band 8)-ne 0
  $noFocusSteal=$foregroundBefore-eq[CompanionMouse]::GetForegroundWindow()
  Update-Widget
+ $badgeHiddenWithoutUpdate=($script:UpdateBadge.Visibility-eq'Collapsed')
+ Update-UpdateBadge ([pscustomobject]@{version=$script:AppVersion;update=[pscustomobject]@{available=$true;latest='99.0.0';canApply=$true;mode='auto'}})
+ $badgeShownWithUpdate=($script:UpdateBadge.Visibility-eq'Visible')
+ if($null-ne$script:TestUpdateHandler){& $script:TestUpdateHandler $script:UpdateBadge ([pscustomobject]@{Handled=$false})}
+ $badgeClickInvocations=$script:UpdateButtonInvocations
  Show-Detail
  $stackForTest=$script:Detail.Content.Child
  $scaledBoundsPass=$true
@@ -372,11 +444,11 @@ if($SelfTest){
   $doubleClickInvokesSwitch=$script:SwitchButtonInvocations-eq 1
  }
  [pscustomobject]@{ScaledBoundsPass=$scaledBoundsPass;InsideEdgeClickKeepsPanel=$insideClickKeepsPanel;SingleClickKeepsPanel=$singleClickKeepsPanel;DoubleClickInvokesSwitch=$doubleClickInvokesSwitch;DpiScale=[Windows.PresentationSource]::FromVisual($script:Detail).CompositionTarget.TransformToDevice.M11}|ConvertTo-Json -Compress
- [pscustomobject]@{AccountsFromApi=@($script:Status.accounts).Count;CardsBuilt=@($stackForTest.Children).Count;LoginExpiredCards=$script:LoginExpiredCardsBuilt;SwitchableCards=$script:SwitchableCardsBuilt;SwitchGestureCards=$script:SwitchGestureCardsBuilt;SwitchButtonCards=$script:SwitchButtonCardsBuilt;SwitchButtonInvocations=$script:SwitchButtonInvocations;PanelHeight=[Math]::Round($script:Detail.Height,1);TopmostRestored=$topmostRestored;NoFocusSteal=$noFocusSteal;RuntimeErrors=$Error.Count;Errors=@($Error|ForEach-Object{$_.InvocationInfo.PositionMessage+' :: '+$_.Exception.Message})}|ConvertTo-Json -Compress -Depth 3
- Close-Detail
- $Window.Close()
- try{$script:Mutex.ReleaseMutex()}catch{}
- if($Error.Count -gt 0 -or -not$insideClickKeepsPanel -or -not$singleClickKeepsPanel -or -not$doubleClickInvokesSwitch -or -not$topmostRestored -or -not$noFocusSteal){throw 'Widget self-test failed'}
+[pscustomobject]@{AccountsFromApi=@($script:Status.accounts).Count;CardsBuilt=@($stackForTest.Children).Count;LoginExpiredCards=$script:LoginExpiredCardsBuilt;SwitchableCards=$script:SwitchableCardsBuilt;SwitchGestureCards=$script:SwitchGestureCardsBuilt;SwitchButtonCards=$script:SwitchButtonCardsBuilt;SwitchButtonInvocations=$script:SwitchButtonInvocations;UpdateBadgeHidden=$badgeHiddenWithoutUpdate;UpdateBadgeShown=$badgeShownWithUpdate;UpdateBadgeClicks=$badgeClickInvocations;UpdateCards=$script:UpdateCardsBuilt;PanelHeight=[Math]::Round($script:Detail.Height,1);TopmostRestored=$topmostRestored;NoFocusSteal=$noFocusSteal;RuntimeErrors=$Error.Count;Errors=@($Error|ForEach-Object{$_.InvocationInfo.PositionMessage+' :: '+$_.Exception.Message})}|ConvertTo-Json -Compress -Depth 3
+Close-Detail
+$Window.Close()
+try{$script:Mutex.ReleaseMutex()}catch{}
+if($Error.Count -gt 0 -or -not$insideClickKeepsPanel -or -not$singleClickKeepsPanel -or -not$doubleClickInvokesSwitch -or -not$topmostRestored -or -not$noFocusSteal -or -not$badgeHiddenWithoutUpdate -or -not$badgeShownWithUpdate -or $badgeClickInvocations -ne 1 -or $script:UpdateCardsBuilt -ne 1){throw 'Widget self-test failed'}
  exit
 }
 $TopmostTimer=New-Object Windows.Threading.DispatcherTimer
@@ -386,7 +458,7 @@ $TopmostTimer.Start()
 $Window.Add_Closed({$TopmostTimer.Stop()})
 $Window.Add_ContentRendered({Ensure-WidgetTopmost})
 $Window.Add_MouseLeftButtonDown({$hadDetail=$null-ne$script:Detail;if($hadDetail){Close-Detail};$start=[System.Windows.Forms.Cursor]::Position;try{$Window.DragMove()}catch{};$end=[System.Windows.Forms.Cursor]::Position;$distance=[Math]::Abs($end.X-$start.X)+[Math]::Abs($end.Y-$start.Y);if($distance-le 3-and-not$hadDetail){Show-Detail}})
-$Menu=New-Object Windows.Controls.ContextMenu;$Menu.Placement='Right';$Menu.PlacementTarget=$Window;$Menu.HorizontalOffset=8;$Refresh=New-Object Windows.Controls.MenuItem;$Refresh.Header='立即刷新额度';$Refresh.Add_Click({Update-Widget});$Menu.Items.Add($Refresh)|Out-Null;$WarmCurrent=New-Object Windows.Controls.MenuItem;$WarmCurrent.Header='预热当前账号';$WarmCurrent.Add_Click({$script:Status=Get-Status;$active=@($script:Status.accounts|Where-Object{$_.is_active})|Select-Object -First 1;if($null-ne$active){$shown=if([string]::IsNullOrWhiteSpace([string]$active.display_name)){[string]$active.name}else{[string]$active.display_name};Warmup-WidgetAccount ([string]$active.id) $shown}else{[Windows.MessageBox]::Show('没有找到当前账号。','Codex Companion','OK','Warning')|Out-Null}});$Menu.Items.Add($WarmCurrent)|Out-Null;$Open=New-Object Windows.Controls.MenuItem;$Open.Header='打开完整页面';$Open.Add_Click({Start-Process "http://127.0.0.1:$script:Port/"});$Menu.Items.Add($Open)|Out-Null;$Version=New-Object Windows.Controls.MenuItem;$Version.Header="Codex Companion v$script:AppVersion";$Version.IsEnabled=$false;$Menu.Items.Add((New-Object Windows.Controls.Separator))|Out-Null;$Menu.Items.Add($Version)|Out-Null;$Exit=New-Object Windows.Controls.MenuItem;$Exit.Header='退出浮窗';$Exit.Add_Click({$Window.Close()});$Menu.Items.Add($Exit)|Out-Null;$Menu.Add_Opened({$script:MenuOpen=$true});$Menu.Add_Closed({$script:MenuOpen=$false});$Window.ContextMenu=$Menu
+$Menu=New-Object Windows.Controls.ContextMenu;$Menu.Placement='Right';$Menu.PlacementTarget=$Window;$Menu.HorizontalOffset=8;$Refresh=New-Object Windows.Controls.MenuItem;$Refresh.Header='立即刷新额度';$Refresh.Add_Click({Update-Widget});$Menu.Items.Add($Refresh)|Out-Null;$CheckUpdate=New-Object Windows.Controls.MenuItem;$CheckUpdate.Header='检查更新…';$CheckUpdate.Add_Click({try{$st=Invoke-RestMethod "http://127.0.0.1:$script:Port/api/update/status?force=1" -TimeoutSec 15;if($st.available){$script:UpdateInfo=$st;Update-UpdateBadge ([pscustomobject]@{version=$script:AppVersion;update=$st});$choice=[Windows.MessageBox]::Show("发现新版本 v$($st.latest)（当前 v$($st.current)）。`n`n现在更新并重启吗？",'检查更新','OKCancel','Question');if($choice-eq[Windows.MessageBoxResult]::OK){Update-Companion -Confirmed}}else{[Windows.MessageBox]::Show("已经是最新版本（v$script:AppVersion）。",'检查更新','OK','Information')|Out-Null}}catch{[Windows.MessageBox]::Show("检查更新失败：`n$(Get-ApiErrorMessage $_)",'Codex Companion','OK','Error')|Out-Null}});$Menu.Items.Add($CheckUpdate)|Out-Null;$WarmCurrent=New-Object Windows.Controls.MenuItem;$WarmCurrent.Header='预热当前账号';$WarmCurrent.Add_Click({$script:Status=Get-Status;$active=@($script:Status.accounts|Where-Object{$_.is_active})|Select-Object -First 1;if($null-ne$active){$shown=if([string]::IsNullOrWhiteSpace([string]$active.display_name)){[string]$active.name}else{[string]$active.display_name};Warmup-WidgetAccount ([string]$active.id) $shown}else{[Windows.MessageBox]::Show('没有找到当前账号。','Codex Companion','OK','Warning')|Out-Null}});$Menu.Items.Add($WarmCurrent)|Out-Null;$Open=New-Object Windows.Controls.MenuItem;$Open.Header='打开完整页面';$Open.Add_Click({Start-Process "http://127.0.0.1:$script:Port/"});$Menu.Items.Add($Open)|Out-Null;$Version=New-Object Windows.Controls.MenuItem;$Version.Header="Codex Companion v$script:AppVersion";$Version.IsEnabled=$false;$script:VersionItem=$Version;$Menu.Items.Add((New-Object Windows.Controls.Separator))|Out-Null;$Menu.Items.Add($Version)|Out-Null;$Exit=New-Object Windows.Controls.MenuItem;$Exit.Header='退出浮窗';$Exit.Add_Click({$Window.Close()});$Menu.Items.Add($Exit)|Out-Null;$Menu.Add_Opened({$script:MenuOpen=$true});$Menu.Add_Closed({$script:MenuOpen=$false});$Window.ContextMenu=$Menu
 $script:RetryItem=$null;$script:RetryToggleBusy=$false
 function Update-RetryMenuItem{
  if($null-eq$script:RetryItem){return}

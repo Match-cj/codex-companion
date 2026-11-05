@@ -90,3 +90,22 @@ foreach($scale in @(1.0,1.25,1.5,2.0)){
   assert.equal(result.status, 0, result.stderr || result.error?.message);
   assert.match(result.stdout, /PASS/);
 });
+
+test('an update badge on the ring is one click away from a restart', () => {
+  assert.match(widget, /\$script:UpdateBadge\.Visibility='Collapsed'/);
+  assert.match(widget, /\$updateBadgeHandler=\{param\(\$sender,\$eventArgs\)\$eventArgs\.Handled=\$true;Update-Companion\}/);
+  assert.match(widget, /function Update-Companion\(\[switch\]\$Confirmed\)/);
+  assert.match(widget, /api\/update\/apply/);
+  assert.match(widget, /function Update-UpdateBadge\(\$status\)/);
+  // The badge must follow /api/status, not its own poller, and disappear while updating.
+  assert.match(widget, /Update-Widget\{\$script:Status=Get-Status;Update-UpdateBadge \$script:Status/);
+  assert.match(widget, /\(-not\$script:Updating\)-and/);
+});
+
+test('webpage lets the user pick auto update or notify only', () => {
+  assert.match(dashboard, /<select id="updateMode"/);
+  assert.match(dashboard, /<option value="auto">/);
+  assert.match(dashboard, /<option value="notify">/);
+  assert.match(dashboard, /async function saveUpdateMode\(mode\)\{[\s\S]{0,300}updateMode:mode/);
+  assert.match(dashboard, /if\(\$\('updateMode'\)\)\$\('updateMode'\)\.value=status\.config\.updateMode/);
+});

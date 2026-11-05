@@ -24,12 +24,12 @@ import { validNativeVault, createNativeVaultStore } from './native-vault.mjs';
 import { DeviceLoginSession } from './device-login.mjs';
 import { codexLaunch, closeCodexDesktop, codexDesktopPids, isCodexDesktopRunning, launchCodexDesktop, execPowershellShort, isQuotaWidgetRunning, findQuotaWidgetWindow, focusQuotaWidgetWindow, killQuotaWidgetProcesses, openQuotaWidget } from './desktop-client.mjs';
 import { appDir, configPath, widgetSwitchTracePath, nativeAccountsPath, nativeAccountsBackupPath, switcherAccountsPath, liveAuthPath, widgetScriptPath, widgetLauncherPath, sourceDir } from './app-paths.mjs';
-import { DEFAULT_FEED as DEFAULT_UPDATE_FEED, MANIFEST_NAME as UPDATE_MANIFEST_NAME, normalizeVersion, summarizeRelease, depsFingerprint, isSafeRelativePath } from './update.mjs';
+import { DEFAULT_FEED as DEFAULT_UPDATE_FEED, MANIFEST_NAME as UPDATE_MANIFEST_NAME, normalizeVersion, summarizeRelease, depsFingerprint, isSafeRelativePath, normalizeUpdateMode, idleUpdateDecision, DEFAULT_IDLE_SECONDS, DEFAULT_UPDATE_MODE } from './update.mjs';
 import { protectCredential, unprotectCredential } from './credential-crypto.mjs';
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.38';
+const APP_VERSION = '1.0.39';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -81,6 +81,7 @@ const defaultConfig = {
   accountAliases: {},
   accountBackend: 'native',
   codexDesktopTakeoverThreadIds: [],
+  updateMode: DEFAULT_UPDATE_MODE,
 };
 let config = { ...defaultConfig };
 let feishuPairingCode = randomBytes(12).toString('hex');
@@ -130,6 +131,7 @@ function publicConfig() {
     desktopRetryCooldownSeconds: Number(config.desktopRetryCooldownSeconds || 8),
     desktopRetryQuietMinutes: Number(config.desktopRetryQuietMinutes || 10),
     feishuImageRelayEnabled: !!config.feishuImageRelayEnabled, feishuImageRelayRoot: config.feishuImageRelayRoot || '',
+    updateMode: normalizeUpdateMode(config.updateMode), updateIdleMinutes: Math.round(DEFAULT_IDLE_SECONDS / 60),
     webhooks: publicWebhooks() };
 }
 function publicDiagnostics() {
@@ -2683,6 +2685,8 @@ async function handle(req, res) {
       }
       const tailscale = addrs.find(a => a.address.startsWith('100.'))?.address || null;
       const port = config.port;
+      const updateSummary = cachedUpdateSummary();
+      const updateWritable = await installDirWritableCached();
       return send(res,200,{
         version:APP_VERSION,
         taskEngineReady:!!codex?.proc,
@@ -2690,6 +2694,15 @@ async function handle(req, res) {
         taskEngineError,
         lastQuotaDelta,
         config:publicConfig(),
+        update:{
+          available: Boolean(updateSummary?.available),
+          latest: updateSummary?.latest || '',
+          canApply: Boolean(updateSummary?.available && updateSummary.patch) && updateWritable,
+          mode: normalizeUpdateMode(config.updateMode),
+          applying: updateApplying,
+          checkedAt: updateCache.checkedAt || null,
+          error: updateCache.error || null,
+        },
         security:{ remoteEnabled: !!config.remoteAccessEnabled, local: isLoopback(req.socket.remoteAddress), allowedUserCount: (config.feishuAllowedUserIds || []).length, pairingCommand: isLoopback(req.socket.remoteAddress) && !(config.feishuAllowedUserIds || []).length ? `绑定 ${feishuPairingCode}` : null },
         feishu:publicFeishuState(),
         accounts,
@@ -2885,9 +2898,10 @@ async function handle(req, res) {
       if(Number.isFinite(Number(data.desktopRetryQuietMinutes))) config.desktopRetryQuietMinutes=Math.min(120,Math.max(1,Math.round(Number(data.desktopRetryQuietMinutes))));
       if(['OK','THUMBSUP','DONE','CHECK'].includes(String(data.feishuContinueEmoji||'').toUpperCase())) config.feishuContinueEmoji=String(data.feishuContinueEmoji).toUpperCase();
       if(Object.hasOwn(data,'webhooks')) config.webhooks=validateWebhooks(data.webhooks)||[];
+      if(Object.hasOwn(data,'updateMode')) config.updateMode=normalizeUpdateMode(data.updateMode);
       await saveConfig();
       if(Object.hasOwn(data,'autoTakeoverDesktopTransient')||Object.hasOwn(data,'desktopRetryAutoClick')||Object.hasOwn(data,'desktopRetryCooldownSeconds')) syncDesktopRetryWatcher(config);
-      return send(res,200,{ok:true,desktopRetry:desktopRetryState(),webhooks:publicWebhooks()});
+      return send(res,200,{ok:true,desktopRetry:desktopRetryState(),webhooks:publicWebhooks(),updateMode:normalizeUpdateMode(config.updateMode)});
     }
     if (req.method==='POST'&&u.pathname==='/api/webhooks/add'){
       const draft={kind:String(data.kind||''),name:String(data.name||''),url:String(data.url||''),token:String(data.token||''),enabled:true};
@@ -3106,9 +3120,14 @@ async function autoImportLocalAuth() {
 const updateFeedUrl = process.env.CC_UPDATE_FEED || DEFAULT_UPDATE_FEED;
 const updateStatePath = path.join(sourceDir, 'update-state.json');
 const updateBackupDir = path.join(sourceDir, '_update-backup');
-const updateCheckIntervalMs = 6 * 60 * 60 * 1000;
-let updateCache = { checkedAt: 0, release: null, error: null };
+// Releases are rare, but an idle machine updates within minutes of one landing,
+// so the check has to be frequent enough to matter and still far inside the
+// anonymous GitHub limit (60 requests an hour).
+const updateCheckIntervalMs = 45 * 60 * 1000;
+const updateIdleProbeIntervalMs = 5 * 60 * 1000;
+let updateCache = { checkedAt: 0, release: null, summary: null, error: null };
 let updateApplying = false;
+let updateIdleErrorLogged = false;
 
 async function fetchUpdateRelease(url, timeoutMs) {
   const response = await fetch(url, {
@@ -3124,7 +3143,7 @@ async function refreshUpdateRelease(force = false) {
   if (!force && fresh && updateCache.release) return updateCache.release;
   try {
     const release = await fetchUpdateRelease(updateFeedUrl, 5000);
-    updateCache = { checkedAt: Date.now(), release, error: null };
+    updateCache = { checkedAt: Date.now(), release, summary: null, error: null };
     return release;
   } catch (error) {
     // Being offline or blocked must never be an error the user has to think about.
@@ -3133,10 +3152,58 @@ async function refreshUpdateRelease(force = false) {
   }
 }
 
+// The badge has to answer from memory: /api/status is polled every few seconds
+// by the widget and the page, and neither may wait on the network for it.
+function cachedUpdateSummary() {
+  if (!updateCache.release) return null;
+  if (!updateCache.summary) updateCache.summary = summarizeRelease(updateCache.release, APP_VERSION);
+  return updateCache.summary;
+}
+
 async function installDirWritable() {
   // 2 === W_OK. The installer lives under %LOCALAPPDATA%, so this is normally
   // true; a Program Files install needs the full installer instead.
   try { await fs.access(sourceDir, 2); return true; } catch { return false; }
+}
+
+let installWritableCache = { at: 0, value: true };
+async function installDirWritableCached() {
+  if (installWritableCache.at && Date.now() - installWritableCache.at < 10 * 60 * 1000) return installWritableCache.value;
+  const value = await installDirWritable();
+  installWritableCache = { at: Date.now(), value };
+  return value;
+}
+
+// Windows tells us how long the mouse and keyboard have been untouched. That is
+// the only reliable "is the human away" signal, and it decides whether a
+// silent restart would interrupt anything.
+const idleProbeScript = [
+  "$ErrorActionPreference='Stop'",
+  "$src='using System;using System.Runtime.InteropServices;public static class CCIdle{[StructLayout(LayoutKind.Sequential)]public struct LII{public uint cbSize;public uint dwTime;}[DllImport(\"user32.dll\")]static extern bool GetLastInputInfo(ref LII p);public static int Seconds(){LII i=new LII();i.cbSize=(uint)Marshal.SizeOf(i);if(!GetLastInputInfo(ref i))return -1;return (int)(((uint)Environment.TickCount-i.dwTime)/1000);}}'",
+  'Add-Type -TypeDefinition $src',
+  '[CCIdle]::Seconds()',
+].join('; ');
+let idleProbeCache = { at: 0, value: null };
+async function systemIdleSeconds() {
+  if (process.platform !== 'win32') return null;
+  if (idleProbeCache.at && Date.now() - idleProbeCache.at < 30000) return idleProbeCache.value;
+  let value = null;
+  try {
+    const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', idleProbeScript], { timeout: 8000, windowsHide: true });
+    const parsed = Number.parseInt(String(stdout).trim().split(/\r?\n/).pop(), 10);
+    if (Number.isFinite(parsed) && parsed >= 0) value = parsed;
+  } catch (error) {
+    if (!updateIdleErrorLogged) {
+      updateIdleErrorLogged = true;
+      console.error('[update] idle probe failed', humanError(error));
+    }
+  }
+  idleProbeCache = { at: Date.now(), value };
+  return value;
+}
+
+function activeTaskCount() {
+  return [...tasks.values()].filter(task => ['starting', 'running', 'waiting_confirmation', 'retry_waiting'].includes(task.status)).length;
 }
 
 async function updateStatusPayload(force = false) {
@@ -3145,6 +3212,7 @@ async function updateStatusPayload(force = false) {
   const writable = await installDirWritable();
   return {
     ...summary,
+    mode: normalizeUpdateMode(config.updateMode),
     canApply: Boolean(summary.patch) && writable,
     checkedAt: updateCache.checkedAt,
     error: updateCache.error || null,
@@ -3157,8 +3225,46 @@ async function notifyOnceAboutUpdate(status) {
   if (config.lastNotifiedUpdateVersion === status.latest) return;
   config.lastNotifiedUpdateVersion = status.latest;
   await saveConfig().catch(() => {});
-  const how = status.canApply ? `约 ${Math.max(1, Math.round((status.patch?.size || 0) / 1024))} KB，点一下就更新` : '请下载完整安装包';
-  await notify(`有新版本 v${status.latest}（当前 v${status.current}）\n${how}${status.notes ? '\n' + status.notes.split('\n')[0] : ''}\n打开 Companion 网页即可更新。`, { appName: 'Codex Companion' }).catch(() => {});
+  if (!status.canApply) {
+    await notify(`有新版本 v${status.latest}（当前 v${status.current}）\n这次需要完整安装包，请打开 Companion 网页下载。`, { appName: 'Codex Companion' }).catch(() => {});
+    return;
+  }
+  const size = `约 ${Math.max(1, Math.round((status.patch?.size || 0) / 1024))} KB`;
+  const how = status.mode === 'auto'
+    ? `空闲 ${Math.round(DEFAULT_IDLE_SECONDS / 60)} 分钟时会自动更新并重启；也可以点浮窗右上角的 ↑ 立即更新。`
+    : `点浮窗右上角的 ↑ 立即更新（${size}），或打开网页点“立即更新”。`;
+  await notify(`有新版本 v${status.latest}（当前 v${status.current}）\n${how}`, { appName: 'Codex Companion' }).catch(() => {});
+}
+
+// Runs on a timer: installs a known update once the machine is genuinely idle.
+async function maybeAutoApplyUpdate(trigger = 'timer') {
+  const mode = normalizeUpdateMode(config.updateMode);
+  if (mode !== 'auto' || updateApplying) return;
+  const summary = cachedUpdateSummary();
+  if (!summary?.available) return;
+  const base = {
+    mode,
+    available: true,
+    canApply: Boolean(summary.patch) && await installDirWritableCached(),
+    applying: updateApplying,
+    runningTasks: activeTaskCount(),
+    pendingApprovals: pendingApprovals.size,
+  };
+  // Cheap rejection first: with idleSeconds 0 the decision can only pass the
+  // task/approval gates by answering 'user-active'. Anything else means blocked.
+  const pre = idleUpdateDecision({ ...base, idleSeconds: 0 });
+  if (!pre.apply && pre.reason !== 'user-active') {
+    if (trigger === 'check') console.log(`[update] v${summary.latest} waits: ${pre.reason}`);
+    return;
+  }
+  const decision = idleUpdateDecision({ ...base, idleSeconds: await systemIdleSeconds() });
+  if (!decision.apply) {
+    if (trigger === 'check') console.log(`[update] v${summary.latest} waits: ${decision.reason}`);
+    return;
+  }
+  console.log(`[update] installing v${summary.latest} while idle`);
+  await notify(`正在自动更新到 v${summary.latest}\n浮窗会重启，大约 10 秒后回来。`, { appName: 'Codex Companion' }).catch(() => {});
+  await applyUpdate().catch(error => console.error('[update] auto install failed', humanError(error)));
 }
 
 async function downloadPatch(asset, target) {
@@ -3350,12 +3456,17 @@ async function main() {
   // Pick up an account switch made in the Codex client without a restart.
   setInterval(autoImportLocalAuth, 5 * 60 * 1000).unref?.();
   // Update checks are lazy and quiet: the first one waits a minute so it never
-  // delays startup, and a blocked network just leaves the banner hidden.
+  // delays startup, and a blocked network just leaves the badge hidden.
   setTimeout(() => {
-    updateStatusPayload().then(status => notifyOnceAboutUpdate(status)).catch(() => {});
-    setInterval(() => {
-      updateStatusPayload().then(status => notifyOnceAboutUpdate(status)).catch(() => {});
-    }, updateCheckIntervalMs).unref?.();
+    const checkUpdates = () => {
+      updateStatusPayload(true).then(status => notifyOnceAboutUpdate(status)).catch(() => {})
+        .then(() => maybeAutoApplyUpdate('check')).catch(() => {});
+    };
+    checkUpdates();
+    setInterval(checkUpdates, updateCheckIntervalMs).unref?.();
+    // Idle is watched more often than the release feed: once a version is known
+    // to exist, the only thing left to notice is the user walking away.
+    setInterval(() => { maybeAutoApplyUpdate('idle').catch(() => {}); }, updateIdleProbeIntervalMs).unref?.();
   }, 60 * 1000).unref?.();
   startTaskEngine().catch(e => console.error('[task engine]', e.message));
   startFeishuLongConnection().catch(e => console.error('[feishu connection]', e.message));

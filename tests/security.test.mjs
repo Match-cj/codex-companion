@@ -4,9 +4,10 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import { createHash, timingSafeEqual, randomBytes } from 'node:crypto';
 import http from 'node:http';
+import { normalizeUpdateMode, DEFAULT_IDLE_SECONDS } from '../update.mjs';
 const source = fs.readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
 function accessContext(config = {}) {
-  const context = { config, URL, Buffer, createHash, timingSafeEqual };
+  const context = { config, URL, Buffer, createHash, timingSafeEqual, normalizeUpdateMode, DEFAULT_IDLE_SECONDS };
   vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf('const isLoopback ='), source.indexOf('let accounts =')), context);
   return context;

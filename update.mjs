@@ -17,6 +17,48 @@ export function normalizeVersion(value) {
   return String(value ?? '').trim().replace(/^v/i, '');
 }
 
+// Two update policies, and only two: install by itself while the machine is
+// idle, or wait until the user clicks the badge. Anything more is a setting
+// nobody can reason about.
+export const UPDATE_MODES = ['auto', 'notify'];
+export const DEFAULT_UPDATE_MODE = 'auto';
+// "Idle" is 5 straight minutes without touching the mouse or keyboard, with no
+// task running and nothing waiting for confirmation.
+export const DEFAULT_IDLE_SECONDS = 300;
+
+export function normalizeUpdateMode(value) {
+  const text = String(value ?? '').trim().toLowerCase();
+  return UPDATE_MODES.includes(text) ? text : DEFAULT_UPDATE_MODE;
+}
+
+// Decides whether a new version may be installed without asking. Every "no" has
+// its own reason so the badge, the log and the page can say why it is waiting
+// instead of silently doing nothing.
+export function idleUpdateDecision({
+  mode = DEFAULT_UPDATE_MODE,
+  available = false,
+  canApply = false,
+  applying = false,
+  runningTasks = 0,
+  pendingApprovals = 0,
+  idleSeconds = null,
+  minIdleSeconds = DEFAULT_IDLE_SECONDS,
+} = {}) {
+  if (normalizeUpdateMode(mode) !== 'auto') return { apply: false, reason: 'notify-only' };
+  if (!available) return { apply: false, reason: 'up-to-date' };
+  if (!canApply) return { apply: false, reason: 'needs-installer' };
+  if (applying) return { apply: false, reason: 'already-running' };
+  if (Number(runningTasks) > 0) return { apply: false, reason: 'tasks-running' };
+  if (Number(pendingApprovals) > 0) return { apply: false, reason: 'waiting-confirmation' };
+  // Unknown idle time means we could be interrupting something; wait rather
+  // than guess. The next check retries once the idle probe answers again.
+  if (idleSeconds === null || idleSeconds === undefined || !Number.isFinite(Number(idleSeconds))) {
+    return { apply: false, reason: 'idle-unknown' };
+  }
+  if (Number(idleSeconds) < Number(minIdleSeconds)) return { apply: false, reason: 'user-active' };
+  return { apply: true, reason: 'idle' };
+}
+
 function versionParts(value) {
   return normalizeVersion(value).split('.').map(part => {
     const parsed = Number.parseInt(part, 10);

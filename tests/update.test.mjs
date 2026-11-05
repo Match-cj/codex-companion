@@ -10,6 +10,8 @@ import {
   firstLines,
   summarizeRelease,
   PATCH_ASSET_PATTERN,
+  normalizeUpdateMode,
+  idleUpdateDecision,
 } from '../update.mjs';
 
 test('version comparison follows numeric order, not string order', () => {
@@ -99,4 +101,30 @@ test('summarizeRelease reports availability and falls back without a patch', () 
 
   const behind = summarizeRelease({ tag_name: 'v1.0.30', assets: [] }, '1.0.37');
   assert.equal(behind.available, false);
+});
+
+test('update mode defaults to auto and falls back on unknown values', () => {
+  assert.equal(normalizeUpdateMode('auto'), 'auto');
+  assert.equal(normalizeUpdateMode(' NOTIFY '), 'notify');
+  assert.equal(normalizeUpdateMode(''), 'auto');
+  assert.equal(normalizeUpdateMode('sometimes'), 'auto');
+  assert.equal(normalizeUpdateMode(undefined), 'auto');
+});
+
+test('idle auto-update only fires when nothing is running and the user is away', () => {
+  const idle = { mode: 'auto', available: true, canApply: true, applying: false, runningTasks: 0, pendingApprovals: 0, idleSeconds: 600 };
+  assert.deepEqual(idleUpdateDecision(idle), { apply: true, reason: 'idle' });
+  // 4 minutes is not enough; a silent restart could still interrupt typing.
+  assert.equal(idleUpdateDecision({ ...idle, idleSeconds: 240 }).reason, 'user-active');
+  assert.equal(idleUpdateDecision({ ...idle, mode: 'notify' }).reason, 'notify-only');
+  assert.equal(idleUpdateDecision({ ...idle, available: false }).reason, 'up-to-date');
+  assert.equal(idleUpdateDecision({ ...idle, canApply: false }).reason, 'needs-installer');
+  assert.equal(idleUpdateDecision({ ...idle, applying: true }).reason, 'already-running');
+  assert.equal(idleUpdateDecision({ ...idle, runningTasks: 2 }).reason, 'tasks-running');
+  assert.equal(idleUpdateDecision({ ...idle, pendingApprovals: 1 }).reason, 'waiting-confirmation');
+  // Unknown idle time is never treated as idle.
+  assert.equal(idleUpdateDecision({ ...idle, idleSeconds: null }).reason, 'idle-unknown');
+  assert.equal(idleUpdateDecision({ ...idle, idleSeconds: Number.NaN }).reason, 'idle-unknown');
+  // Nothing known yet: no release cached means there is nothing to install.
+  assert.equal(idleUpdateDecision().reason, 'up-to-date');
 });
