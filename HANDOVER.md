@@ -1,6 +1,25 @@
 # Codex Companion 交接文档
 
-## 最新状态：v1.0.28（2026-11-04，开源就绪体检完成）
+## 最新状态：v1.0.33（2026-11-05）
+
+### 两个目录的关系（务必先看这一节）
+
+| 目录 | 角色 | 说明 |
+|---|---|---|
+| `D:\Downloads\cj\codex tools\CodexCompanion` | **源码真源** | 有 `.git`、`tests`、`docs`、`node_modules`。改代码只改这里 |
+| `C:\Users\M0097\AppData\Local\Programs\CodexCompanion` | **运行现场** | 自带 `runtime\node.exe`（v24.14.0）和 `runtime\codex\bin\codex.exe`；桌面「Codex 助手」指向这里 |
+
+**两者不是重复备份，删掉任何一个都会坏**：删安装版则桌面图标打不开（且失去内置 Node/Codex），删工程目录则没有源码和 git 历史。
+
+改动流程固定为：**改源码 → 双击 `Deploy to Installed.cmd` → 自动同步 + 停旧进程 + 重启 + 校验版本**。不要再手工往安装目录拷贝文件——v1.0.33 之前「改了 D 盘、重启 C 盘没生效」就是这个原因。
+
+`Deploy to Installed.ps1` 的同步规则：只复制安装目录顶层文件；永久跳过 `runtime\`、`node_modules\`、`PAYLOAD-MANIFEST.json`、`CODEX-LICENSE.txt`、`NODE-LICENSE.txt`、`*.log`、以及打包工具（`Build Branded Installer.ps1`、`Install Portable.ps1`）。同步后顺带把注册表 `DisplayVersion` 对齐到 `package.json`（此前停在 1.0.14）。
+
+### 运行环境说明
+
+安装版**不需要用户自己装 Node.js**：`runtime\node.exe` 是 v24.14.0，`/api/diagnostics` 的 `runtime.node` 字段会如实上报。`Install Companion.ps1` 的前置检测逻辑是「内置 runtime 存在则跳过系统 Node 检查」，缺失才弹框提示。README 里「前提：Node.js 22 LTS」只适用于从源码跑的场景，已在 v1.0.33 加了醒目前置说明。
+
+### v1.0.33 内容
 
 **「转发 Windows 通知到飞书」开关**（本轮主要功能）：
 
