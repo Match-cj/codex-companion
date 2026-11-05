@@ -1,4 +1,4 @@
-param([switch]$NoBrowser)
+﻿param([switch]$NoBrowser)
 
 $ErrorActionPreference = 'Continue'
 $InformationPreference = 'Continue'
@@ -63,8 +63,15 @@ function Test-HttpReady($url) {
     }
 }
 
-Write-Log "=== Launcher starting (v1.0.14) ==="
+Write-Log "=== Launcher starting (v1.0.15) ==="
 Write-Log "Data directory: $companionDataRoot"
+
+# Already healthy? Then this launch is a no-op. The scheduled task fires
+# periodically to heal a dead backend, not to restart a live one.
+if (Test-HttpReady $healthUrl) {
+    Write-Log 'Backend already healthy; nothing to do.'
+    exit 0
+}
 
 if (-not $node -or -not (Test-Path -LiteralPath $node)) {
     Write-Log 'ERROR: node.exe was not found in PATH'
