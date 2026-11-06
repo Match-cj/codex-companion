@@ -35,6 +35,17 @@ test('late first sample sends nearest threshold only, short windows ignore day r
   assert.equal(nextResetReminder({},'A',{...options,now:options.resetAt-4*3600,leads:[1440],windowMinutes:300}),null);
   assert.equal(nextResetReminder({},'A',{...options,leads:[]}),null);
 });
+test('one-second reset-time jitter is the same cycle, not a re-armed reminder', () => {
+  // 复现 2026-11-05 21:24 连发两条的根因：官方把重置时间从 :09 改成 :10，严格相等导致重复发送。
+  const ledger={};const key='A:5小时额度';const leads=[15];
+  const base=2000000000;
+  assert.equal(nextResetReminder(ledger,key,{resetAt:base,now:base-720,leads,windowMinutes:300}),15);
+  assert.equal(nextResetReminder(ledger,key,{resetAt:base+1,now:base-360,leads,windowMinutes:300}),null);
+  assert.equal(nextResetReminder(ledger,key,{resetAt:base-1,now:base-300,leads,windowMinutes:300}),null);
+  assert.equal(ledger[key].resetAt,base-1);
+  // 真正的新周期（5 小时后）仍然会重新提醒。
+  assert.equal(nextResetReminder(ledger,key,{resetAt:base+18000,now:base+18000-720,leads,windowMinutes:300}),15);
+});
 test('disabled event type never reaches Feishu transport, explicit type avoids matching quoted task content', async () => {
   const source=fs.readFileSync(new URL('../server.mjs',import.meta.url),'utf8');
   const history=[];let saved=0;

@@ -29,7 +29,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.40';
+const APP_VERSION = '1.0.41';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -203,6 +203,55 @@ let lastWindowsNotificationOrder = null;
 let codexExitNotifiedAt = 0; // dedupe Codex 后台 crashed toast: same outage should alert once
 const quotaNotifierState = new Map(); // key=`${accountId}:${label}` → {exhausted, resetSoon, resetAt}
 const subscriptionNotifierState = new Map();
+const resetReminderTimers = new Map(); // timerKey=`${ledgerKey}:${leadMinutes}` → { resetAt, timer }
+
+// 所有额度通知统一用备注名（没有备注才退回原始账号名/邮箱），避免同一账号两套称呼。
+function accountDisplayName(account) {
+  return account?.display_name || account?.name || account?.email || '未知账号';
+}
+function resetSoonMessage(account, label, lead, remainingMinutes, resetAt) {
+  return `Codex 额度即将重置\n账号：${accountDisplayName(account)}\n类型：${label}\n提醒提前量：${lead >= 60 ? `${lead / 60} 小时` : `${lead} 分钟`}\n预计还有：${remainingMinutes} 分钟\n重置时间：${new Date(resetAt * 1000).toLocaleString('zh-CN')}`;
+}
+
+// 已知官方重置时间后，直接为每个提醒档位排一个精确定时器，
+// 到点准点发送——否则只能等下一次额度刷新（最长约 5 分钟）才发现，
+// 用户就会看到「提前量 15 分钟」但「预计还有 11 分钟」的矛盾。
+function scheduleExactResetReminders(account, key, label, resetKey, resetAt, nowSeconds, windowMinutes) {
+  if (!Number.isFinite(resetAt) || resetAt <= nowSeconds) return;
+  for (const lead of resetReminderLeads(config)) {
+    if (!Number.isInteger(lead) || lead <= 0 || (windowMinutes && lead > windowMinutes)) continue;
+    const timerKey = `${key}:${lead}`;
+    const delaySeconds = (resetAt - lead * 60) - nowSeconds;
+    if (delaySeconds <= 0 || delaySeconds > 6 * 3600) continue; // 已进提醒窗口或太远，交给轮询兜底
+    const existing = resetReminderTimers.get(timerKey);
+    // 官方返回的重置时间偶尔会抖动一两秒；容差内视为同一周期，不重复排队。
+    if (existing && Math.abs(existing.resetAt - resetAt) <= 120) continue;
+    if (existing) clearTimeout(existing.timer);
+    const timer = setTimeout(() => {
+      fireExactResetReminder({ key, timerKey, label, resetKey, resetAt, lead, accountId: account.id })
+        .catch(error => console.error('[reset reminder]', error.message));
+    }, Math.round(delaySeconds * 1000));
+    timer.unref?.();
+    resetReminderTimers.set(timerKey, { resetAt, timer });
+  }
+}
+
+async function fireExactResetReminder({ key, timerKey, label, resetKey, resetAt, lead, accountId }) {
+  resetReminderTimers.delete(timerKey);
+  const account = accounts.find(item => String(item.id) === String(accountId));
+  if (!account) return;
+  const resetNow = Number(account.usage?.[resetKey]);
+  if (!Number.isFinite(resetNow) || Math.abs(resetNow - resetAt) > 120) return; // 周期真的变了，交给轮询
+  const remainingMinutes = Math.max(1, Math.ceil((resetNow * 1000 - Date.now()) / 60000));
+  if (remainingMinutes > lead) return;
+  config.quotaResetReminderLedger ||= {};
+  const ledger = config.quotaResetReminderLedger;
+  const previous = Math.abs(Number(ledger[key]?.resetAt) - resetAt) <= 120 ? ledger[key].sentMinutes || [] : [];
+  if (previous.includes(lead)) return;
+  ledger[key] = { resetAt, sentMinutes: [...new Set([...previous, lead])] };
+  await saveConfig();
+  await notify(resetSoonMessage(account, label, lead, remainingMinutes, resetAt), { appName: 'Codex 额度', notificationType: 'quota_reset_soon' });
+}
 const nativeUsageCache = new Map();
 const nativeUsageInFlight = new Map();
 let nativeVaultWriteQueue = Promise.resolve();
@@ -1863,14 +1912,14 @@ async function checkQuotaNotices() {
       const key = String(account.id);
       const previous = subscriptionNotifierState.get(key);
       const todayKey = shanghaiDayKey(Date.now());
-      const alreadySentToday = sentQuotaNoticeToday(`账号：${account.name}`, '重置次数将在 7 天内到期');
+      const alreadySentToday = sentQuotaNoticeToday(`账号：${accountDisplayName(account)}`, '重置次数将在 7 天内到期');
       const state = previous && previous.expiresAt === expiry ? previous : { expiresAt: expiry, sent: {}, lastDay: alreadySentToday ? todayKey : null };
       if (daysLeft <= 7) {
         const dayKey = todayKey;
         if (state.lastDay !== dayKey) {
           state.lastDay = dayKey;
           subscriptionNotifierState.set(key, state);
-          await notify(`Codex 重置次数将在 7 天内到期\n账号：${account.name}\n剩余次数：${account.reset_count ?? '--'}\n到期时间：${new Date(expiry * 1000).toLocaleString('zh-CN')}`, { appName: 'Codex 额度' });
+          await notify(`Codex 重置次数将在 7 天内到期\n账号：${accountDisplayName(account)}\n剩余次数：${account.reset_count ?? '--'}\n到期时间：${new Date(expiry * 1000).toLocaleString('zh-CN')}`, { appName: 'Codex 额度' });
         }
       }
       subscriptionNotifierState.set(key, state);
@@ -1908,8 +1957,8 @@ async function checkQuotaNotices() {
       if (Number.isFinite(used) && used >= 100) {
         if (state.state !== 'exhausted') {
           quotaNotifierState.set(key, { ...(quotaNotifierState.get(key) || { resetCycle: resetAt || 0 }), state: 'exhausted', resetSoonNotified: false, previousUsed: used });
-          const alreadySentToday = sentQuotaNoticeToday('Codex 额度已用尽', `账号：${account.name}`, `类型：${label}`);
-          if (!alreadySentToday) await notify(`Codex 额度已用尽\n账号：${account.name}\n类型：${label}\n下次重置：${resetAt ? new Date(resetAt * 1000).toLocaleString('zh-CN') : '暂未返回'}\n\n${dashboardLink()}`, { appName: 'Codex 额度' });
+          const alreadySentToday = sentQuotaNoticeToday('Codex 额度已用尽', `账号：${accountDisplayName(account)}`, `类型：${label}`);
+          if (!alreadySentToday) await notify(`Codex 额度已用尽\n账号：${accountDisplayName(account)}\n类型：${label}\n下次重置：${resetAt ? new Date(resetAt * 1000).toLocaleString('zh-CN') : '暂未返回'}\n\n${dashboardLink()}`, { appName: 'Codex 额度' });
         }
       } else if (Number.isFinite(used) && used < 100) {
         // 一旦额度回落到非 100%，清空已发过的状态机，下次再耗尽会重新通知
@@ -1921,8 +1970,10 @@ async function checkQuotaNotices() {
         const lead=nextResetReminder(config.quotaResetReminderLedger,key,{resetAt,now:nowSeconds,leads:resetReminderLeads(config),windowMinutes:Number(account.usage?.[windowKey])});
         if(lead!==null) {
           await saveConfig();
-          await notify(`Codex 额度即将重置\n账号：${account.display_name||account.name}\n类型：${label}\n提醒提前量：${lead>=60?`${lead/60} 小时`:`${lead} 分钟`}\n预计还有：${Math.max(1,Math.ceil(remainingSeconds/60))} 分钟\n重置时间：${new Date(resetAt*1000).toLocaleString('zh-CN')}`,{appName:'Codex 额度',notificationType:'quota_reset_soon'});
+          await notify(resetSoonMessage(account,label,lead,Math.max(1,Math.ceil(remainingSeconds/60)),resetAt),{appName:'Codex 额度',notificationType:'quota_reset_soon'});
         }
+        // 轮询兜底之外，为还没到点的档位排精确定时器，到点准点发。
+        scheduleExactResetReminders(account,key,label,resetKey,resetAt,nowSeconds,Number(account.usage?.[windowKey]));
       }
     }
   }

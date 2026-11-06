@@ -40,6 +40,7 @@ function notifier() {
     quotaLabel: minutes => minutes === 10080 ? '周额度' : '5 小时额度', notify: async text => { c.notices.push(text); return { ok: true }; } };
   vm.createContext(c);
   c.syncNativePublicMetadata=async()=>{};
+  vm.runInContext(source.slice(source.indexOf('const resetReminderTimers = new Map()'),source.indexOf('const tasks = new Map()')),c);
   vm.runInContext(source.slice(source.indexOf('function withoutLegacyQuotaWindows('),source.indexOf('async function refreshAccounts(')),c);
   vm.runInContext(source.slice(source.indexOf('async function checkQuotaNotices('), source.indexOf('function activeQuotaSnapshot(')), c);
   c.tick = value => { clock = value; };

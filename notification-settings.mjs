@@ -58,7 +58,11 @@ export function nextResetReminder(ledger,key,{resetAt,now,leads,windowMinutes}) 
   const remaining=resetAt-now;
   const due=leads.filter(m=>Number.isInteger(m)&&m>0&&(!windowMinutes||m<=windowMinutes)&&remaining<=m*60).sort((a,b)=>a-b);
   if(!due.length) return null;
-  const previous=ledger[key]?.resetAt===resetAt ? ledger[key].sentMinutes||[] : [];
+  // 官方返回的重置时间偶尔会有一两秒的抖动（21:30:09 ↔ 21:30:10）。
+  // 严格相等会把这种抖动当成新周期，导致同一窗口重复提醒；±120 秒内视为同一周期。
+  const previousEntry=ledger[key];
+  const sameCycle=previousEntry&&Number.isFinite(previousEntry.resetAt)&&Math.abs(previousEntry.resetAt-resetAt)<=120;
+  const previous=sameCycle?previousEntry.sentMinutes||[]:[];
   const nearest=due[0];
   ledger[key]={resetAt,sentMinutes:[...new Set([...previous,...due])]};
   return previous.includes(nearest) ? null : nearest;
