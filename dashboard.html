@@ -97,7 +97,7 @@ section h2{font-size:16px}
 <p class="muted"><b>什么时候点不到：</b>Windows <b>锁屏</b>（Win+L、屏保恢复时需要输入密码）之后桌面被切走，自动重试会点不到按钮；远程桌面断开、电脑<b>睡眠/休眠</b>同理。想让它一直工作：电源设置里把「睡眠」设为从不、关闭需要密码的锁屏，只让显示器自己熄屏即可（熄屏不影响，锁屏才影响）。</p>
 </details></section>
   <section data-panel="retry"><details><summary>额度用尽自动换号（账号接力）</summary>
-<p class="muted">任务因为<b>额度用尽</b>失败时（提示 usage limit / 购买额度），Companion 会发一条飞书消息：列出哪个账号没额度、其它账号还剩多少，回复 <code>切换</code> 就自动选额度最多的账号继续这个任务；回复 <code>切换 账号名</code> 指定账号；回复 <code>切换 账号名 不继续</code> 只换号。只有 5 小时额度真的还有剩余的账号才会被自动选中，<b>读不到额度时不会乱选</b>。</p>
+<p class="muted">任务因为<b>额度用尽</b>失败时（提示 usage limit / 购买额度），Companion 会发一条飞书消息：列出哪个账号没额度、其它账号还剩多少，回复 <code>切换</code>（<code>切换账号</code>、<code>切换账号并继续</code> 也一样）就自动选额度最多的账号继续这个任务；回复 <code>切换 账号名</code> 指定账号；回复 <code>切换 账号名 不继续</code> 只换号。只有 5 小时额度真的还有剩余的账号才会被自动选中，<b>读不到额度时不会乱选</b>。</p>
 <div class="row"><label><input id="quotaAutoSwitch" type="checkbox" style="min-width:0">额度用尽时自动切换账号并继续</label><button onclick="saveQuotaSwitch()">保存</button><span id="quotaSwitchState" class="muted"></span></div>
 <p class="muted">不勾选（默认）= 先发消息问你，你回一句再切；勾选 = 自动切并继续，切换成功后会告诉你切到了哪个账号。飞书里也可以直接回复 <code>自动切换 开启</code> / <code>自动切换 关闭</code> 修改。自动切换最多连续 3 次，避免两个账号来回空转。</p>
 </details></section>

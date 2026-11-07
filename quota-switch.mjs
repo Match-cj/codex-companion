@@ -79,12 +79,22 @@ export function parseSwitchCommand(text) {
     return { action: 'auto-toggle', enabled: ['开启', '打开', '开', 'on'].includes(value) };
   }
   if (/^(?:账号|账号列表|账户|accounts?)$/i.test(command)) return { action: 'accounts' };
-  const switching = command.match(/^(?:切换|切|换号|切换账号)\s*(.*)$/);
+  // 口语里“切换 / 切换账号 / 切换账号并继续 / 换到品牌组 / 切 品牌组 继续”都是一个意思：
+  // 换到有额度的账号并把这个对话接着跑下去。这里统一收敛成同一条指令。
+  const switching = command.match(/^(?:切换|切|换号|换到|切到|切换到)\s*(.*)$/);
   if (!switching) return null;
   let rest = String(switching[1] || '').trim();
   let continueAfter = true;
-  if (/不继续$/.test(rest)) { continueAfter = false; rest = rest.replace(/不继续$/, '').trim(); }
-  // “切换到 品牌组”“切到品牌组”这类口语也要认。
-  rest = rest.replace(/^到\s*/, '').replace(/^账号\s*/, '').trim();
+  if (/不继续$/.test(rest)) {
+    continueAfter = false;
+    rest = rest.replace(/\s*不继续$/, '').trim();
+  } else {
+    // 尾部的“并继续 / 继续 / 接着干 / 然后继续”只是强调要接着跑，不是账号名。
+    rest = rest.replace(/\s*(?:并继续|继续|接着干|然后继续|继续任务|接着跑)$/, '').trim();
+  }
+  // “切换到 品牌组”“切到品牌组”“换到账号 品牌组”这类口语也要认。
+  rest = rest.replace(/^到\s*/, '').replace(/^(?:账号|账户)\s*/, '').replace(/\s*(?:账号|账户)$/, '').trim();
+  // 只说了“切换账号/这个账号/其它账号”的，等于让系统自己挑。
+  if (/^(?:这个|那个|其它|其他|别的|另一个)?账号$/.test(rest)) rest = '';
   return { action: 'switch', targetName: rest, continueAfter };
 }

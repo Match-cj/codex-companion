@@ -76,6 +76,32 @@ test('failure path asks before switching by default and can switch automatically
   assert.match(server, /isQuotaExhaustedText\(`\$\{turnError\}\\n\$\{finalText\}`\)/);
 });
 
+test('every spoken form of “switch and continue” means the same thing', () => {
+  // 用户明确要求：切换 / 切换账号 / 切换账号并继续 都能换号并继续，不用背口令。
+  for (const text of ['切换', '切换账号', '切换账号并继续', '切换 并继续', '换号', '换到账号']) {
+    assert.deepEqual(parseSwitchCommand(text), { action: 'switch', targetName: '', continueAfter: true }, text);
+  }
+  assert.deepEqual(parseSwitchCommand('切换 品牌组 并继续'), { action: 'switch', targetName: '品牌组', continueAfter: true });
+  assert.deepEqual(parseSwitchCommand('切换账号 品牌组 继续'), { action: 'switch', targetName: '品牌组', continueAfter: true });
+  assert.deepEqual(parseSwitchCommand('换到 品牌组'), { action: 'switch', targetName: '品牌组', continueAfter: true });
+  assert.deepEqual(parseSwitchCommand('切换账号 不继续'), { action: 'switch', targetName: '', continueAfter: false });
+  // 账号名里不会出现“并继续/继续”，这些尾巴必须被吃掉。
+  assert.deepEqual(parseSwitchCommand('切到品牌组 继续'), { action: 'switch', targetName: '品牌组', continueAfter: true });
+});
+
+test('continuing after a switch never depends on the in-memory task table', () => {
+  // 2026-11-07 真实故障：额度用尽后软件重启过，回「切换」时内存任务表已清空，
+  // 于是虽然换号成功却报“没识别到要接力的对话”。续跑只能依赖对话 id。
+  assert.doesNotMatch(server, /const task = tasks\.get\(String\(taskId\)\);\s*\n\s*if \(!task\) return/);
+  assert.match(server, /function continuationThreadCandidates\(preferred\)/);
+  assert.match(server, /function rememberActiveThread\(threadId\)/);
+  assert.match(server, /config\.lastActiveThreadId = id;/);
+  assert.match(server, /rememberActiveThread\(id\);/, 'turn/completed 要记录最近对话');
+  assert.match(server, /rememberActiveThread\(threadId\);/, '手动续跑要记录最近对话');
+  // 猜的对话要如实告诉用户，不能装作一切正常。
+  assert.match(server, /guessed: candidate !== canonicalCodexThreadId\(threadId\)/);
+});
+
 test('webpage exposes the toggle and saves it', () => {
   assert.match(dashboard, /id="quotaAutoSwitch"/);
   assert.match(dashboard, /async function saveQuotaSwitch\(\)/);
