@@ -11,6 +11,7 @@ import * as Lark from '@larksuiteoapi/node-sdk';
 import { finalImagePaths, relayFinalImages, validateImageRoot } from './image-relay.mjs';
 import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 import { observeEarlyQuotaReset } from './quota-reset.mjs';
+import { isQuotaExhaustedText, quotaLeft, quotaLeftText, pickQuotaSwitchTarget, findAccountByName, parseSwitchCommand } from './quota-switch.mjs';
 import { notificationRules, notificationEnabled, notificationType, resetReminderLeads, validateNotificationSettings, nextResetReminder } from './notification-settings.mjs';
 import { recoverReplyTarget } from './feishu-reply-recovery.mjs';
 import { desktopRetryState, desktopTakeoverAllowed, syncDesktopRetryWatcher, startDesktopRetryWatcher, stopDesktopRetryWatcher, setDesktopRetryNotifier } from './desktop-retry.mjs';
@@ -29,7 +30,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.41';
+const APP_VERSION = '1.0.42';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -64,6 +65,8 @@ const defaultConfig = {
   resetReminderMinutes: 15,
   autoContinue429: true,
   autoContinue429MaxAttempts: 3,
+  // 额度用尽导致任务失败时：false = 发消息问你（默认），true = 自动换到有额度的账号并继续。
+  autoSwitchAccountOnQuotaExhausted: false,
   autoContinueTransient: true,
   autoContinueTransientMaxAttempts: 10,
   autoTakeoverDesktopTransient: true,
@@ -131,6 +134,7 @@ function publicConfig() {
     desktopRetryCooldownSeconds: Number(config.desktopRetryCooldownSeconds || 8),
     desktopRetryQuietMinutes: Number(config.desktopRetryQuietMinutes || 10),
     feishuImageRelayEnabled: !!config.feishuImageRelayEnabled, feishuImageRelayRoot: config.feishuImageRelayRoot || '',
+    autoSwitchAccountOnQuotaExhausted: config.autoSwitchAccountOnQuotaExhausted === true,
     updateMode: normalizeUpdateMode(config.updateMode), updateIdleMinutes: Math.round(DEFAULT_IDLE_SECONDS / 60),
     webhooks: publicWebhooks() };
 }
@@ -725,7 +729,7 @@ function feishuRunningCount() {
 function feishuMenuText() {
   const takeover = desktopTakeoverAllowed(config) ? '开启' : '关闭';
   const retry = desktopRetryState();
-  return `Codex Tools 手机菜单\n\n自动重试：${retry.enabled ? '开启' : '关闭'}${retry.enabled ? `（已点击 ${retry.hits} 次）` : ''}\n自动接管：${takeover}\n运行中对话：${feishuRunningCount()} 个\n\n可直接回复下面的命令：\n· 自动重试 开启\n· 自动重试 关闭\n· 自动接管 开启\n· 自动接管 关闭\n· 状态\n· 自动重试（查状态）\n· 交接提示词\n· 刷新额度\n· 绑定最近对话\n· 新话题\n\n说明：自动重试只是按下桌面端自己的重试按钮，不改对话、不换模型；它开启时自动接管不再转入后台。`;
+  return `Codex Tools 手机菜单\n\n自动重试：${retry.enabled ? '开启' : '关闭'}${retry.enabled ? `（已点击 ${retry.hits} 次）` : ''}\n自动接管：${takeover}\n额度用尽自动换号：${config.autoSwitchAccountOnQuotaExhausted === true ? '开启' : '关闭（会先问你）'}\n运行中对话：${feishuRunningCount()} 个\n\n可直接回复下面的命令：\n· 自动重试 开启\n· 自动重试 关闭\n· 自动接管 开启\n· 自动接管 关闭\n· 切换（额度用尽时换到有额度的账号并继续）\n· 切换 账号名\n· 自动切换 开启\n· 自动切换 关闭\n· 账号（看每个账号还剩多少）\n· 状态\n· 自动重试（查状态）\n· 交接提示词\n· 刷新额度\n· 绑定最近对话\n· 新话题\n\n说明：自动重试只是按下桌面端自己的重试按钮，不改对话、不换模型；它开启时自动接管不再转入后台。`;
 }
 
 function desktopRetryStatusText() {
@@ -761,6 +765,16 @@ setDesktopRetryNotifier(({ window, text }) => {
 
 async function handleFeishuControlCommand(text, message) {
   const command = String(text || '').trim().replace(/[：:]/g, ' ');
+  // 账号接力指令：切换 / 切换 账号名 / 自动切换 开启|关闭 / 账号
+  const parsedSwitch = parseSwitchCommand(command);
+  if (parsedSwitch) {
+    // 「切换这个按钮的颜色」这类正常任务句子不能当指令吃掉：只有短句或确实命中账号名才拦。
+    const mentionsKnownAccount = parsedSwitch.action !== 'switch' || !parsedSwitch.targetName || !!findAccountByName(accounts, parsedSwitch.targetName);
+    const shortEnough = command.replace(/\s+/g, '').length <= 12;
+    if (mentionsKnownAccount || shortEnough) {
+      if (await handleQuotaSwitchCommand(parsedSwitch, message)) return true;
+    }
+  }
   if (/^(菜单|menu|设置|帮助|help)$/i.test(command)) {
     await sendFeishuAppText(feishuMenuText(), { replyTo: message.message_id });
     return true;
@@ -1013,8 +1027,129 @@ async function continueThreadFromFeishu(threadId, input, { manual = false } = {}
   }
 }
 
-function desktopTakeoverIds() {
-  return Array.isArray(config.codexDesktopTakeoverThreadIds) ? config.codexDesktopTakeoverThreadIds.map(String) : [];
+// 额度用尽导致任务失败时的“账号接力”。
+// 目标：不用打开电脑，在飞书里回一句「切换」就能换到有额度的账号并接着干。
+function quotaAccountsOverview() {
+  const active = accounts.find(account => account.is_active) || null;
+  const others = accounts.filter(account => !account.is_active);
+  return { active, others, target: pickQuotaSwitchTarget(accounts, active?.id || '') };
+}
+
+function activeQuotaSummaryText() {
+  const active = accounts.find(account => account.is_active);
+  return active ? `账号：${accountDisplayName(active)} · ${quotaLeftText(active)}` : '当前账号额度未知';
+}
+
+async function performQuotaSwitch(target, { taskId = '', continueAfter = true } = {}) {
+  const name = accountDisplayName(target);
+  // 换号会重启 Codex 引擎，把正在跑的对话一起打断，所以必须等它们结束。
+  const busy = [...tasks.values()].filter(task => String(task.id) !== String(taskId) && (task.status === 'running' || task.status === 'waiting_confirmation'));
+  if (busy.length) throw Error(`还有 ${busy.length} 个对话在跑，现在换号会打断它们；等它们结束再回复「切换」。`);
+  await switchNativeAccount(String(target.id));
+  await refreshAccounts({ forceNative: true, awaitNative: true }).catch(error => console.error('[quota switch refresh]', humanError(error)));
+  const activeNow = accounts.find(account => account.is_active);
+  if (!activeNow || String(activeNow.id) !== String(target.id)) throw Error('账号切换后校验失败，当前账号没有改变，原账号仍可用。');
+  if (taskId && continueAfter) {
+    const task = tasks.get(String(taskId));
+    if (!task) return { name, continued: false };
+    await continueThreadFromFeishu(task.id, [{ type: 'text', text: '继续往下推进，恢复本轮任务并完成剩余工作。' }], { manual: true });
+    return { name, continued: true };
+  }
+  return { name, continued: false };
+}
+
+async function handleQuotaExhaustedFailure(task, { detail = '' } = {}) {
+  const { active, others, target } = quotaAccountsOverview();
+  const activeLine = active ? `${accountDisplayName(active)}（${quotaLeftText(active)}）` : '当前账号额度未知';
+  const otherLines = others.map(account => `· ${accountDisplayName(account)}（${quotaLeftText(account)}）`).join('\n');
+  const switchCount = Number(task.quotaSwitchCount || 0);
+
+  if (config.autoSwitchAccountOnQuotaExhausted === true && target && switchCount < 3) {
+    task.quotaSwitchCount = switchCount + 1;
+    task.status = 'retry_waiting';
+    task.output = `额度用尽，正在自动切换到 ${accountDisplayName(target)} 继续。`;
+    await notify(`Codex 额度用尽，正在自动切换账号\n任务：${task.id}\n原账号：${activeLine}\n切换目标：${accountDisplayName(target)}（${quotaLeftText(target)}）\n\n切好后自动继续本轮任务，结果会发在这里。`, { appName: 'Codex 任务', taskId: task.id, notificationType: 'task_failed' }).catch(error => console.error('[quota switch notice]', error.message));
+    try {
+      const result = await performQuotaSwitch(target, { taskId: task.id, continueAfter: true });
+      await notify(`已切换到 ${result.name}，继续这个任务\n任务：${task.id}${result.continued ? '' : '\n（没找到原对话，请在 Codex 里继续）'}`, { appName: 'Codex 任务', taskId: task.id, notificationType: 'task_started' }).catch(() => {});
+      return true;
+    } catch (error) {
+      task.status = 'failed';
+      const reason = humanError(error);
+      const nextPick = quotaAccountsOverview();
+      await notify(`自动切换账号失败，任务停在这里\n任务：${task.id}\n原因：${reason}${nextPick.target ? `\n可以回复「切换 ${accountDisplayName(nextPick.target)}」手动再试一次。` : ''}`, { appName: 'Codex 任务', taskId: task.id, notificationType: 'task_failed' }).catch(() => {});
+      return true;
+    }
+  }
+
+  const hint = target
+    ? `建议切到：${accountDisplayName(target)}（${quotaLeftText(target)}）`
+    : '现在没有其它账号还剩 5 小时额度，只能等额度重置。';
+  const actions = target
+    ? [
+        '回复「切换」：自动选额度最多的账号并继续这个任务',
+        '回复「切换 账号名」：指定账号（例如「切换 ' + accountDisplayName(target) + '」）',
+        '回复「切换 账号名 不继续」：只换账号，不接着跑',
+        '回复「自动切换 开启」：以后额度用尽自动换号',
+      ].join('\n')
+    : [
+        '额度重置后回复「继续」就能接着干。',
+        '回复「自动切换 开启」：以后有可用账号时自动换号。',
+      ].join('\n');
+  await notify(`Codex 额度用尽，任务中断\n任务：${task.id}\n中断账号：${activeLine}\n${hint}${otherLines ? '\n\n其它账号：\n' + otherLines : ''}\n\n${actions}${detail ? '\n\n原始提示：' + trim(detail, 400) : ''}`, { appName: 'Codex 任务', taskId: task.id, notificationType: 'task_failed' }).catch(error => console.error('[quota exhausted notice]', error.message));
+  return true;
+}
+
+// 飞书里回复「切换」时使用：先定位这条回复对应的对话，再决定要不要继续。
+async function handleQuotaSwitchCommand(parsed, message) {
+  const { active, others, target } = quotaAccountsOverview();
+  if (parsed.action === 'auto-status') {
+    await sendFeishuAppText(`额度用尽自动切换：${config.autoSwitchAccountOnQuotaExhausted === true ? '已开启' : '已关闭（默认只提醒你）'}\n\n回复「自动切换 开启 / 关闭」可以修改。`, { replyTo: message.message_id });
+    return true;
+  }
+  if (parsed.action === 'auto-toggle') {
+    config.autoSwitchAccountOnQuotaExhausted = parsed.enabled;
+    await saveConfig();
+    await sendFeishuAppText(parsed.enabled
+      ? '已开启：以后任务因为额度用尽失败时，会自动切到还有 5 小时额度的账号并继续，切完会在这里告诉你。'
+      : '已关闭：额度用尽时只发消息问你，不会自动换号。回复「切换」可以手动换。', { replyTo: message.message_id });
+    return true;
+  }
+  if (parsed.action === 'accounts') {
+    const lines = accounts.map(account => `${account.is_active ? '● ' : '○ '}${accountDisplayName(account)}：${quotaLeftText(account)}`).join('\n');
+    await sendFeishuAppText(`账号额度\n${lines || '还没有账号'}\n\n回复「切换」换到还有 5 小时额度的账号并继续当前对话。`, { replyTo: message.message_id });
+    return true;
+  }
+  // action === 'switch'
+  let chosen = target;
+  if (parsed.targetName) {
+    chosen = findAccountByName(accounts, parsed.targetName);
+    if (!chosen) {
+      const names = accounts.map(account => accountDisplayName(account)).join('、');
+      await sendFeishuAppText(`没有找到「${parsed.targetName}」这个账号。\n现有账号：${names}\n\n回复「切换」可以自动选额度最多的账号。`, { replyTo: message.message_id });
+      return true;
+    }
+  }
+  if (!chosen) {
+    await sendFeishuAppText(`现在没有其它账号还剩 5 小时额度，切换也跑不动。\n● 当前：${accountDisplayName(active)}（${quotaLeftText(active)}）\n\n可以等额度重置后回复「继续」。`, { replyTo: message.message_id });
+    return true;
+  }
+  if (active && String(chosen.id) === String(active.id)) {
+    await sendFeishuAppText(`当前已经是 ${accountDisplayName(chosen)}（${quotaLeftText(chosen)}），没有切换。\n如果还有额度却跑不动，可能是别的原因，回复「状态」看看。`, { replyTo: message.message_id });
+    return true;
+  }
+  const chatThreadId = canonicalCodexThreadId(await resolveFeishuReplyThread(message).catch(() => '')) || '';
+  try {
+    const result = await performQuotaSwitch(chosen, { taskId: chatThreadId, continueAfter: parsed.continueAfter === true });
+    await sendFeishuAppText(`已切换到 ${result.name}（${quotaLeftText(chosen)}）${result.continued ? '\n已让它接着干，结果会发在这个对话里。' : (parsed.continueAfter ? '\n没识别到要接力的对话；到 Codex 里回复「继续」即可。' : '\n按你的要求只换了账号，没有继续任务。')}`, { replyTo: message.message_id, taskId: chatThreadId || undefined });
+    return true;
+  } catch (error) {
+    await sendFeishuAppText(`切换失败：${humanError(error)}\n原账号没有改变，可以稍后重试。`, { replyTo: message.message_id });
+    return true;
+  }
+}
+
+function desktopTakeoverIds() {  return Array.isArray(config.codexDesktopTakeoverThreadIds) ? config.codexDesktopTakeoverThreadIds.map(String) : [];
 }
 
 async function rememberDesktopTakeover(threadId) {
@@ -2622,8 +2757,16 @@ class CodexServer {
           }
           task.turnFinalText = `429 Too Many Requests，已自动继续 ${maxAttempts} 次仍未恢复。请稍后重试或在飞书回复“继续”。`;
         }
-        const capacityFailure = /selected model is at capacity|model is temporarily unavailable/i.test(`${turnError}\n${finalText}`);
-        const transientFailure = capacityFailure || /service unavailable|stream disconnected|stream closed before response\.completed|connection reset|socket hang up/i.test(`${turnError}\n${finalText}`);
+        // 额度用尽：不是普通失败，交给账号接力逻辑（提示换号 / 自动换号）。这里必须
+        // 在通用失败通知之前拦下，否则会同时发出两条互相矛盾的结论。
+        if (task.status === 'failed' && isQuotaExhaustedText(`${turnError}\n${finalText}`)) {
+          task.turnFinalText = `Codex 额度用尽，任务中断\n${activeQuotaSummaryText()}`;
+          handleQuotaExhaustedFailure(task, { detail: turnError || finalText }).catch(error => console.error('[quota exhausted]', humanError(error)));
+          finishDesktopTakeover(id).catch(error => console.error('[desktop relaunch]', error.message));
+          refreshQuotaAfterTask(task).catch(error => console.error('[task quota]', error.message));
+          return;
+        }
+        const capacityFailure = /selected model is at capacity|model is temporarily unavailable/i.test(`${turnError}\n${finalText}`);        const transientFailure = capacityFailure || /service unavailable|stream disconnected|stream closed before response\.completed|connection reset|socket hang up/i.test(`${turnError}\n${finalText}`);
         if (task.status === 'failed' && transientFailure && config.autoContinueTransient !== false) {
           const configuredAttempts = Number(config.autoContinueTransientMaxAttempts) || 10;
           const maxAttempts = capacityFailure
@@ -2950,9 +3093,10 @@ async function handle(req, res) {
       if(['OK','THUMBSUP','DONE','CHECK'].includes(String(data.feishuContinueEmoji||'').toUpperCase())) config.feishuContinueEmoji=String(data.feishuContinueEmoji).toUpperCase();
       if(Object.hasOwn(data,'webhooks')) config.webhooks=validateWebhooks(data.webhooks)||[];
       if(Object.hasOwn(data,'updateMode')) config.updateMode=normalizeUpdateMode(data.updateMode);
+      if(typeof data.autoSwitchAccountOnQuotaExhausted==='boolean') config.autoSwitchAccountOnQuotaExhausted=data.autoSwitchAccountOnQuotaExhausted;
       await saveConfig();
       if(Object.hasOwn(data,'autoTakeoverDesktopTransient')||Object.hasOwn(data,'desktopRetryAutoClick')||Object.hasOwn(data,'desktopRetryCooldownSeconds')) syncDesktopRetryWatcher(config);
-      return send(res,200,{ok:true,desktopRetry:desktopRetryState(),webhooks:publicWebhooks(),updateMode:normalizeUpdateMode(config.updateMode)});
+      return send(res,200,{ok:true,desktopRetry:desktopRetryState(),webhooks:publicWebhooks(),updateMode:normalizeUpdateMode(config.updateMode),autoSwitchAccountOnQuotaExhausted:config.autoSwitchAccountOnQuotaExhausted===true});
     }
     if (req.method==='POST'&&u.pathname==='/api/webhooks/add'){
       const draft={kind:String(data.kind||''),name:String(data.name||''),url:String(data.url||''),token:String(data.token||''),enabled:true};
