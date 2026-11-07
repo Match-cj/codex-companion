@@ -99,7 +99,14 @@ test('continuing after a switch never depends on the in-memory task table', () =
   assert.match(server, /rememberActiveThread\(id\);/, 'turn/completed 要记录最近对话');
   assert.match(server, /rememberActiveThread\(threadId\);/, '手动续跑要记录最近对话');
   // 猜的对话要如实告诉用户，不能装作一切正常。
-  assert.match(server, /guessed: candidate !== canonicalCodexThreadId\(threadId\)/);
+  assert.match(server, /guessed: candidate !== wanted/);
+});
+
+test('saying “切换” while already on the target account still continues the thread', () => {
+  // 用户 2026-11-07 的真实处境：已经换到新账号了，任务还停着，再回「切换」不能只说“没有切换”。
+  assert.match(server, /async function continueOnCurrentAccount\(threadId\)/);
+  assert.match(server, /当前已经在 \$\{accountDisplayName\(chosen\)\}/);
+  assert.match(server, /const resumed = await continueOnCurrentAccount\(chatThreadId\);/);
 });
 
 test('webpage exposes the toggle and saves it', () => {

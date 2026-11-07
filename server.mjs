@@ -30,7 +30,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.43';
+const APP_VERSION = '1.0.44';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -1080,6 +1080,27 @@ function continuationThreadCandidates(preferred) {
   return list;
 }
 
+// 在当前账号上把某个对话接着跑：只需要对话 id，不依赖内存里的任务对象，
+// 所以软件重启过、任务表清空也照样能续上。
+async function continueOnCurrentAccount(threadId) {
+  const wanted = canonicalCodexThreadId(threadId);
+  const candidates = continuationThreadCandidates(threadId);
+  let lastError = null;
+  for (const candidate of candidates) {
+    try {
+      await continueThreadFromFeishu(candidate, [{ type: 'text', text: '继续往下推进，恢复本轮任务并完成剩余工作。' }], { manual: true });
+      rememberActiveThread(candidate);
+      return { continued: true, threadId: candidate, guessed: candidate !== wanted };
+    } catch (error) {
+      lastError = error;
+      // 只有“这个对话真的不在了”才换下一个候选；其它错误（占用、权限）换对话只会更乱。
+      if (!isThreadGoneError(error)) break;
+    }
+  }
+  if (lastError) console.warn('[quota switch continue]', humanError(lastError));
+  return { continued: false, reason: lastError ? humanError(lastError) : 'no-thread' };
+}
+
 async function performQuotaSwitch(target, { threadId = '', continueAfter = true } = {}) {
   const name = accountDisplayName(target);
   // 换号会重启 Codex 引擎，把正在跑的对话一起打断，所以必须等它们结束。
@@ -1090,22 +1111,7 @@ async function performQuotaSwitch(target, { threadId = '', continueAfter = true 
   const activeNow = accounts.find(account => account.is_active);
   if (!activeNow || String(activeNow.id) !== String(target.id)) throw Error('账号切换后校验失败，当前账号没有改变，原账号仍可用。');
   if (!continueAfter) return { name, continued: false, reason: 'asked-not-to-continue' };
-  // 续跑只需要对话 id，不依赖内存里的任务对象：软件重启过也能接着干。
-  const candidates = continuationThreadCandidates(threadId);
-  let lastError = null;
-  for (const candidate of candidates) {
-    try {
-      await continueThreadFromFeishu(candidate, [{ type: 'text', text: '继续往下推进，恢复本轮任务并完成剩余工作。' }], { manual: true });
-      rememberActiveThread(candidate);
-      return { name, continued: true, threadId: candidate, guessed: candidate !== canonicalCodexThreadId(threadId) };
-    } catch (error) {
-      lastError = error;
-      // 只有“这个对话真的不在了”才换下一个候选；其它错误（占用、权限）换对话只会更乱。
-      if (!isThreadGoneError(error)) break;
-    }
-  }
-  if (lastError) console.warn('[quota switch continue]', humanError(lastError));
-  return { name, continued: false, reason: lastError ? humanError(lastError) : 'no-thread' };
+  return { name, ...await continueOnCurrentAccount(threadId) };
 }
 
 async function handleQuotaExhaustedFailure(task, { detail = '' } = {}) {
@@ -1184,20 +1190,25 @@ async function handleQuotaSwitchCommand(parsed, message) {
     await sendFeishuAppText(`现在没有其它账号还剩 5 小时额度，切换也跑不动。\n● 当前：${accountDisplayName(active)}（${quotaLeftText(active)}）\n\n可以等额度重置后回复「继续」。`, { replyTo: message.message_id });
     return true;
   }
+  const chatThreadId = canonicalCodexThreadId(await resolveFeishuReplyThread(message).catch(() => '')) || '';
+  const continuedText = resumed => resumed.continued
+    ? (resumed.guessed
+      ? '\n没认出你回复的是哪个对话，已接着最近跑过的那个继续；如果跑错地方，到 Codex 里手动打开要跑的对话回复「继续」即可。'
+      : '\n已让它接着干，结果会发在这个对话里。')
+    : `\n没找到可以接力的对话${resumed.reason && resumed.reason !== 'no-thread' ? `（${resumed.reason}）` : ''}；到 Codex 里回复「继续」即可。`;
+  // 已经在这个账号上：不用换号。但说「切换/切换账号」本身就意味着“接着跑”，所以直接续跑。
   if (active && String(chosen.id) === String(active.id)) {
-    await sendFeishuAppText(`当前已经是 ${accountDisplayName(chosen)}（${quotaLeftText(chosen)}），没有切换。\n如果还有额度却跑不动，可能是别的原因，回复「状态」看看。`, { replyTo: message.message_id });
+    if (parsed.continueAfter !== true) {
+      await sendFeishuAppText(`当前已经是 ${accountDisplayName(chosen)}（${quotaLeftText(chosen)}），没有换号，也没有继续任务。`, { replyTo: message.message_id });
+      return true;
+    }
+    const resumed = await continueOnCurrentAccount(chatThreadId);
+    await sendFeishuAppText(`当前已经在 ${accountDisplayName(chosen)}（${quotaLeftText(chosen)}），不用换号。${continuedText(resumed)}`, { replyTo: message.message_id, taskId: resumed.threadId || chatThreadId || undefined });
     return true;
   }
-  const chatThreadId = canonicalCodexThreadId(await resolveFeishuReplyThread(message).catch(() => '')) || '';
   try {
     const result = await performQuotaSwitch(chosen, { threadId: chatThreadId, continueAfter: parsed.continueAfter === true });
-    const where = result.continued
-      ? (result.guessed
-        ? '\n没认出你回复的是哪个对话，已接着最近跑过的那个继续；如果跑错地方，到 Codex 里手动打开要跑的对话回复「继续」即可。'
-        : '\n已让它接着干，结果会发在这个对话里。')
-      : (parsed.continueAfter
-        ? `\n没找到可以接力的对话${result.reason && result.reason !== 'no-thread' ? `（${result.reason}）` : ''}；到 Codex 里回复「继续」即可。`
-        : '\n按你的要求只换了账号，没有继续任务。');
+    const where = parsed.continueAfter === true ? continuedText(result) : '\n按你的要求只换了账号，没有继续任务。';
     await sendFeishuAppText(`已切换到 ${result.name}（${quotaLeftText(chosen)}）${where}`, { replyTo: message.message_id, taskId: chatThreadId || result.threadId || undefined });
     return true;
   } catch (error) {
