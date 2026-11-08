@@ -12,7 +12,7 @@ import { finalImagePaths, relayFinalImages, validateImageRoot } from './image-re
 import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 import { observeEarlyQuotaReset } from './quota-reset.mjs';
 import { isQuotaExhaustedText, quotaLeft, quotaLeftText, pickQuotaSwitchTarget, findAccountByName, parseSwitchCommand } from './quota-switch.mjs';
-import { notificationRules, notificationEnabled, notificationType, resetReminderLeads, validateNotificationSettings, nextResetReminder } from './notification-settings.mjs';
+import { notificationRules, notificationEnabled, notificationType, resetReminderLeads, validateNotificationSettings, nextResetReminder, nextWasteReminder, parseExpirySeconds, planExpirySuffix } from './notification-settings.mjs';
 import { recoverReplyTarget } from './feishu-reply-recovery.mjs';
 import { desktopRetryState, desktopTakeoverAllowed, syncDesktopRetryWatcher, startDesktopRetryWatcher, stopDesktopRetryWatcher, setDesktopRetryNotifier } from './desktop-retry.mjs';
 import { validateWebhooks, activeWebhookTargets, sendWebhooks, kindLabel as webhookKindLabel, friendlyWebhookReason } from './webhook-notify.mjs';
@@ -30,7 +30,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.44';
+const APP_VERSION = '1.0.45';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -63,6 +63,9 @@ const defaultConfig = {
   stallMinutes: 3,
   quotaRefreshMinutes: 5,
   resetReminderMinutes: 15,
+  // 防浪费提醒：5 小时额度重置前还剩很多时提醒一次，别让会员费白花。
+  wasteReminderLeadMinutes: 30,
+  wasteReminderMinPercent: 30,
   autoContinue429: true,
   autoContinue429MaxAttempts: 3,
   // 额度用尽导致任务失败时：false = 发消息问你（默认），true = 自动换到有额度的账号并继续。
@@ -210,6 +213,8 @@ let lastWindowsNotificationOrder = null;
 let codexExitNotifiedAt = 0; // dedupe Codex 后台 crashed toast: same outage should alert once
 const quotaNotifierState = new Map(); // key=`${accountId}:${label}` → {exhausted, resetSoon, resetAt}
 const subscriptionNotifierState = new Map();
+// 会员到期提醒的去重台账：账号 id → { expiresAt, lastDay }
+const planExpiryNotifierState = new Map();
 const resetReminderTimers = new Map(); // timerKey=`${ledgerKey}:${leadMinutes}` → { resetAt, timer }
 
 // 所有额度通知统一用备注名（没有备注才退回原始账号名/邮箱），避免同一账号两套称呼。
@@ -763,7 +768,8 @@ setDesktopRetryNotifier(({ window, text }) => {
   } else if (/model\s*(is\s*)?(unavailable|deprecated|retired)|模型.*(不可用|停用|下线|太旧|过旧|已弃用)/i.test(detail)) {
     advice = '这个对话用的模型已经不可用。在底部模型下拉里换一个可用模型即可继续，不用点重试。';
   }
-  notify(`这个「重试」不是模型繁忙，我没有自动点\n窗口：${window}\n错误内容：${detail}\n\n${advice}`, { appName: 'Codex 任务', notificationType: 'task_approval' }).catch(() => {});
+  // 默认不打扰：这条提醒默认关闭（网页「通知设置」里可开启），情况记在 desktopRetryState 里，「自动重试 状态」随时能查。
+  notify(`这个「重试」不是模型繁忙，我没有自动点\n窗口：${window}\n错误内容：${detail}\n\n${advice}`, { appName: 'Codex 任务', notificationType: 'retry_unhelpful' }).catch(() => {});
 });
 
 async function handleFeishuControlCommand(text, message) {
@@ -1172,7 +1178,10 @@ async function handleQuotaSwitchCommand(parsed, message) {
     return true;
   }
   if (parsed.action === 'accounts') {
-    const lines = accounts.map(account => `${account.is_active ? '● ' : '○ '}${accountDisplayName(account)}：${quotaLeftText(account)}`).join('\n');
+    const lines = accounts.map(account => {
+      const plan = planExpirySuffix(account);
+      return `${account.is_active ? '● ' : '○ '}${accountDisplayName(account)}：${quotaLeftText(account)}${plan ? `（${plan}）` : ''}`;
+    }).join('\n');
     await sendFeishuAppText(`账号额度\n${lines || '还没有账号'}\n\n回复「切换」换到还有 5 小时额度的账号并继续当前对话。`, { replyTo: message.message_id });
     return true;
   }
@@ -1934,7 +1943,7 @@ async function notify(text, opts = {}) {
     saveConfig().catch(()=>{});
     return {ok:false,reason:'type-disabled'};
   }
-  const notificationEmoji={quota_early:'🎉',quota_reset_soon:'⏰',quota_exhausted:'🚫',quota_expiry:'⌛',context_pressure:'📊',takeover_start:'🤖',task_retry:'🔁',task_approval:'🙋',task_stalled:'🐌',service_exit:'🛑',task_failed:'❌',task_completed:'✅',task_started:'▶️',windows:'🪟'};
+  const notificationEmoji={quota_early:'🎉',quota_reset_soon:'⏰',quota_exhausted:'🚫',quota_expiry:'⌛',plan_expiry:'💳',quota_waste:'💰',context_pressure:'📊',takeover_start:'🤖',task_retry:'🔁',task_approval:'🙋',task_stalled:'🐌',service_exit:'🛑',task_failed:'❌',task_completed:'✅',task_started:'▶️',windows:'🪟'};
   if(type&&notificationEmoji[type]) text=`${notificationEmoji[type]} ${text}`;
   const appName = normalizeAppName(opts.appName);
   const extraTargets = Array.isArray(config.webhooks) ? config.webhooks.filter(item => item && item.enabled !== false && item.url) : [];
@@ -2075,6 +2084,11 @@ function formatQuotaStatus(account) {
     lines.push(`${label}：剩余 ${remaining}%${reset ? ` · 重置 ${reset}` : ''}`);
   }
   if (!found) lines.push('额度：暂未读取到，请稍后再试。');
+  const planExpiry = parseExpirySeconds(account?.subscription_expires_at);
+  if (Number.isFinite(planExpiry)) {
+    const when = new Date(planExpiry * 1000).toLocaleString('zh-CN', { hour12: false });
+    lines.push(planExpiry <= Date.now() / 1000 ? `会员：已到期（${when}），部分模型可能用不了` : `会员：${account.plan_type || ''} 到期 ${when}（还剩 ${formatQuotaReset(planExpiry)}）`);
+  }
   return lines.join('\n');
 }
 async function currentQuotaText() {
@@ -2109,6 +2123,35 @@ async function checkQuotaNotices() {
     // A prior notification can yield to the HTTP handler. Re-check membership so an
     // account deleted while this scan is running cannot receive a later stale notice.
     if (!accountStillExists(account)) continue;
+    // 会员到期提醒：到期前 7 天每天一次，刚到期 48 小时内也提醒一次（很多人根本不知道过期了）。
+    if (notificationEnabled(config, 'plan_expiry')) {
+      const planExpiry = parseExpirySeconds(account.subscription_expires_at);
+      const expired = Number.isFinite(planExpiry) && planExpiry <= nowSeconds;
+      if (Number.isFinite(planExpiry) && (expired ? nowSeconds - planExpiry < 48 * 3600 : (planExpiry - nowSeconds) / 86400 <= 7)) {
+        const key = `plan:${account.id}`;
+        const todayKey = shanghaiDayKey(Date.now());
+        const previous = planExpiryNotifierState.get(key);
+        const state = previous && previous.expiresAt === planExpiry ? previous : { expiresAt: planExpiry, lastDay: null };
+        if (state.lastDay !== todayKey) {
+          const prefix = expired ? 'Codex 会员已到期' : 'Codex 会员即将到期';
+          if (sentQuotaNoticeToday(prefix, `账号：${accountDisplayName(account)}`)) {
+            state.lastDay = todayKey;
+            planExpiryNotifierState.set(key, state);
+          } else {
+          state.lastDay = todayKey;
+          planExpiryNotifierState.set(key, state);
+          const when = new Date(planExpiry * 1000).toLocaleString('zh-CN');
+          const planLabel = account.plan_type ? `会员类型：${account.plan_type}\n` : '';
+          const message = expired
+            ? `Codex 会员已到期\n账号：${accountDisplayName(account)}\n${planLabel}到期时间：${when}\n\n部分模型和额度已经跟着变了（比如报“模型不支持”）。请续费或换个还有效的账号。`
+            : `Codex 会员即将到期\n账号：${accountDisplayName(account)}\n${planLabel}到期时间：${when}\n\n到期后模型和额度都会变化，请及时续费或调整用法。`;
+          await notify(message, { appName: 'Codex 额度', notificationType: 'plan_expiry' });
+          }
+        } else {
+          planExpiryNotifierState.set(key, state);
+        }
+      }
+    }
     const expiry = Date.parse(account.reset_credits_expires_at || '') / 1000;
     if (Number.isFinite(expiry) && expiry > nowSeconds) {
       const daysLeft = (expiry - nowSeconds) / 86400;
@@ -2168,6 +2211,21 @@ async function checkQuotaNotices() {
         if (state.state === 'exhausted') quotaNotifierState.set(key, { ...state, state: 'normal', resetSoonNotified: false, resetCycle: resetAt || state.resetCycle });
       }
       const remainingSeconds = resetAt - nowSeconds;
+      // 防浪费提醒：5 小时额度快重置了但还剩很多，用不完就是浪费会员费。每个周期最多提醒一次。
+      if (usedKey === 'primary_used_percent' && notificationEnabled(config, 'quota_waste') && !account.usage?.cached && !account.usage?.error && Number.isFinite(used) && Number.isFinite(resetAt) && resetAt > nowSeconds) {
+        const remainingPercent = Math.max(0, Math.round(100 - used));
+        config.quotaWasteReminderLedger ||= {};
+        const fired = nextWasteReminder(config.quotaWasteReminderLedger, key, {
+          resetAt, now: nowSeconds,
+          leadMinutes: Number(config.wasteReminderLeadMinutes) || 30,
+          minPercent: Number(config.wasteReminderMinPercent) || 30,
+          remainingPercent, windowMinutes: Number(account.usage?.[windowKey]),
+        });
+        if (fired) {
+          await saveConfig();
+          await notify(`Codex 5 小时额度快重置了，还剩不少\n账号：${accountDisplayName(account)}\n剩余：${remainingPercent}% · 约 ${Math.max(1, Math.ceil(remainingSeconds / 60))} 分钟后重置\n\n不用完就浪费了，有重活抓紧安排。`, { appName: 'Codex 额度', notificationType: 'quota_waste' });
+        }
+      }
       if(notificationEnabled(config,'quota_reset_soon')) {
         config.quotaResetReminderLedger ||= {};
         const lead=nextResetReminder(config.quotaResetReminderLedger,key,{resetAt,now:nowSeconds,leads:resetReminderLeads(config),windowMinutes:Number(account.usage?.[windowKey])});
@@ -3134,7 +3192,7 @@ async function handle(req, res) {
       await saveConfig(); return send(res,200,{ok:true});
     }
     if (req.method==='GET'&&u.pathname==='/api/notifications/settings') {
-      return send(res,200,{rules:notificationRules.map(rule=>({...rule,enabled:notificationEnabled(config,rule.id)})),resetReminderLeadMinutes:resetReminderLeads(config),stallMinutes:Number(config.stallMinutes)||3});
+      return send(res,200,{rules:notificationRules.map(rule=>({...rule,enabled:notificationEnabled(config,rule.id)})),resetReminderLeadMinutes:resetReminderLeads(config),stallMinutes:Number(config.stallMinutes)||3,wasteReminderLeadMinutes:Number(config.wasteReminderLeadMinutes)||30,wasteReminderMinPercent:Number(config.wasteReminderMinPercent)||30});
     }
     if (req.method==='POST'&&u.pathname==='/api/notifications/settings') {
       const changes=validateNotificationSettings(data);

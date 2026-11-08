@@ -73,6 +73,7 @@ function Get-FriendlyUsageError($message){
 }
 function Get-Countdown($a,$prefix){try{$seconds=[int64]$a.usage.($prefix+'_resets_at')-[DateTimeOffset]::UtcNow.ToUnixTimeSeconds();if($seconds-le 0){return '已重置'};$d=[Math]::Floor($seconds/86400);$h=[Math]::Floor(($seconds%86400)/3600);$m=[Math]::Floor(($seconds%3600)/60);if($d-gt 0){return "${d}天${h}小时"};if($h-gt 0){return "${h}小时${m}分"};return "${m}分"}catch{'--'}}
 function Get-Expiry($a){try{$raw=$a.reset_credits_expires_at;if(-not $raw){return '--'};$seconds=[DateTimeOffset]::Parse([string]$raw).ToUnixTimeSeconds()-[DateTimeOffset]::UtcNow.ToUnixTimeSeconds();if($seconds-le 0){return '已到期'};('{0}天{1}小时'-f [Math]::Floor($seconds/86400),[Math]::Floor(($seconds%86400)/3600))}catch{'--'}}
+function Get-PlanExpiryText($a){try{$raw=$a.subscription_expires_at;if(-not $raw){return ''};$expiry=[DateTimeOffset]::Parse([string]$raw);$seconds=$expiry.ToUnixTimeSeconds()-[DateTimeOffset]::UtcNow.ToUnixTimeSeconds();if($seconds-le 0){return ' · 会员已到期'};if($seconds-gt 7*86400){return ''};return ' · 会员 {0} 到期'-f $expiry.ToLocalTime().ToString('M/d HH:mm')}catch{''}}
 function Get-Color($r){if($r-le 15){$Red}elseif($r-le 35){$Yellow}else{$Green}}
 function New-Text($text,$size,$color,[switch]$bold){$t=New-Object Windows.Controls.TextBlock;$t.Text=[string]$text;$t.FontFamily='Microsoft YaHei UI';$t.FontSize=$size;$t.Foreground=$color;if($bold){$t.FontWeight='Bold'};$t}
 function New-PlanBadge($plan){
@@ -375,7 +376,7 @@ function Show-Detail{
   $count=if($null-ne$a.reset_count){$a.reset_count}else{'--'}
   $reset=New-Object Windows.Controls.StackPanel;$reset.Orientation='Horizontal';$reset.Margin='0,5,0,0'
   $reset.Children.Add((New-QuotaIcon 'reset'))|Out-Null
-  $reset.Children.Add((New-Text "$count  ·  到期 $(Get-Expiry $a)" 10 $Muted))|Out-Null
+  $reset.Children.Add((New-Text "$count  ·  到期 $(Get-Expiry $a)$(Get-PlanExpiryText $a)" 10 $Muted))|Out-Null
   if(-not$loginExpired){$content.Children.Add($reset)|Out-Null}
   $cardMenu=New-Object Windows.Controls.ContextMenu
   $warmItem=New-Object Windows.Controls.MenuItem;$warmItem.Header='预热 5 小时额度';$warmItem.Tag=@{Id=[string]$a.id;Name=[string]$shownName}

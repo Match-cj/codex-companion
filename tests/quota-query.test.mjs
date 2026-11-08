@@ -2,11 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { parseExpirySeconds } from '../notification-settings.mjs';
 
 const source = fs.readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
 const start = source.indexOf('function quotaLabel(');
 const end = source.indexOf('function dashboardLink(', start);
-const context = { humanError: () => '登录已失效，请重新登录。' };
+const context = { humanError: () => '登录已失效，请重新登录。', parseExpirySeconds };
 vm.runInNewContext(`${source.slice(start, end)};this.exports={isQuotaCommand,formatQuotaStatus};`, context);
 
 test('额度 command accepts Chinese aliases and quota', () => {
