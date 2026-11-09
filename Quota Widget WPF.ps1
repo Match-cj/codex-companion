@@ -165,13 +165,11 @@ $Number=New-Text '--' 22 $Green -bold;$Number.HorizontalAlignment='Center';$Numb
 # 有新版本时，圆环右上角出现一个蓝色 ↑ 小圆标：点一下就是“更新并重启”，
 # 不需要开网页、不需要找菜单。没新版本时它完全不存在，不占地方。
 $script:UpdateBadge=New-Object Windows.Controls.Border
-$script:UpdateBadge.Width=21;$script:UpdateBadge.Height=21;$script:UpdateBadge.CornerRadius=11
-$script:UpdateBadge.Background=$UpdateBadgeBg;$script:UpdateBadge.BorderBrush=$Disc;$script:UpdateBadge.BorderThickness=2
-$script:UpdateBadge.HorizontalAlignment='Right';$script:UpdateBadge.VerticalAlignment='Top'
+$script:UpdateBadge.Width=8;$script:UpdateBadge.Height=8;$script:UpdateBadge.CornerRadius=4
+$script:UpdateBadge.Background=$UpdateBadgeBg;$script:UpdateBadge.BorderBrush=$Disc;$script:UpdateBadge.BorderThickness=1.5
+$script:UpdateBadge.HorizontalAlignment='Right';$script:UpdateBadge.VerticalAlignment='Top';$script:UpdateBadge.Margin='0,3,3,0'
 $script:UpdateBadge.Cursor=[Windows.Input.Cursors]::Hand;$script:UpdateBadge.Visibility='Collapsed'
-$updateArrow=New-Text '↑' 13 $UpdateBadgeFg -bold;$updateArrow.FontFamily='Segoe UI Symbol'
-$updateArrow.HorizontalAlignment='Center';$updateArrow.VerticalAlignment='Center';$updateArrow.Margin='0,-2,0,0'
-$script:UpdateBadge.Child=$updateArrow
+$script:UpdateBadge.Child=$null
 $updateBadgeHandler={param($sender,$eventArgs)$eventArgs.Handled=$true;Update-Companion}
 $script:UpdateBadge.Add_PreviewMouseLeftButtonDown($updateBadgeHandler)
 if($SelfTest){$script:TestUpdateHandler=$updateBadgeHandler}
@@ -339,7 +337,7 @@ function Show-Detail{
  if($null-ne$script:UpdateInfo-and[bool]$script:UpdateInfo.available){
   $updateCard=New-Object Windows.Controls.Border;$updateCard.Background=$CardBrush;$updateCard.CornerRadius=7;$updateCard.Padding='10,7';$updateCard.Margin='0,0,0,7'
   $updateCard.BorderBrush=$UpdateBadgeBg;$updateCard.BorderThickness=1;$updateCard.Cursor=[Windows.Input.Cursors]::Hand;$updateCard.ToolTip='点这里更新并重启'
-  $updateText=New-Text ("↑ 有新版本 v$($script:UpdateInfo.latest)（当前 v$script:AppVersion）· 点这里更新") 12 $UpdateBadgeFg -bold
+  $updateText=New-Text ("● 有新版本 v$($script:UpdateInfo.latest)（当前 v$script:AppVersion）· 点这里更新") 12 $UpdateBadgeFg -bold
   $updateText.TextWrapping='Wrap'
   $updateCard.Child=$updateText
   $updateCard.Add_PreviewMouseLeftButtonDown({param($sender,$eventArgs)$eventArgs.Handled=$true;Update-Companion})

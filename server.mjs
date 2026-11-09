@@ -30,7 +30,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.47';
+const APP_VERSION = '1.0.48';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -3518,12 +3518,33 @@ let updateApplying = false;
 let updateIdleErrorLogged = false;
 
 async function fetchUpdateRelease(url, timeoutMs) {
-  const response = await fetch(url, {
-    headers: { accept: 'application/vnd.github+json', 'user-agent': `CodexCompanion/${APP_VERSION}` },
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!response.ok) throw Error(`HTTP ${response.status}`);
-  return response.json();
+  // 部分网络直连 api.github.com 不通而系统代理可用；Node 内置 fetch 不认系统代理，
+  // 所以 fetch 失败后再用 Windows 自带 curl.exe 走系统代理/直连各试一次。
+  try {
+    const response = await fetch(url, {
+      headers: { accept: 'application/vnd.github+json', 'user-agent': `CodexCompanion/${APP_VERSION}` },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) throw Error(`HTTP ${response.status}`);
+    return await response.json();
+  } catch (fetchError) {
+    const curlPath = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'curl.exe');
+    if (!(process.platform === 'win32' && existsSync(curlPath))) throw fetchError;
+    const proxy = await browserSystemProxy();
+    const argSets = proxy ? [['-x', proxy], []] : [[]];
+    let lastError = fetchError;
+    for (const extra of argSets) {
+      try {
+        const { stdout } = await execFileAsync(curlPath, [
+          '-fsSL', '--connect-timeout', '10', '--max-time', String(Math.ceil(timeoutMs / 1000) + 5),
+          '-A', `CodexCompanion/${APP_VERSION}`, '-H', 'accept: application/vnd.github+json',
+          ...extra, url,
+        ], { windowsHide: true, timeout: timeoutMs + 10000, maxBuffer: 1024 * 1024 });
+        return JSON.parse(String(stdout).trim());
+      } catch (error) { lastError = error; }
+    }
+    throw lastError;
+  }
 }
 
 async function refreshUpdateRelease(force = false) {
@@ -3656,16 +3677,50 @@ async function maybeAutoApplyUpdate(trigger = 'timer') {
 }
 
 async function downloadPatch(asset, target) {
+  // 更新包在 GitHub 上。很多用户的网络直连 GitHub 不通，而 Node 内置 fetch 不认系统代理，
+  // 所以优先走 Windows 自带 curl.exe + 系统代理，再试 curl 直连，最后才试内置 fetch。
+  const curlPath = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'curl.exe');
+  const useCurl = process.platform === 'win32' && existsSync(curlPath);
+  const proxy = await browserSystemProxy();
+  const attempts = [];
+  if (useCurl && proxy) attempts.push({ label: '系统代理', useProxy: true });
+  if (useCurl) attempts.push({ label: '直连', useProxy: false });
+  attempts.push({ label: '内置下载', useProxy: false, fetch: true });
+  let lastError;
+  for (const attempt of attempts) {
+    try {
+      const buffer = attempt.fetch
+        ? await downloadPatchViaFetch(asset)
+        : await downloadPatchViaCurl(curlPath, asset, target, attempt.useProxy ? proxy : null);
+      if (asset.size && buffer.length !== asset.size) throw Error('更新包下载不完整');
+      if (buffer.length > 64 * 1024 * 1024) throw Error('更新包体积异常，已停止');
+      await fs.writeFile(target, buffer);
+      return createHash('sha256').update(buffer).digest('hex');
+    } catch (error) {
+      lastError = error;
+      console.error(`[update] patch download via ${attempt.label} failed:`, humanError(error));
+    }
+  }
+  throw Error(`下载更新包失败（已试过 ${attempts.map(a => a.label).join('、')}）：${humanError(lastError)} 当前版本仍可正常使用，稍后会自动重试；也可以打开 Releases 页手动下载完整安装包。`);
+}
+function downloadPatchViaCurl(curlPath, asset, target, proxy) {
+  const args = ['-fsSL', '--retry', '2', '--connect-timeout', '15', '--max-time', '150', '-o', target, '-A', `CodexCompanion/${APP_VERSION}`];
+  if (proxy) args.push('-x', proxy);
+  args.push(asset.url);
+  return new Promise((resolve, reject) => {
+    execFile(curlPath, args, { windowsHide: true, timeout: 170000, maxBuffer: 8192 }, error => {
+      if (error) return reject(error);
+      fs.readFile(target).then(resolve, reject);
+    });
+  });
+}
+async function downloadPatchViaFetch(asset) {
   const response = await fetch(asset.url, {
     headers: { 'user-agent': `CodexCompanion/${APP_VERSION}` },
     signal: AbortSignal.timeout(180000),
   });
   if (!response.ok) throw Error(`下载更新包失败：HTTP ${response.status}`);
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (asset.size && buffer.length !== asset.size) throw Error('更新包下载不完整，请重试。');
-  if (buffer.length > 64 * 1024 * 1024) throw Error('更新包体积异常，已停止。');
-  await fs.writeFile(target, buffer);
-  return createHash('sha256').update(buffer).digest('hex');
+  return Buffer.from(await response.arrayBuffer());
 }
 
 async function extractZip(zipPath, targetDir) {

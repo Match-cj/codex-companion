@@ -93,6 +93,9 @@ foreach($scale in @(1.0,1.25,1.5,2.0)){
 
 test('an update badge on the ring is one click away from a restart', () => {
   assert.match(widget, /\$script:UpdateBadge\.Visibility='Collapsed'/);
+  // 小圆点样式：8×8 圆点，不再用 ↑ 箭头。
+  assert.match(widget, /\$script:UpdateBadge\.Width=8;\$script:UpdateBadge\.Height=8/);
+  assert.doesNotMatch(widget, /New-Text '↑'/);
   assert.match(widget, /\$updateBadgeHandler=\{param\(\$sender,\$eventArgs\)\$eventArgs\.Handled=\$true;Update-Companion\}/);
   assert.match(widget, /function Update-Companion\(\[switch\]\$Confirmed\)/);
   assert.match(widget, /api\/update\/apply/);

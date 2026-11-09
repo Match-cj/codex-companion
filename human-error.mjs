@@ -26,7 +26,9 @@ export function humanError(error) {
   const message = unwrapErrorMessage(error?.message || error) || '未知错误';
   if (/invalid refresh token|token refresh|refresh token|token.{0,30}(expired|revoked)|token_expired|token_revoked|unauthorized|401\b/i.test(message)) return '这个账号的登录已经失效，请在 Companion 网页中重新登录后再刷新。';
   if (message.startsWith('测试发送失败')) return message;
-  if (message.includes('ECONNREFUSED') || message.includes('fetch failed')) return '连接不上本地服务，请确认 Codex Companion 正在运行。';
+  if (message.includes('ECONNREFUSED')) return '连接不上本地服务，请确认 Codex Companion 正在运行。';
+  // "fetch failed" 是 Node 访问远程网站失败的笼统报错（GitHub/OpenAI 等），和本地服务无关，不能混为一谈。
+  if (message.includes('fetch failed')) return '网络连接失败：连不上目标网站（GitHub/OpenAI），通常是网络或系统代理暂时不可用。稍后会自动重试。';
   if (/failed to fetch codex rate limits|error sending request for url.*(?:chatgpt\.com|openai\.com)/i.test(message)) return '额度刷新失败：当前网络或系统代理无法连接 OpenAI 额度接口。页面显示的是上一次成功读取的缓存额度；请检查代理/网络后点击“立即刷新”，这不是额度已耗尽。';
   if (message.includes('ENOENT')) return '找不到需要启动的程序，请确认 Codex CLI 已正确安装。';
   if (message.includes('超时')) return 'Codex 两分钟没有回应。任务可能卡住了，请稍后重试或重启 Companion。';
