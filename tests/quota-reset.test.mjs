@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import { observeEarlyQuotaReset } from '../quota-reset.mjs';
-import { notificationEnabled, resetReminderLeads, nextResetReminder, nextWasteReminder, parseExpirySeconds } from '../notification-settings.mjs';
+import { notificationEnabled, resetReminderLeads, nextResetReminder, nextWasteReminder, parseExpirySeconds, planExpiryStale } from '../notification-settings.mjs';
 
 const now = 1800000000;
 test('early reset uses previous deadline, not rolled new deadline, and deduplicates persisted snapshots', () => {
@@ -36,7 +36,7 @@ function notifier() {
   let clock = now;
   class FakeDate extends Date { static now() { return clock * 1000; } }
   const c = { Date: FakeDate, Map, accounts: [], config: { resetReminderMinutes: 15 }, quotaNotifierState: new Map(), subscriptionNotifierState: new Map(), planExpiryNotifierState: new Map(),
-    observeEarlyQuotaReset, notificationEnabled, resetReminderLeads, nextResetReminder, nextWasteReminder, parseExpirySeconds, accountDisplayName: account => account?.display_name || account?.name || '账号', notices: [], saveConfig: async () => {}, sentQuotaNoticeToday: () => false, dashboardLink: () => '',
+    observeEarlyQuotaReset, notificationEnabled, resetReminderLeads, nextResetReminder, nextWasteReminder, parseExpirySeconds, planExpiryStale, maybeRefreshStalePlanExpiry: () => {}, accountDisplayName: account => account?.display_name || account?.name || '账号', notices: [], saveConfig: async () => {}, sentQuotaNoticeToday: () => false, dashboardLink: () => '',
     quotaLabel: minutes => minutes === 10080 ? '周额度' : '5 小时额度', notify: async text => { c.notices.push(text); return { ok: true }; } };
   vm.createContext(c);
   c.syncNativePublicMetadata=async()=>{};

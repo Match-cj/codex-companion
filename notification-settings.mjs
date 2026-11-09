@@ -93,10 +93,19 @@ export function parseExpirySeconds(value) {
   return NaN;
 }
 
+// 付费计划 + 到期时间已过 = 本地令牌还是旧的，不代表真过期（续费后要等令牌刷新才更新）。
+// 实测案例：账号续费后 plan_type=plus 且能正常用，但 subscription_expires_at 还停在昨天。
+const PAID_PLANS = new Set(['plus', 'pro', 'team', 'enterprise']);
+export function planExpiryStale(account) {
+  const plan = String(account?.plan_type || '').toLowerCase();
+  const expiry = parseExpirySeconds(account?.subscription_expires_at);
+  return PAID_PLANS.has(plan) && Number.isFinite(expiry) && expiry <= Date.now() / 1000;
+}
+
 // 一句话说明会员到期情况：空字符串 = 不用提。
 export function planExpirySuffix(account) {
   const expiry = parseExpirySeconds(account?.subscription_expires_at);
-  if (!Number.isFinite(expiry)) return '';
+  if (!Number.isFinite(expiry) || planExpiryStale(account)) return '';
   if (expiry <= Date.now() / 1000) return '会员已到期';
   const days = (expiry - Date.now() / 1000) / 86400;
   const date = new Date(expiry * 1000).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });

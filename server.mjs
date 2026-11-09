@@ -1,6 +1,6 @@
 import http from 'node:http';
 import fs from 'node:fs/promises';
-import { existsSync, watch as watchFs } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, watch as watchFs } from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { execFile } from 'node:child_process';
@@ -12,7 +12,7 @@ import { finalImagePaths, relayFinalImages, validateImageRoot } from './image-re
 import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 import { observeEarlyQuotaReset } from './quota-reset.mjs';
 import { isQuotaExhaustedText, quotaLeft, quotaLeftText, pickQuotaSwitchTarget, findAccountByName, parseSwitchCommand } from './quota-switch.mjs';
-import { notificationRules, notificationEnabled, notificationType, resetReminderLeads, validateNotificationSettings, nextResetReminder, nextWasteReminder, parseExpirySeconds, planExpirySuffix } from './notification-settings.mjs';
+import { notificationRules, notificationEnabled, notificationType, resetReminderLeads, validateNotificationSettings, nextResetReminder, nextWasteReminder, parseExpirySeconds, planExpirySuffix, planExpiryStale } from './notification-settings.mjs';
 import { recoverReplyTarget } from './feishu-reply-recovery.mjs';
 import { desktopRetryState, desktopTakeoverAllowed, syncDesktopRetryWatcher, startDesktopRetryWatcher, stopDesktopRetryWatcher, setDesktopRetryNotifier } from './desktop-retry.mjs';
 import { validateWebhooks, activeWebhookTargets, sendWebhooks, kindLabel as webhookKindLabel, friendlyWebhookReason } from './webhook-notify.mjs';
@@ -30,7 +30,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.46';
+const APP_VERSION = '1.0.47';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -1754,15 +1754,60 @@ async function importOrUpdateAccount(contents, requestedName) {
 function loginBusy() {
   return [...tasks.values()].some(task => ['starting', 'running', 'waiting_confirmation'].includes(task.status));
 }
+// 1455 被 Windows 收进系统保留范围时自动修复：弹一次管理员授权（UAC 点一次「是」），
+// 永久保留 1455 给登录用，修完以后重启电脑也不会再犯。每天最多自动尝试一次，防止用户点「否」后反复弹窗。
+let portRepair = { inFlight: false };
+async function repairLoginPort({ interactive = false } = {}) {
+  if (process.platform !== 'win32' || portRepair.inFlight) return { attempted: false, ok: false, reason: 'busy' };
+  portRepair.inFlight = true;
+  try {
+    const before = await oauthPortStatus();
+    if (!before || before.free !== false || !before.reserved) return { attempted: false, ok: true, reason: 'healthy' };
+    const today = new Date().toISOString().slice(0, 10);
+    if (config.loginPortFixLastAttempt === today && !interactive) return { attempted: false, ok: false, reason: 'rate-limited' };
+    if (config.loginPortFixLastAttempt !== today) { config.loginPortFixLastAttempt = today; saveConfig().catch(() => {}); }
+    const root = path.join(process.env.APPDATA || os.tmpdir(), 'CodexCompanion');
+    mkdirSync(root, { recursive: true });
+    const fixPath = path.join(root, 'fix-login-port.ps1');
+    // 内容纯 ASCII，不需要 BOM。
+    writeFileSync(fixPath, [
+      "$ErrorActionPreference='SilentlyContinue'",
+      'net stop winnat | Out-Null',
+      'netsh int ipv4 add excludedportrange protocol=tcp startport=1455 numberofports=1 store=persistent | Out-Null',
+      'net start winnat | Out-Null',
+      "Set-Content -LiteralPath '" + root.replace(/'/g, "''") + "\\port-fix-done.txt' -Value done",
+      ''
+    ].join('\r\n'), 'utf8');
+    const launch = "Start-Process powershell -Verb RunAs -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','" + fixPath.replace(/'/g, "''") + "')";
+    let accepted = true;
+    try {
+      await execFileAsync('powershell.exe', ['-NoProfile', '-Command', launch], { windowsHide: true, timeout: 120000, maxBuffer: 8192 });
+    } catch (error) {
+      accepted = !/cancel|取消|canceled|denied|拒绝/i.test(String(error.message || ''));
+    }
+    // WinNAT 重启要几秒到几十秒，轮询等端口恢复可用。
+    for (let i = 0; i < 14; i++) {
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      const after = await oauthPortStatus().catch(() => null);
+      if (after && after.free !== false) return { attempted: true, ok: true };
+    }
+    return { attempted: true, ok: false, canceled: !accepted };
+  } finally { portRepair.inFlight = false; }
+}
 async function startBrowserLogin(name) {
   if (browserLoginInFlight) throw Error('正在处理本次登录，请等待结果，不要重复生成链接。');
   if (loginBusy()) throw Error('还有 Companion 任务正在运行或等待确认。请先处理任务，再登录或更新账号。');
   // 登录全程要占用 localhost:1455 收回传。它被 Windows 保留或被别的程序占着时，
-  // 网页登录和 Codex 客户端的「继续登录」会一起失败（os error 10013），提前说清楚。
+  // 网页登录和 Codex 客户端的「继续登录」会一起失败（os error 10013）。被保留时直接自动修复。
   const port = await oauthPortStatus();
   if (port && port.free === false) {
-    if (port.reserved) throw Error('登录暂时用不了：Windows 把 1455 端口收进了系统保留范围，谁都登不了（Codex 客户端报 os error 10013 也是同一个原因）。用管理员运行一次桌面上的「修复Codex登录端口.bat」，跑完再回来点登录即可。');
-    throw Error('1455 端口正被别的程序占用（可能是 Codex 客户端有一个登录没走完）。关掉对应程序或稍等片刻，再点登录。');
+    if (port.reserved) {
+      const repair = await repairLoginPort({ interactive: true });
+      if (!repair.ok) {
+        if (repair.canceled) throw Error('我弹出了修复授权窗口，但你点了「否」。再点一次登录，在弹窗里点「是」——只需这一次，以后永久生效。');
+        throw Error('1455 被 Windows 收进了系统保留范围，自动修复还没成功。等半分钟再点一次登录；弹出的授权窗口点「是」即可。');
+      }
+    } else throw Error('1455 端口正被别的程序占用（可能是 Codex 客户端有一个登录没走完）。关掉对应程序或稍等片刻，再点登录。');
   }
   const verifier = base64Url(randomBytes(64));
   const challenge = createHash('sha256').update(verifier).digest('base64url');
@@ -2091,10 +2136,12 @@ function formatQuotaStatus(account) {
     lines.push(`${label}：剩余 ${remaining}%${reset ? ` · 重置 ${reset}` : ''}`);
   }
   if (!found) lines.push('额度：暂未读取到，请稍后再试。');
-  const planExpiry = parseExpirySeconds(account?.subscription_expires_at);
-  if (Number.isFinite(planExpiry)) {
-    const when = new Date(planExpiry * 1000).toLocaleString('zh-CN', { hour12: false });
-    lines.push(planExpiry <= Date.now() / 1000 ? `会员：已到期（${when}），部分模型可能用不了` : `会员：${account.plan_type || ''} 到期 ${when}（还剩 ${formatQuotaReset(planExpiry)}）`);
+  if (!planExpiryStale(account)) {
+    const planExpiry = parseExpirySeconds(account?.subscription_expires_at);
+    if (Number.isFinite(planExpiry)) {
+      const when = new Date(planExpiry * 1000).toLocaleString('zh-CN', { hour12: false });
+      lines.push(planExpiry <= Date.now() / 1000 ? `会员：已到期（${when}），部分模型可能用不了` : `会员：${account.plan_type || ''} 到期 ${when}（还剩 ${formatQuotaReset(planExpiry)}）`);
+    }
   }
   return lines.join('\n');
 }
@@ -2120,8 +2167,18 @@ function confirmationDetails(method, params) {
   }
   return `原因：${params.reason || ''}\n命令：${Array.isArray(params.command) ? params.command.join(' ') : params.command || ''}`;
 }
+// 付费账号显示"已过期"但 plan 还是 plus/pro = 本地令牌旧了。限频（6 小时一次）触发强制刷新，
+// 拿到新令牌后到期时间会自动纠正；任务运行中不打扰。
+let stalePlanRefreshAt = 0;
+function maybeRefreshStalePlanExpiry() {
+  if (!accounts.some(account => planExpiryStale(account))) return;
+  if (Date.now() - stalePlanRefreshAt < 6 * 3600 * 1000 || loginBusy()) return;
+  stalePlanRefreshAt = Date.now();
+  refreshAccounts({ forceNative: true, awaitNative: false }).catch(error => console.error('[stale plan refresh]', humanError(error)));
+}
 async function checkQuotaNotices() {
   const nowSeconds = Math.floor(Date.now() / 1000);
+  maybeRefreshStalePlanExpiry();
   const restored = [];
   if (!config.quotaRecoveryObservations || typeof config.quotaRecoveryObservations !== 'object' || Array.isArray(config.quotaRecoveryObservations)) config.quotaRecoveryObservations = {};
   let recoveryObservationsChanged = false;
@@ -2131,7 +2188,8 @@ async function checkQuotaNotices() {
     // account deleted while this scan is running cannot receive a later stale notice.
     if (!accountStillExists(account)) continue;
     // 会员到期提醒：到期前 7 天每天一次，刚到期 48 小时内也提醒一次（很多人根本不知道过期了）。
-    if (notificationEnabled(config, 'plan_expiry')) {
+    // 付费计划 + 显示已过期 = 本地令牌没刷新到最新（实际还能用），不提醒，改触发一次强制刷新。
+    if (notificationEnabled(config, 'plan_expiry') && !planExpiryStale(account)) {
       const planExpiry = parseExpirySeconds(account.subscription_expires_at);
       const expired = Number.isFinite(planExpiry) && planExpiry <= nowSeconds;
       if (Number.isFinite(planExpiry) && (expired ? nowSeconds - planExpiry < 48 * 3600 : (planExpiry - nowSeconds) / 86400 <= 7)) {
@@ -3782,6 +3840,8 @@ async function main() {
     if (ts) console.log(`  Tailscale detected: ${ts}`);
   });
   refreshAccounts().catch(e => console.error('[accounts]', e.message));
+  // 启动后检查一次 1455 端口：被 Windows 保留就自动修复（弹一次授权窗口），修一次永久生效。
+  setTimeout(() => { repairLoginPort().catch(() => {}); }, 8000).unref?.();
   autoImportLocalAuth();
   // Pick up an account switch made in the Codex client without a restart.
   setInterval(autoImportLocalAuth, 5 * 60 * 1000).unref?.();

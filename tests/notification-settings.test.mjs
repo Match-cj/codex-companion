@@ -2,7 +2,21 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
-import { notificationEnabled, notificationRules, notificationType, resetReminderLeads, validateNotificationSettings, nextResetReminder, nextWasteReminder } from '../notification-settings.mjs';
+import { notificationEnabled, notificationRules, notificationType, resetReminderLeads, validateNotificationSettings, nextResetReminder, nextWasteReminder, planExpiryStale, planExpirySuffix } from '../notification-settings.mjs';
+
+test('paid plan with past expiry is stale data, not a real expiry (no scary text, suffix suppressed)', () => {
+  const past = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+  const future = new Date(Date.now() + 5 * 86400 * 1000).toISOString();
+  // 续费后令牌没刷新：plan 还是 plus 但到期时间停在昨天 → 不能喊"已到期"。
+  assert.equal(planExpiryStale({ plan_type: 'plus', subscription_expires_at: past }), true);
+  assert.equal(planExpirySuffix({ plan_type: 'plus', subscription_expires_at: past }), '');
+  // free 计划过期是真过期，保留提醒。
+  assert.equal(planExpiryStale({ plan_type: 'free', subscription_expires_at: past }), false);
+  assert.equal(planExpirySuffix({ plan_type: 'free', subscription_expires_at: past }), '会员已到期');
+  // 正常未过期：7 天内提示，超过 7 天不提。
+  assert.equal(planExpiryStale({ plan_type: 'pro', subscription_expires_at: future }), false);
+  assert.equal(planExpirySuffix({ plan_type: 'pro', subscription_expires_at: future }).includes('到期'), true);
+});
 
 test('catalog exists before any notification, defaults preserve quiet retries, validation rejects unknown settings', () => {
   assert(notificationRules.some(rule=>rule.id==='quota_early'));
