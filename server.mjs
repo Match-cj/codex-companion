@@ -30,7 +30,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.45';
+const APP_VERSION = '1.0.46';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -1754,9 +1754,16 @@ async function importOrUpdateAccount(contents, requestedName) {
 function loginBusy() {
   return [...tasks.values()].some(task => ['starting', 'running', 'waiting_confirmation'].includes(task.status));
 }
-function startBrowserLogin(name) {
+async function startBrowserLogin(name) {
   if (browserLoginInFlight) throw Error('正在处理本次登录，请等待结果，不要重复生成链接。');
   if (loginBusy()) throw Error('还有 Companion 任务正在运行或等待确认。请先处理任务，再登录或更新账号。');
+  // 登录全程要占用 localhost:1455 收回传。它被 Windows 保留或被别的程序占着时，
+  // 网页登录和 Codex 客户端的「继续登录」会一起失败（os error 10013），提前说清楚。
+  const port = await oauthPortStatus();
+  if (port && port.free === false) {
+    if (port.reserved) throw Error('登录暂时用不了：Windows 把 1455 端口收进了系统保留范围，谁都登不了（Codex 客户端报 os error 10013 也是同一个原因）。用管理员运行一次桌面上的「修复Codex登录端口.bat」，跑完再回来点登录即可。');
+    throw Error('1455 端口正被别的程序占用（可能是 Codex 客户端有一个登录没走完）。关掉对应程序或稍等片刻，再点登录。');
+  }
   const verifier = base64Url(randomBytes(64));
   const challenge = createHash('sha256').update(verifier).digest('base64url');
   const state = base64Url(randomBytes(32));
@@ -3125,7 +3132,7 @@ async function handle(req, res) {
     if (req.method==='POST'&&u.pathname==='/api/device-login/start') return send(res,200,await startDeviceLogin(data.name));
     if (req.method==='GET'&&u.pathname==='/api/device-login/status') return send(res,200,deviceLogin?.publicState()||{status:'idle'});
     if (req.method==='POST'&&u.pathname==='/api/device-login/cancel'){if(deviceLogin)await deviceLogin.cancel();return send(res,200,{ok:true});}
-    if (req.method==='POST'&&u.pathname==='/api/browser-login/start') return send(res,200,startBrowserLogin(data.name));
+    if (req.method==='POST'&&u.pathname==='/api/browser-login/start') return send(res,200,await startBrowserLogin(data.name));
     if (req.method==='POST'&&u.pathname==='/api/browser-login/complete') return send(res,200,await completeBrowserLogin(data.callbackUrl));
     if (req.method==='POST'&&u.pathname==='/api/browser-login/cancel'){if(browserLoginInFlight)throw Error('正在交换或保存账号，请等待结果后再取消。');browserLogin={status:'canceled',message:'已取消这次登录。'};return send(res,200,{ok:true});}
     if (req.method==='POST'&&u.pathname==='/api/widget/open') return send(res,200,await openQuotaWidget());
