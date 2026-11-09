@@ -1,6 +1,6 @@
 {
   "name": "codex-companion",
-  "version": "1.0.48",
+  "version": "1.0.49",
   "private": true,
   "type": "module",
   "description": "Windows 桌面伴侣：飞书通知与远程回复 Codex 任务、额度浮窗、多账号管理、模型繁忙自动重试",

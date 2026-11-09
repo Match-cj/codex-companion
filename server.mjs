@@ -30,7 +30,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.48';
+const APP_VERSION = '1.0.49';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -1474,12 +1474,16 @@ async function loadNativeAccountsSnapshot() {
   const deletedKeys = new Set(Array.isArray(config.deletedAccountKeys) ? config.deletedAccountKeys.map(String) : []);
   return vault.accounts.filter(entry => ![entry.id, entry.account_id, entry.email && String(entry.email).toLowerCase()].filter(Boolean).some(key => deletedKeys.has(String(key)))).map(entry => {
     const alias = String(aliases[entry.id] || '').trim();
+    // 付费计划 + 到期时间已过 = 账号库里这张"旧卡"没同步到续费后的新信息（账号实际可用）。
+    // 这种矛盾数据一律不下发，浮窗/网页/飞书/通知就不会有任何一处误报"已到期"；
+    // 等客户端或账号切换带来新令牌后，真实到期时间会自动恢复显示。
+    const stalePlan = planExpiryStale(entry);
     return {
       id: entry.id,
       name: entry.email || entry.name,
       email: entry.email || null,
       plan_type: entry.plan_type || null,
-      subscription_expires_at: entry.subscription_expires_at || null,
+      subscription_expires_at: stalePlan ? null : (entry.subscription_expires_at || null),
       reset_count: entry.reset_count ?? null,
       reset_credits_expires_at: entry.reset_credits_expires_at || null,
       is_active: String(vault.active_account_id || '') === String(entry.id),
@@ -3704,11 +3708,11 @@ async function downloadPatch(asset, target) {
   throw Error(`下载更新包失败（已试过 ${attempts.map(a => a.label).join('、')}）：${humanError(lastError)} 当前版本仍可正常使用，稍后会自动重试；也可以打开 Releases 页手动下载完整安装包。`);
 }
 function downloadPatchViaCurl(curlPath, asset, target, proxy) {
-  const args = ['-fsSL', '--retry', '2', '--connect-timeout', '15', '--max-time', '150', '-o', target, '-A', `CodexCompanion/${APP_VERSION}`];
+  const args = ['-fsSL', '--retry', '1', '--connect-timeout', '8', '--max-time', '30', '-o', target, '-A', `CodexCompanion/${APP_VERSION}`];
   if (proxy) args.push('-x', proxy);
   args.push(asset.url);
   return new Promise((resolve, reject) => {
-    execFile(curlPath, args, { windowsHide: true, timeout: 170000, maxBuffer: 8192 }, error => {
+    execFile(curlPath, args, { windowsHide: true, timeout: 70000, maxBuffer: 8192 }, error => {
       if (error) return reject(error);
       fs.readFile(target).then(resolve, reject);
     });
@@ -3717,7 +3721,7 @@ function downloadPatchViaCurl(curlPath, asset, target, proxy) {
 async function downloadPatchViaFetch(asset) {
   const response = await fetch(asset.url, {
     headers: { 'user-agent': `CodexCompanion/${APP_VERSION}` },
-    signal: AbortSignal.timeout(180000),
+    signal: AbortSignal.timeout(30000),
   });
   if (!response.ok) throw Error(`下载更新包失败：HTTP ${response.status}`);
   return Buffer.from(await response.arrayBuffer());
