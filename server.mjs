@@ -30,7 +30,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.49';
+const APP_VERSION = '1.0.50';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -1942,6 +1942,25 @@ async function applyNativeUsageMap(nativeUsages) {
   lastAccountRefreshAt = Date.now();
   await checkQuotaNotices();
 }
+// 点一下浮窗/网页时真正去后台取最新额度：请求立刻返回，界面通过 /api/status 看进度。
+// 强制读取原生额度可能要几十秒，所以不能让点击界面干等（会表现成“点了没反应”）。
+let manualQuotaRefresh = { running: false, startedAt: 0, finishedAt: 0, error: '' };
+function startManualQuotaRefresh() {
+  if (manualQuotaRefresh.running) return { ...manualQuotaRefresh, started: false };
+  const startedAt = Date.now();
+  manualQuotaRefresh = { running: true, startedAt, finishedAt: 0, error: '' };
+  const finish = error => {
+    if (manualQuotaRefresh.startedAt !== startedAt || !manualQuotaRefresh.running) return;
+    manualQuotaRefresh = { running: false, startedAt, finishedAt: Date.now(), error: error || '' };
+  };
+  refreshAccounts({ forceNative: true, awaitNative: true }).then(() => finish(''), error => {
+    console.error('[click refresh]', error.message);
+    finish(humanError(error));
+  });
+  // 原生读取偶尔卡住，别让界面永远停在“刷新中”。
+  setTimeout(() => finish('刷新用时较长，已按现有数据继续。'), 70000).unref?.();
+  return { ...manualQuotaRefresh, started: true };
+}
 async function refreshAccounts({ forceNative = false, awaitNative = false } = {}) {
   await syncExternalAuthToNativeVault().catch(error => console.error('[external auth sync]', humanError(error)));
   const nativePromise = readNativeUsages(forceNative).catch(error => { console.error('[native usage]', error.message); return new Map(); });
@@ -3097,6 +3116,7 @@ async function handle(req, res) {
         security:{ remoteEnabled: !!config.remoteAccessEnabled, local: isLoopback(req.socket.remoteAddress), allowedUserCount: (config.feishuAllowedUserIds || []).length, pairingCommand: isLoopback(req.socket.remoteAddress) && !(config.feishuAllowedUserIds || []).length ? `绑定 ${feishuPairingCode}` : null },
         feishu:publicFeishuState(),
         accounts,
+        quotaRefresh:{ running:manualQuotaRefresh.running, startedAt:manualQuotaRefresh.startedAt, finishedAt:manualQuotaRefresh.finishedAt, error:manualQuotaRefresh.error },
         tasks:Object.fromEntries(tasks),
         taskActivity:{ rows: publicTaskActivity(), monitorReady: codexSessionWatcherReady, note: '桌面任务依据最近本地记录显示，不是客户端实时运行保证；历史记录只用于展示，不补发通知。' },
         desktopRetry: desktopRetryState(),
@@ -3138,7 +3158,10 @@ async function handle(req, res) {
       await codex.continueTask(task,text);
       return send(res,200,{ok:true,id:task.id,message:'已在原对话中继续，不会新建对话。'});
     }
-    if (req.method==='POST'&&u.pathname==='/api/accounts/refresh'){await refreshAccounts({forceNative:true,awaitNative:true});return send(res,200,{ok:true,accounts});}
+    if (req.method==='POST'&&u.pathname==='/api/accounts/refresh'){
+      if (data.quick === true) return send(res,200,{ok:true,...startManualQuotaRefresh()});
+      await refreshAccounts({forceNative:true,awaitNative:true});return send(res,200,{ok:true,accounts});
+    }
     if (req.method==='POST'&&u.pathname==='/api/accounts/import-local'){
       if (!isLoopback(req.socket.remoteAddress)) return send(res,403,{error:'导入本机账号只能在本机操作'});
       if(data.confirm!==true)throw Error('请确认将本机登录保存到 Companion 加密账号库');
