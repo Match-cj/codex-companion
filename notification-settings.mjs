@@ -5,6 +5,7 @@ export const notificationRules = [
   ['quota_expiry','重置次数即将到期','可用重置次数的到期时间在 7 天内','每天最多一次'],
   ['plan_expiry','会员即将到期','会员到期时间在 7 天内，或刚到期 48 小时内','每天最多一次；续期后按新到期时间重新计'],
   ['quota_waste','防浪费提醒（5 小时额度）','5 小时额度重置前还剩很多（下方可设提前量和剩余阈值）','每个账号每个周期最多一次；不需要就关掉'],
+  ['network_down','网络 / VPN 断开提醒','额度读不到，且诊断出断网、VPN / 代理掉线或连不上 OpenAI','故障时提醒一次，恢复后再提醒一次；10 分钟内不重复'],
   ['task_started','主对话开始','识别真实用户主对话，或从网页启动任务','建立话题时；子代理不通知'],
   ['task_completed','主对话完成或中止','主对话本轮有最终结果，或任务已中止','本轮结束时；不发送过程输出'],
   ['task_failed','主对话最终失败','任务失败或自动接管最终失败','最终失败时'],
@@ -30,7 +31,7 @@ export function notificationType(text, appName, explicit) {
   if (body.startsWith('Windows 通知')) return 'windows';
   for (const [pattern,id] of [
     [/^Codex 额度已提前恢复/,'quota_early'],[/^Codex 额度即将重置/,'quota_reset_soon'],[/^Codex 额度已用尽/,'quota_exhausted'],[/^Codex 重置次数将在 7 天内到期/,'quota_expiry'],
-    [/^Codex 会员(即将到期|已到期)/,'plan_expiry'],[/^Codex 5 小时额度快重置/,'quota_waste'],[/^这个「重试」不是模型繁忙/,'retry_unhelpful'],
+    [/^Codex 会员(即将到期|已到期)/,'plan_expiry'],[/^Codex 5 小时额度快重置/,'quota_waste'],[/^(额度读不到了|网络已恢复)/,'network_down'],[/^这个「重试」不是模型繁忙/,'retry_unhelpful'],
     [/上下文已用约/,'context_pressure'],[/开始自动接管/,'takeover_start'],[/正在自动重试/,'task_retry'],[/^Codex 还在排队，已自动重试/,'task_retry'],[/等待确认\n/,'task_approval'],[/长时间没有进展/,'task_stalled'],[/后台服务已退出/,'service_exit'],
     [/状态：失败|自动接管重试没有成功|因 429 限流中断/,'task_failed'],[/状态：已完成|状态：已中断/,'task_completed'],[/Codex 对话已开始|Codex 任务已启动/,'task_started']
   ]) if(pattern.test(body)) return id;

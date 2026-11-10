@@ -13,6 +13,7 @@ import { existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { humanError } from './human-error.mjs';
+import { wipeAndRemoveHome } from './temp-homes.mjs';
 import { codexLaunch } from './desktop-client.mjs';
 import { decodeJwtPayload } from './auth-utils.mjs';
 
@@ -241,9 +242,9 @@ export function createNativeUsage({
       if (updatedAuth?.tokens?.access_token && JSON.stringify(updatedAuth) !== JSON.stringify(auth)) await upsertNativeAccount(updatedAuth, entry);
     } finally {
       await session.shutdown();
-      const resolvedRoot = path.resolve(root) + path.sep;
-      const resolvedHome = path.resolve(home);
-      if (resolvedHome.startsWith(resolvedRoot)) await fs.rm(resolvedHome, { recursive: true, force: true }).catch(() => {});
+      // Wipe the token before removing the folder: Codex sometimes keeps sqlite
+      // handles open and fs.rm fails. A startup sweep catches any leftover.
+      if (!await wipeAndRemoveHome(home, root)) console.warn('[native usage cleanup] 临时目录暂时删不掉，会在下次启动时自动清理。');
     }
   }
   async function warmupNativeAccount(id) {
@@ -294,9 +295,9 @@ export function createNativeUsage({
       return usage;
     } finally {
       await session.shutdown();
-      const resolvedRoot = path.resolve(root) + path.sep;
-      const resolvedHome = path.resolve(home);
-      if (resolvedHome.startsWith(resolvedRoot)) await fs.rm(resolvedHome, { recursive: true, force: true }).catch(() => {});
+      // Wipe the token before removing the folder: Codex sometimes keeps sqlite
+      // handles open and fs.rm fails. A startup sweep catches any leftover.
+      if (!await wipeAndRemoveHome(home, root)) console.warn('[native usage cleanup] 临时目录暂时删不掉，会在下次启动时自动清理。');
     }
   }
   async function readNativeUsage(entry, force = false) {

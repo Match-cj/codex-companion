@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import { observeEarlyQuotaReset } from '../quota-reset.mjs';
 import { notificationEnabled, resetReminderLeads, nextResetReminder, nextWasteReminder, parseExpirySeconds, planExpiryStale } from '../notification-settings.mjs';
+import { classifyQuotaFailure, networkNoticeDecision } from '../network-health.mjs';
 
 const now = 1800000000;
 test('early reset uses previous deadline, not rolled new deadline, and deduplicates persisted snapshots', () => {
@@ -37,7 +38,10 @@ function notifier() {
   class FakeDate extends Date { static now() { return clock * 1000; } }
   const c = { Date: FakeDate, Map, accounts: [], config: { resetReminderMinutes: 15 }, quotaNotifierState: new Map(), subscriptionNotifierState: new Map(), planExpiryNotifierState: new Map(),
     observeEarlyQuotaReset, notificationEnabled, resetReminderLeads, nextResetReminder, nextWasteReminder, parseExpirySeconds, planExpiryStale, maybeRefreshStalePlanExpiry: () => {}, accountDisplayName: account => account?.display_name || account?.name || '账号', notices: [], saveConfig: async () => {}, sentQuotaNoticeToday: () => false, dashboardLink: () => '',
-    quotaLabel: minutes => minutes === 10080 ? '周额度' : '5 小时额度', notify: async text => { c.notices.push(text); return { ok: true }; } };
+    quotaLabel: minutes => minutes === 10080 ? '周额度' : '5 小时额度', notify: async text => { c.notices.push(text); return { ok: true }; },
+    // applyNativeUsageMap now also feeds the network-health state machine.
+    classifyQuotaFailure, networkNoticeDecision, probeNetwork: async () => ({ state: 'upstream', label: '', hint: '', proxy: '' }),
+    setTimeout: () => ({ unref() {} }), console: { error() {}, warn() {}, log() {} } };
   vm.createContext(c);
   c.syncNativePublicMetadata=async()=>{};
   vm.runInContext(source.slice(source.indexOf('const resetReminderTimers = new Map()'),source.indexOf('const tasks = new Map()')),c);

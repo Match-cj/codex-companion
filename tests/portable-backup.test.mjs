@@ -2,21 +2,24 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { encryptPortablePayload, decryptPortableAccountBackup, validatePortablePassword } from '../portable-backup.mjs';
 
+// A two-letter token like "at" appears by chance in base64 ciphertext and in
+// JSON field names, which made this assertion flaky. Use a realistic value.
+const ACCESS_TOKEN = 'access-token-value-9f31';
 const accounts = [{
   metadata: { id: 'acc-1', email: 'a@example.com' },
   alias: '主号',
-  auth: { tokens: { access_token: 'at', refresh_token: 'rt', id_token: 'it' } },
+  auth: { tokens: { access_token: ACCESS_TOKEN, refresh_token: 'rt', id_token: 'it' } },
 }];
 
 test('portable backup round-trips accounts with the same password', async () => {
   const envelope = await encryptPortablePayload(accounts, 'correct horse battery');
   assert.equal(envelope.type, 'codex-companion-portable-backup');
   assert.equal(envelope.encryption.cipher, 'AES-256-GCM');
-  assert.ok(!JSON.stringify(envelope).includes('at'), 'ciphertext must not leak tokens');
+  assert.ok(!JSON.stringify(envelope).includes(ACCESS_TOKEN), 'ciphertext must not leak tokens');
   const payload = await decryptPortableAccountBackup(envelope, 'correct horse battery');
   assert.equal(payload.accounts.length, 1);
   assert.equal(payload.accounts[0].alias, '主号');
-  assert.equal(payload.accounts[0].auth.tokens.access_token, 'at');
+  assert.equal(payload.accounts[0].auth.tokens.access_token, ACCESS_TOKEN);
 });
 
 test('a wrong password is reported as a wrong password, not a crash', async () => {

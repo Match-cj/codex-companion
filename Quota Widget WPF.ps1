@@ -64,10 +64,12 @@ function Test-LoginExpired($a){
  $message=[string]$a.usage.error
  return (-not[string]::IsNullOrWhiteSpace($message))-and($message-match'登录.*失效|重新登录|invalid refresh token|refresh token|token.{0,30}(expired|revoked)|token_expired|token_revoked|unauthorized|401')
 }
-function Get-FriendlyUsageError($message){
+function Get-FriendlyUsageError($message,$networkLabel){
  $text=[string]$message
  if([string]::IsNullOrWhiteSpace($text)){return ''}
  if($text-match'登录.*失效|重新登录|invalid refresh token|refresh token|token.{0,30}(expired|revoked)|token_expired|token_revoked|unauthorized|401'){return '登录已失效，请在网页重新登录这个账号。'}
+ $label=[string]$networkLabel
+ if(-not[string]::IsNullOrWhiteSpace($label)){return $label}
  if($text-match'网络|fetch failed|ECONNREFUSED|超时|timeout'){return '暂时无法读取额度，请检查网络或稍后刷新。'}
  return '额度读取失败，请打开网页查看后台详情。'
 }
@@ -404,7 +406,7 @@ function Show-Detail{
   $nc=if($a.is_active){$Green}else{$White};$prefix=if($a.is_active){'● '}else{''};$name=New-Text ($prefix+$shownName) 12 $nc -bold;if(-not[string]::IsNullOrWhiteSpace([string]$a.alias)){$name.ToolTip=[string]$a.name};$head.Children.Add($name)|Out-Null;$content.Children.Add($head)|Out-Null
   $loginExpired=Test-LoginExpired $a
   if($loginExpired){$warning=New-Text '登录已失效 · 请在网页重新登录' 11 $Red -bold;$warning.Margin='0,5,0,2';$content.Children.Add($warning)|Out-Null;$script:LoginExpiredCardsBuilt++}
-  elseif(-not[string]::IsNullOrWhiteSpace([string]$a.usage.error)){$warning=New-Text (Get-FriendlyUsageError $a.usage.error) 11 $Red -bold;$warning.Margin='0,5,0,2';$content.Children.Add($warning)|Out-Null}
+  elseif(-not[string]::IsNullOrWhiteSpace([string]$a.usage.error)){$netLabel='';if($null-ne$script:Status-and$null-ne$script:Status.networkHealth){$netLabel=[string]$script:Status.networkHealth.label};$warning=New-Text (Get-FriendlyUsageError $a.usage.error $netLabel) 11 $Red -bold;$warning.Margin='0,5,0,2';$warning.TextWrapping='Wrap';$content.Children.Add($warning)|Out-Null}
   $five=if($loginExpired){$null}else{Get-Remaining $a 'primary'};$week=if($loginExpired){$null}else{Get-Remaining $a 'secondary'}
   $quotaGrid=New-Object Windows.Controls.Grid;$quotaGrid.Width=390;$quotaGrid.Margin='0,2,0,0'
   $col1=New-Object Windows.Controls.ColumnDefinition;$col1.Width=195

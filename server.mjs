@@ -21,6 +21,8 @@ import { humanError } from './human-error.mjs';
 import { base64Url, decodeJwtPayload, jwtExpiry, oauthPortStatus } from './auth-utils.mjs';
 import { createFeishuInbox, inboxEntryFromEvent } from './feishu-inbox.mjs';
 import { createNativeUsage } from './native-usage.mjs';
+import { sweepStaleHomes } from './temp-homes.mjs';
+import { classifyQuotaFailure, probeNetwork, networkNoticeDecision, readSystemProxy } from './network-health.mjs';
 import { validNativeVault, createNativeVaultStore } from './native-vault.mjs';
 import { DeviceLoginSession } from './device-login.mjs';
 import { codexLaunch, closeCodexDesktop, codexDesktopPids, isCodexDesktopRunning, launchCodexDesktop, execPowershellShort, isQuotaWidgetRunning, findQuotaWidgetWindow, focusQuotaWidgetWindow, killQuotaWidgetProcesses, openQuotaWidget } from './desktop-client.mjs';
@@ -30,7 +32,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.50';
+const APP_VERSION = '1.0.51';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -299,6 +301,20 @@ const sessionActivities = new Map();
 // repeatedly). Keep one continue request in flight per conversation so a
 // single failed turn does not become several competing writers.
 const feishuContinueRequests = new Map();
+// Feishu re-delivers reaction events after a websocket reconnect, and Companion
+// itself adds an OK reaction when a task moves to the background. Both show up
+// here as a second "continue" command unless they are filtered out.
+const feishuReactionEvents = new Map();
+const feishuReactionMessages = new Map();
+const feishuBotReactions = new Map();
+const REACTION_DEDUPE_MS = 10 * 60 * 1000;
+function alreadySeenReaction(map, key, now, ttlMs = REACTION_DEDUPE_MS) {
+  for (const [storedKey, at] of map) if (now - at > ttlMs) map.delete(storedKey);
+  if (map.has(key)) return true;
+  map.set(key, now);
+  if (map.size > 500) map.delete(map.keys().next().value);
+  return false;
+}
 function observeSessionActivity(event, kind, threadId, cwd = '') {
   if (kind !== 'user' || !threadId || event?.type !== 'event_msg') return;
   const payload = event.payload || {};
@@ -929,6 +945,9 @@ async function handleFeishuMessage(data) {
     config.feishuMessageThreads = Object.fromEntries(Object.entries(incomingLinks).slice(-100));
     await saveConfig();
     if (task.remoteDesktopTakeover) {
+      // Feishu pushes this bot-added OK back to us as a reaction event. Register
+      // it before the API call so it can never be mistaken for a user's "继续".
+      feishuBotReactions.set(String(message.message_id), Date.now());
       let reacted = false;
       try {
         const reaction = await feishuClient?.im?.v1?.messageReaction?.create({
@@ -1259,23 +1278,34 @@ async function handleFeishuReaction(data) {
     const emoji = String(event.reaction_type?.emoji_type || event.reactionType?.emojiType || '').toUpperCase();
     const expected = String(config.feishuContinueEmoji || 'OK').toUpperCase();
     if (!emoji || emoji !== expected) return;
-    const operatorType = String(event.operator_type || event.operatorType || event.user_id?.user_type || '').toLowerCase();
-    if (operatorType === 'app' || operatorType === 'bot') return;
+    const now = Date.now();
+    const eventId = String(data?.header?.event_id || data?.event_id || data?.eventId || event.event_id || '').trim();
+    if (eventId && alreadySeenReaction(feishuReactionEvents, eventId, now)) return;
+    const operatorType = String(event.operator_type || event.operatorType || event.user_id?.user_type || event.user_id?.userType || '').toLowerCase();
+    if (['app', 'bot', 'openapi'].includes(operatorType)) return;
     const senderId = String(event.user_id?.open_id || event.user_id?.openId || event.operator_id?.open_id || event.operator_id?.openId || '');
-    if (senderId && Array.isArray(config.feishuAllowedUserIds) && !config.feishuAllowedUserIds.map(String).includes(senderId)) return;
+    const allowed = Array.isArray(config.feishuAllowedUserIds) ? config.feishuAllowedUserIds.map(String) : [];
+    const isOperator = allowed.length ? allowed.includes(senderId) : Boolean(senderId);
     const messageId = String(event.message_id || event.messageId || '').trim();
     if (!messageId || !config.feishuBoundChatId) return;
+    // When a task moves to the background the bot adds an OK to the same
+    // message. Feishu pushes that reaction back here; it is not a user command.
+    const botReactedAt = feishuBotReactions.get(messageId) || 0;
+    const humanOperator = Boolean(senderId) && !['app', 'bot', 'openapi'].includes(operatorType);
+    if (botReactedAt && now - botReactedAt < 60000 && !(humanOperator && isOperator)) return;
+    // Feishu re-delivers events after a reconnect. One reaction per message is
+    // all the user ever intended, so later copies are silently dropped.
+    if (alreadySeenReaction(feishuReactionMessages, `${messageId}:${emoji}`, now)) return;
+    if (!isOperator) return;
     const links = config.feishuMessageThreads && typeof config.feishuMessageThreads === 'object' ? config.feishuMessageThreads : {};
     const historical=(config.notificationHistory||[]).find(item=>item.sent&&item.messageId===messageId)?.taskId;
     const threadId = canonicalCodexThreadId(links[messageId] || historical) || await resolveFeishuReplyThread({parent_id:messageId});
     if (!threadId) return;
     requestThreadId = threadId;
-    const now = Date.now();
     const previous = feishuContinueRequests.get(threadId) || 0;
-    if (now - previous < 45000) {
-      await sendFeishuAppText('这个对话刚刚已经收到“继续”请求，请等待本轮结果后再重试。', { replyTo: messageId, taskId: threadId });
-      return;
-    }
+    // A duplicate within the same turn is ignored silently. Replying with a
+    // second "please wait" message is what made one OK look like two reminders.
+    if (now - previous < 45000) return;
     feishuContinueRequests.set(threadId, now);
     const task = await continueThreadFromFeishu(threadId, [{ type: 'text', text: '继续往下推进' }], { manual: true });
     await sendFeishuAppText('已收到表情，继续推进这个 Codex 对话。', { replyTo: messageId, taskId: task.id });
@@ -1925,6 +1955,44 @@ function withoutLegacyQuotaWindows(usage = {}) {
   delete result.observed_at;
   return result;
 }
+// A dead VPN used to look exactly like "暂时无法读取额度". Diagnose the cause
+// in the background, show one short sentence in the UI, and notify only when
+// the network actually goes down (and once more when it comes back).
+let networkHealth = { state: 'ok', label: '', hint: '', checkedAt: 0, accounts: [], proxy: '' };
+let networkNoticeState = { state: 'ok', notifiedAt: 0 };
+let networkProbeLastAt = 0;
+let networkProbeInFlight = null;
+function degradedQuotaAccounts() {
+  return accounts.filter(account => classifyQuotaFailure(account.usage?.error).network)
+    .map(account => account.display_name || account.name || '未命名账号');
+}
+function updateNetworkHealth() {
+  const degraded = degradedQuotaAccounts();
+  if (!degraded.length) {
+    if (networkHealth.state !== 'ok') networkHealth = { state: 'ok', label: '', hint: '', checkedAt: Date.now(), accounts: [], proxy: '' };
+    const decision = networkNoticeDecision(networkNoticeState, false, Date.now());
+    networkNoticeState = { state: decision.state, notifiedAt: decision.notifiedAt };
+    if (decision.notice === 'recovered') {
+      notify('网络已恢复，额度已经自动刷新。', { appName: 'Codex 额度', notificationType: 'network_down' }).catch(error => console.error('[network notice]', error.message));
+      setTimeout(() => { refreshAccounts({ forceNative: true }).catch(() => {}); }, 8000).unref?.();
+    }
+    return;
+  }
+  const now = Date.now();
+  if (networkProbeInFlight || now - networkProbeLastAt < 90 * 1000) return;
+  networkProbeLastAt = now;
+  networkHealth = { state: 'checking', label: '正在检查网络…', hint: '', checkedAt: now, accounts: degraded, proxy: '' };
+  networkProbeInFlight = probeNetwork({ timeoutMs: 4500 })
+    .then(result => {
+      networkHealth = { ...result, checkedAt: Date.now(), accounts: degraded };
+      const decision = networkNoticeDecision(networkNoticeState, true, Date.now());
+      networkNoticeState = { state: decision.state, notifiedAt: decision.notifiedAt };
+      if (decision.notice !== 'down') return;
+      notify(`额度读不到了：${result.label}\n账号：${degraded.join('、')}\n原因：${result.hint}\n\n现在显示的是上一次成功读取的额度，不是额度用完了。Companion 会自动重试，网络恢复后自动刷新。`, { appName: 'Codex 额度', notificationType: 'network_down' }).catch(error => console.error('[network notice]', error.message));
+    })
+    .catch(error => { console.error('[network probe]', error.message); })
+    .finally(() => { networkProbeInFlight = null; });
+}
 async function applyNativeUsageMap(nativeUsages) {
   if (!(nativeUsages instanceof Map) || !nativeUsages.size) return;
   accounts = accounts.map(account => {
@@ -1941,6 +2009,7 @@ async function applyNativeUsageMap(nativeUsages) {
   await syncNativePublicMetadata(accounts).catch(error => console.error('[native metadata]', error.message));
   lastAccountRefreshAt = Date.now();
   await checkQuotaNotices();
+  updateNetworkHealth();
 }
 // 点一下浮窗/网页时真正去后台取最新额度：请求立刻返回，界面通过 /api/status 看进度。
 // 强制读取原生额度可能要几十秒，所以不能让点击界面干等（会表现成“点了没反应”）。
@@ -2018,7 +2087,7 @@ async function notify(text, opts = {}) {
     saveConfig().catch(()=>{});
     return {ok:false,reason:'type-disabled'};
   }
-  const notificationEmoji={quota_early:'🎉',quota_reset_soon:'⏰',quota_exhausted:'🚫',quota_expiry:'⌛',plan_expiry:'💳',quota_waste:'💰',context_pressure:'📊',takeover_start:'🤖',task_retry:'🔁',task_approval:'🙋',task_stalled:'🐌',service_exit:'🛑',task_failed:'❌',task_completed:'✅',task_started:'▶️',windows:'🪟'};
+  const notificationEmoji={quota_early:'🎉',quota_reset_soon:'⏰',quota_exhausted:'🚫',quota_expiry:'⌛',plan_expiry:'💳',quota_waste:'💰',network_down:'🌐',context_pressure:'📊',takeover_start:'🤖',task_retry:'🔁',task_approval:'🙋',task_stalled:'🐌',service_exit:'🛑',task_failed:'❌',task_completed:'✅',task_started:'▶️',windows:'🪟'};
   if(type&&notificationEmoji[type]) text=`${notificationEmoji[type]} ${text}`;
   const appName = normalizeAppName(opts.appName);
   const extraTargets = Array.isArray(config.webhooks) ? config.webhooks.filter(item => item && item.enabled !== false && item.url) : [];
@@ -3117,6 +3186,7 @@ async function handle(req, res) {
         feishu:publicFeishuState(),
         accounts,
         quotaRefresh:{ running:manualQuotaRefresh.running, startedAt:manualQuotaRefresh.startedAt, finishedAt:manualQuotaRefresh.finishedAt, error:manualQuotaRefresh.error },
+        networkHealth,
         tasks:Object.fromEntries(tasks),
         taskActivity:{ rows: publicTaskActivity(), monitorReady: codexSessionWatcherReady, note: '桌面任务依据最近本地记录显示，不是客户端实时运行保证；历史记录只用于展示，不补发通知。' },
         desktopRetry: desktopRetryState(),
@@ -3924,6 +3994,19 @@ async function main() {
   refreshAccounts().catch(e => console.error('[accounts]', e.message));
   // 启动后检查一次 1455 端口：被 Windows 保留就自动修复（弹一次授权窗口），修一次永久生效。
   setTimeout(() => { repairLoginPort().catch(() => {}); }, 8000).unref?.();
+  // Old isolated CODEX_HOME folders could not always be deleted while Codex
+  // held sqlite handles. Sweep them once on startup (credentials wiped first),
+  // then every run cleans up after itself so nothing accumulates again.
+  setTimeout(() => {
+    const roots = [path.join(appDir, 'native-usage'), path.join(appDir, 'native-warmup')];
+    Promise.all(roots.map(root => sweepStaleHomes(root, { limit: 3000 })))
+      .then(results => {
+        const removed = results.reduce((sum, item) => sum + item.removed, 0);
+        const wiped = results.reduce((sum, item) => sum + item.wiped, 0);
+        if (removed || wiped) console.log(`[temp homes] 自动清理 ${removed} 个历史临时目录，抹掉 ${wiped} 份临时凭据`);
+      })
+      .catch(error => console.error('[temp homes]', error.message));
+  }, 12000).unref?.();
   autoImportLocalAuth();
   // Pick up an account switch made in the Codex client without a restart.
   setInterval(autoImportLocalAuth, 5 * 60 * 1000).unref?.();
@@ -3940,6 +4023,9 @@ async function main() {
     // to exist, the only thing left to notice is the user walking away.
     setInterval(() => { maybeAutoApplyUpdate('idle').catch(() => {}); }, updateIdleProbeIntervalMs).unref?.();
   }, 60 * 1000).unref?.();
+  // Keep the detected system proxy visible in /api/status, so a wrong VPN port
+  // can be spotted without reproducing a network outage.
+  readSystemProxy().then(proxy => { networkHealth = { ...networkHealth, proxy: proxy?.address || '' }; }).catch(() => {});
   startTaskEngine().catch(e => console.error('[task engine]', e.message));
   startFeishuLongConnection().catch(e => console.error('[feishu connection]', e.message));
   startCodexSessionMonitor().catch(e => console.error('[codex session monitor]', e.message));
