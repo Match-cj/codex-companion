@@ -89,8 +89,7 @@ test('the inbox records rich text instead of silently losing it', () => {
 test('server forwards rich text, replies to unknown types, and replays dropped messages', () => {
   const server = fs.readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
   const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-  assert.match(server, /const APP_VERSION = '1\.0\.52'/);
-  assert.equal(pkg.version, '1.0.52');
+  assert.ok(server.includes(`const APP_VERSION = '${pkg.version}'`), 'server version must match package.json');
   assert.match(server, /import \{ parseFeishuPost, isRichTextMessage \} from '\.\/feishu-post\.mjs'/);
   assert.match(server, /const isTextLike = msgType === 'text' \|\| isRichTextMessage\(msgType\)/);
   assert.match(server, /\} else if \(isRichTextMessage\(msgType\)\) \{/);

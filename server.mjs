@@ -21,6 +21,7 @@ import { humanError } from './human-error.mjs';
 import { base64Url, decodeJwtPayload, jwtExpiry, oauthPortStatus } from './auth-utils.mjs';
 import { createFeishuInbox, inboxEntryFromEvent } from './feishu-inbox.mjs';
 import { parseFeishuPost, isRichTextMessage } from './feishu-post.mjs';
+import { stallNoticeDecision } from './stall-notice.mjs';
 import { createNativeUsage } from './native-usage.mjs';
 import { sweepStaleHomes } from './temp-homes.mjs';
 import { classifyQuotaFailure, probeNetwork, networkNoticeDecision, readSystemProxy } from './network-health.mjs';
@@ -33,7 +34,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.52';
+const APP_VERSION = '1.0.53';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -3039,6 +3040,8 @@ class CodexServer {
       prompt: String(thread.name || thread.preview || '已有 Codex 对话'),
       status: activeTurn ? 'running' : 'completed',
       output: trim(agentMessages.at(-1) || '', 5000),
+      turnOutput: '',
+      turnFinalText: '',
       startedAt: new Date(Number(thread.createdAt || Date.now() / 1000) * 1000).toISOString(),
       lastEventAt: Date.now(),
       stallNotified: false,
@@ -3057,6 +3060,11 @@ class CodexServer {
     const active = this.turns.get(task.id);
     if (active) await this.request('turn/steer', { threadId: task.id, input: items, expectedTurnId: active });
     else {
+      // A new turn starts from a clean slate. If turn/started never arrives
+      // (session busy elsewhere, login expired...), stale output from the
+      // previous turn would otherwise be reposted by the stall reminder.
+      task.turnOutput = '';
+      task.turnFinalText = '';
       task.turnImagePaths = [];
       const params = { threadId: task.id, input: items, cwd: task.cwd };
       if (model) params.model = model;
@@ -4117,10 +4125,12 @@ async function main() {
     if (!codex?.proc) startTaskEngine().catch(e => console.error('[task engine]', e.message));
     monitorWindowsNotifications();
     for (const t of tasks.values()) {
-      if (t.status !== 'running' || t.stallNotified) continue;
-      if (Date.now() - t.lastEventAt <= config.stallMinutes * 60000) continue;
+      const decision = stallNoticeDecision(t, { now: Date.now(), stallMinutes: Number(config.stallMinutes) || 3 });
+      if (!decision.notify) continue;
       t.stallNotified = true;
-      await notify(`Codex 任务长时间没有进展\n任务：${t.id}\n已无事件：${config.stallMinutes} 分钟\n\n${trim(t.output, 1800)}\n${dashboardLink(`#task=${t.id}`)}`, { appName: 'Codex 任务', taskId: t.id });
+      t.stallNotifiedAt = Date.now();
+      t.stallFingerprint = decision.fingerprint;
+      await notify(`Codex 任务长时间没有进展\n任务：${t.id}\n已无事件：${config.stallMinutes} 分钟\n\n${decision.body}\n${dashboardLink(`#task=${t.id}`)}`, { appName: 'Codex 任务', taskId: t.id });
     }
     if (Date.now() - lastAccountRefreshAt > config.quotaRefreshMinutes * 60000) {
       try { await refreshAccounts(); } catch (e) { console.error('[accounts]', e.message); }
