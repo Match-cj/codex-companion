@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 Add-Type 'using System; using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags); [DllImport("user32.dll", EntryPoint="GetWindowLongW")] public static extern int GetWindowLong(IntPtr hwnd, int index); [DllImport("user32.dll", EntryPoint="SetWindowLongW")] public static extern int SetWindowLong(IntPtr hwnd, int index, int value); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); }'
-$script:Port=$Port; $script:AppVersion='1.0.50'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false; $script:UpdateInfo=$null; $script:Updating=$false; $script:UpdateCardsBuilt=0; $script:UpdateButtonInvocations=0; $script:QuotaRefreshInFlight=$false; $script:QuotaRefreshStartedAt=0; $script:QuotaRefreshDeadline=[DateTime]::UtcNow; $script:QuotaPollTimer=$null; $script:RefreshMenuItem=$null
+$script:Port=$Port; $script:AppVersion='1.0.54'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false; $script:UpdateInfo=$null; $script:Updating=$false; $script:UpdateCardsBuilt=0; $script:UpdateButtonInvocations=0; $script:QuotaRefreshInFlight=$false; $script:QuotaRefreshStartedAt=0; $script:QuotaRefreshDeadline=[DateTime]::UtcNow; $script:QuotaPollTimer=$null; $script:RefreshMenuItem=$null; $script:DetailGuardUntil=[DateTime]::UtcNow; $script:DetailPendingRefresh=$false; $script:DetailRefreshTimer=$null; $script:DetailRefreshLabel=$null; $script:LastAutoRefreshAt=0
 $mutexName=if($SelfTest){'Global\CodexCompanionQuotaWidget_v5_selftest'}else{'Global\CodexCompanionQuotaWidget_v5'}
 $script:Mutex=New-Object System.Threading.Mutex($false,$mutexName); if(-not $script:Mutex.WaitOne(0,$false)){exit}
 $Transparent=[Windows.Media.Brushes]::Transparent
@@ -38,7 +38,7 @@ function Get-Status{
    [pscustomobject]@{id='test-expired';name='测试失效账号';is_active=$false;plan_type='pro';usage=[pscustomobject]@{error='登录已失效，请重新登录'}}
   );tasks=[pscustomobject]@{};taskActivity=[pscustomobject]@{rows=@()}}
  }
- try{Invoke-RestMethod "http://127.0.0.1:$script:Port/api/status" -TimeoutSec 8}catch{$null}
+ try{Invoke-RestMethod "http://127.0.0.1:$script:Port/api/status" -TimeoutSec 4}catch{$null}
 }
 function Get-ApiErrorMessage($record){
  try{
@@ -193,30 +193,41 @@ function Update-UpdateBadge($status){
 }
 function Update-Widget{$script:Status=Get-Status;Update-UpdateBadge $script:Status;$runningCount=@(Get-RunningTasks $script:Status).Count;$tip="Codex Companion`n运行中对话：$runningCount（含自动接管）";if($null-ne$script:UpdateInfo-and$script:UpdateInfo.available){$tip+="`n有新版本 v$($script:UpdateInfo.latest)，点右上角 ↑ 更新"};$Window.ToolTip=$tip;$a=$script:Status.accounts|Where-Object{$_.is_active}|Select-Object -First 1;if(Test-LoginExpired $a){$Number.Text='!';$Number.Foreground=$Red;$Arc.Data=$null;return};$r=Get-Remaining $a 'primary';if($null-eq$r){$r=Get-Remaining $a 'secondary'};if($null-eq$r){$Number.Text='--';$Arc.Data=$null;return};$color=Get-Color $r;$Number.Text=[string]$r;$Number.Foreground=$color;$Arc.Stroke=$color;Set-Arc $r}
 function Close-Detail([switch]$Force){if($script:SwitchInProgress -and -not$Force){return};if($null-ne$script:Detail){$d=$script:Detail;$script:Detail=$null;$script:DetailClosedAt=[DateTime]::UtcNow;try{$d.Close()}catch{}}}
-# 点一下就拿最新额度：通知后台强制刷新（请求秒回），界面每 0.9 秒看一次进度，刷完自动更新。
-function Request-QuotaRefresh{
+# 点一下就拿最新额度：通知后台强制刷新（请求秒回），界面每 1.5 秒看一次进度。
+# 刷新完成只原地换面板里的内容，不再关闭/重开窗口：那样会闪一下、抢焦点，还会把双击切换拆成两次单击。
+function Request-QuotaRefresh([switch]$Auto){
  if($SelfTest){return}
  if($script:QuotaRefreshInFlight){return}
+ # 点圆环打开面板属于"顺手刷一下"，连着开关面板不该每次都拉一遍账号。
+ if($Auto){
+  $nowMs=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+  if($nowMs-$script:LastAutoRefreshAt-lt 45000){return}
+  $script:LastAutoRefreshAt=$nowMs
+ }
  try{
   $r=Invoke-RestMethod "http://127.0.0.1:$script:Port/api/accounts/refresh" -Method Post -ContentType 'application/json' -Body '{"quick":true}' -TimeoutSec 5
-  if(-not$r.started){return}
+  if(-not$r.started){if($Auto){$script:LastAutoRefreshAt=0};return}
   $script:QuotaRefreshInFlight=$true
   $script:QuotaRefreshStartedAt=[double]$r.startedAt
   $script:QuotaRefreshDeadline=[DateTime]::UtcNow.AddSeconds(75)
   if($null-ne$script:RefreshMenuItem){$script:RefreshMenuItem.Header='正在刷新额度…';$script:RefreshMenuItem.IsEnabled=$false}
+  if($null-ne$script:DetailRefreshLabel){$script:DetailRefreshLabel.Text='↻ 刷新中…';$script:DetailRefreshLabel.Foreground=$Yellow}
   $Window.ToolTip="Codex Companion`n正在获取最新额度…"
   if($null-ne$script:QuotaPollTimer){$script:QuotaPollTimer.Start()}
  }catch{
   $script:QuotaRefreshInFlight=$false
+  if($Auto){$script:LastAutoRefreshAt=0}
   if($null-ne$script:RefreshMenuItem){$script:RefreshMenuItem.Header='立即刷新额度';$script:RefreshMenuItem.IsEnabled=$true}
+  if($null-ne$script:DetailRefreshLabel){$script:DetailRefreshLabel.Text='↻';$script:DetailRefreshLabel.Foreground=$Muted}
  }
 }
 function Complete-QuotaRefresh{
  $script:QuotaRefreshInFlight=$false
  if($null-ne$script:QuotaPollTimer){$script:QuotaPollTimer.Stop()}
  if($null-ne$script:RefreshMenuItem){$script:RefreshMenuItem.Header='立即刷新额度';$script:RefreshMenuItem.IsEnabled=$true}
+ if($null-ne$script:DetailRefreshLabel){$script:DetailRefreshLabel.Text='↻';$script:DetailRefreshLabel.Foreground=$Muted}
  Update-Widget
- if($null-ne$script:Detail){Refresh-Detail}
+ Request-DetailRefresh
 }
 function Poll-QuotaRefresh{
  if(-not$script:QuotaRefreshInFlight){if($null-ne$script:QuotaPollTimer){$script:QuotaPollTimer.Stop()};return}
@@ -224,12 +235,32 @@ function Poll-QuotaRefresh{
  $st=Get-Status
  if($null-ne$st-and$null-ne$st.quotaRefresh-and-not$st.quotaRefresh.running-and$st.quotaRefresh.finishedAt-ge$script:QuotaRefreshStartedAt){Complete-QuotaRefresh}
 }
+# 用户刚点过面板（尤其是正在双击切换账号）时，刷新结果先排队，等手停下来再更新。
+function Request-DetailRefresh{
+ if($null-eq$script:Detail){return}
+ if($script:SwitchInProgress -or $script:MenuOpen -or [DateTime]::UtcNow-lt$script:DetailGuardUntil){$script:DetailPendingRefresh=$true;Start-DetailRefreshRetry;return}
+ $script:DetailPendingRefresh=$false
+ Refresh-Detail
+}
+function Start-DetailRefreshRetry{
+ if($null-eq$script:DetailRefreshTimer){return}
+ if(-not$script:DetailRefreshTimer.IsEnabled){$script:DetailRefreshTimer.Start()}
+}
 function Refresh-Detail{
  if($null-eq$script:Detail){return}
- $old=$script:Detail;$script:Detail=$null
- try{$old.Close()}catch{}
- $script:DetailClosedAt=[DateTime]::MinValue
- Show-Detail
+ $st=Get-Status
+ if($null-eq$st){return}
+ $script:Status=$st
+ $body=New-DetailBody $st
+ $d=$script:Detail
+ $d.Content=$body.Outer
+ # 只换内容、不关窗不重开：焦点、位置、窗口层级都不变，看起来不会"跳一下"。
+ $newHeight=[Math]::Max(80,$body.Height)
+ if([Math]::Abs($newHeight-$d.Height)-gt 12){
+  $d.Height=$newHeight
+  $work=Get-WidgetMonitorWorkArea
+  if(($d.Top+$newHeight)-gt$work.Bottom){$d.Top=[Math]::Max($work.Top+4,$work.Bottom-$newHeight-4)}
+ }
 }
 function Test-ScreenPointInsideWindow($floatingWindow,$cursor){
  if($null-eq$floatingWindow -or -not$floatingWindow.IsVisible){return $false}
@@ -368,25 +399,25 @@ function Warmup-WidgetAccount($accountId,$accountName){
   [Windows.MessageBox]::Show("额度预热失败：`n$(Get-ApiErrorMessage $_)",'Codex Companion','OK','Error')|Out-Null
  }finally{$script:WarmupInProgress=$false;[Windows.Input.Mouse]::OverrideCursor=$null}
 }
-function Show-Detail{
- if($null-ne$script:Detail){Close-Detail;return};if(([DateTime]::UtcNow-$script:DetailClosedAt).TotalMilliseconds-lt 250){return};$script:Status=Get-Status;$accounts=@($script:Status.accounts|Sort-Object{Get-SortReset $_})
- $d=New-Object Windows.Window;$script:Detail=$d;$d.Width=430;$d.WindowStyle='None';$d.ResizeMode='NoResize';$d.AllowsTransparency=$true;$d.Background=$Transparent;$d.Topmost=$true;$d.ShowInTaskbar=$false;$d.ShowActivated=$true;$d.UseLayoutRounding=$true;$d.SnapsToDevicePixels=$true
- $outer=New-Object Windows.Controls.Border;$outer.Background=$Disc;$outer.CornerRadius=12;$outer.Padding=9;$stack=New-Object Windows.Controls.StackPanel;$outer.Child=$stack;$d.Content=$outer
+function New-DetailBody($status){
+ $accounts=@($status.accounts|Sort-Object{Get-SortReset $_})
+ $outer=New-Object Windows.Controls.Border;$outer.Background=$Disc;$outer.CornerRadius=12;$outer.Padding=9;$stack=New-Object Windows.Controls.StackPanel;$outer.Child=$stack
  $topRow=New-Object Windows.Controls.Grid;$topRow.Margin='2,0,0,7'
  $col1=New-Object Windows.Controls.ColumnDefinition;$col1.Width='*'
  $col2=New-Object Windows.Controls.ColumnDefinition;$col2.Width='Auto'
  $topRow.ColumnDefinitions.Add($col1);$topRow.ColumnDefinitions.Add($col2)
- $runningCount=@(Get-RunningTasks $script:Status).Count
+ $runningCount=@(Get-RunningTasks $status).Count
  $runningColor=if($runningCount-gt 0){$Green}else{$Muted};$runningText=New-Text "运行中对话：$runningCount（含自动接管）" 11 $runningColor -bold
  [Windows.Controls.Grid]::SetColumn($runningText,0);$topRow.Children.Add($runningText)|Out-Null
- $refreshing=($null-ne$script:Status.quotaRefresh)-and[bool]$script:Status.quotaRefresh.running
+ $refreshing=($null-ne$status.quotaRefresh)-and[bool]$status.quotaRefresh.running
  $refreshCaption=if($refreshing){'↻ 刷新中…'}else{'↻'}
  $refreshBrush=if($refreshing){$Yellow}else{$Muted}
  $refreshLabel=New-Text $refreshCaption 12 $refreshBrush -bold
  $refreshLabel.HorizontalAlignment='Right';$refreshLabel.VerticalAlignment='Center';$refreshLabel.Margin='8,0,2,0'
  $refreshLabel.Cursor=[Windows.Input.Cursors]::Hand;$refreshLabel.ToolTip='点一下获取最新额度'
  [Windows.Controls.Grid]::SetColumn($refreshLabel,1);$topRow.Children.Add($refreshLabel)|Out-Null
- $refreshLabel.Add_PreviewMouseLeftButtonDown({param($sender,$eventArgs)$eventArgs.Handled=$true;$sender.Text='↻ 刷新中…';Request-QuotaRefresh})
+ $script:DetailRefreshLabel=$refreshLabel
+ $refreshLabel.Add_PreviewMouseLeftButtonDown({param($sender,$eventArgs)$eventArgs.Handled=$true;$script:DetailGuardUntil=[DateTime]::UtcNow.AddSeconds(2);$sender.Text='↻ 刷新中…';Request-QuotaRefresh})
  $stack.Children.Add($topRow)|Out-Null
  if($null-ne$script:UpdateInfo-and[bool]$script:UpdateInfo.available){
   $updateCard=New-Object Windows.Controls.Border;$updateCard.Background=$CardBrush;$updateCard.CornerRadius=7;$updateCard.Padding='10,7';$updateCard.Margin='0,0,0,7'
@@ -406,7 +437,7 @@ function Show-Detail{
   $nc=if($a.is_active){$Green}else{$White};$prefix=if($a.is_active){'● '}else{''};$name=New-Text ($prefix+$shownName) 12 $nc -bold;if(-not[string]::IsNullOrWhiteSpace([string]$a.alias)){$name.ToolTip=[string]$a.name};$head.Children.Add($name)|Out-Null;$content.Children.Add($head)|Out-Null
   $loginExpired=Test-LoginExpired $a
   if($loginExpired){$warning=New-Text '登录已失效 · 请在网页重新登录' 11 $Red -bold;$warning.Margin='0,5,0,2';$content.Children.Add($warning)|Out-Null;$script:LoginExpiredCardsBuilt++}
-  elseif(-not[string]::IsNullOrWhiteSpace([string]$a.usage.error)){$netLabel='';if($null-ne$script:Status-and$null-ne$script:Status.networkHealth){$netLabel=[string]$script:Status.networkHealth.label};$warning=New-Text (Get-FriendlyUsageError $a.usage.error $netLabel) 11 $Red -bold;$warning.Margin='0,5,0,2';$warning.TextWrapping='Wrap';$content.Children.Add($warning)|Out-Null}
+  elseif(-not[string]::IsNullOrWhiteSpace([string]$a.usage.error)){$netLabel='';if($null-ne$status-and$null-ne$status.networkHealth){$netLabel=[string]$status.networkHealth.label};$warning=New-Text (Get-FriendlyUsageError $a.usage.error $netLabel) 11 $Red -bold;$warning.Margin='0,5,0,2';$warning.TextWrapping='Wrap';$content.Children.Add($warning)|Out-Null}
   $five=if($loginExpired){$null}else{Get-Remaining $a 'primary'};$week=if($loginExpired){$null}else{Get-Remaining $a 'secondary'}
   $quotaGrid=New-Object Windows.Controls.Grid;$quotaGrid.Width=390;$quotaGrid.Margin='0,2,0,0'
   $col1=New-Object Windows.Controls.ColumnDefinition;$col1.Width=195
@@ -439,6 +470,8 @@ function Show-Detail{
     $card.Cursor=[Windows.Input.Cursors]::Hand;$card.ToolTip="双击切换到 $shownName"
     $card.Tag=@{Id=[string]$a.id;Name=[string]$shownName}
    $switchHandler={param($sender,$eventArgs)
+    # 第一下就把面板锁住：刷新结果在这几秒内不能换内容，否则第二次点击会落到新卡片上、双击永远凑不齐。
+    $script:DetailGuardUntil=[DateTime]::UtcNow.AddSeconds(3)
     Trace-WidgetSwitch ("mouse_down_"+[string]$eventArgs.ClickCount) ([string]$sender.Tag.Name)
     if($eventArgs.ClickCount-lt 2){return}
     $eventArgs.Handled=$true
@@ -451,10 +484,17 @@ function Show-Detail{
   }
   $stack.Children.Add($card)|Out-Null
  }
- $d.Add_Closed({if($script:Detail-eq$d){$script:Detail=$null;$script:DetailClosedAt=[DateTime]::UtcNow}})
  $stack.Measure([Windows.Size]::new(402,[double]::PositiveInfinity))
- $total=$stack.DesiredSize.Height+18
- $d.Height=[Math]::Max(80,$total)
+ return [pscustomobject]@{Outer=$outer;Height=$stack.DesiredSize.Height+18}
+}
+function Show-Detail{
+ if($null-ne$script:Detail){Close-Detail;return};if(([DateTime]::UtcNow-$script:DetailClosedAt).TotalMilliseconds-lt 250){return};$script:Status=Get-Status
+ $d=New-Object Windows.Window;$script:Detail=$d;$d.Width=430;$d.WindowStyle='None';$d.ResizeMode='NoResize';$d.AllowsTransparency=$true;$d.Background=$Transparent;$d.Topmost=$true;$d.ShowInTaskbar=$false;$d.ShowActivated=$true;$d.UseLayoutRounding=$true;$d.SnapsToDevicePixels=$true
+ $body=New-DetailBody $script:Status;$d.Content=$body.Outer
+ # 面板内任意一次点击都锁住 2 秒：刷新完成不能在这期间换内容，双击切换才不会被拆散。
+ $d.Add_PreviewMouseLeftButtonDown({$script:DetailGuardUntil=[DateTime]::UtcNow.AddSeconds(2)})
+ $d.Add_Closed({if($script:Detail-eq$d){$script:Detail=$null;$script:DetailRefreshLabel=$null;$script:DetailClosedAt=[DateTime]::UtcNow}})
+ $d.Height=[Math]::Max(80,$body.Height)
  $work=Get-WidgetMonitorWorkArea;$left=$Window.Left+(($Window.ActualWidth-$d.Width)/2);$left=[Math]::Max($work.Left+4,[Math]::Min($left,$work.Right-$d.Width-4));$below=$Window.Top+$Window.ActualHeight+6;$top=if(($below+$d.Height)-le$work.Bottom){$below}else{$Window.Top-$d.Height-6};$d.Left=$left;$d.Top=[Math]::Max($work.Top+4,[Math]::Min($top,$work.Bottom-$d.Height-4));if($SelfTest){$d.Opacity=0};$d.Show();Hide-FromTaskSwitcher $d
 }
 $Window.Add_Closed({Close-WidgetNotice})
@@ -475,6 +515,16 @@ if($SelfTest){
  $badgeClickInvocations=$script:UpdateButtonInvocations
  Show-Detail
  $stackForTest=$script:Detail.Content.Child
+ # 模拟一次"刷新完成"：只该替换窗口里的内容，窗口本身不能关闭重开（否则会抢焦点、拆散双击）。
+ $detailWindowBefore=$script:Detail
+ $detailHandleBefore=(New-Object Windows.Interop.WindowInteropHelper($detailWindowBefore)).Handle
+ $cardsBefore=$stackForTest.Children.Count
+ Refresh-Detail
+ $refreshKeptWindow=($script:Detail -eq $detailWindowBefore)-and((New-Object Windows.Interop.WindowInteropHelper($script:Detail)).Handle -eq $detailHandleBefore)
+ $refreshKeptCards=($script:Detail.Content.Child.Children.Count -eq $cardsBefore)
+ $stackForTest=$script:Detail.Content.Child
+ # 卡片计数只按首次构建统计，避免自测里模拟刷新把数字翻倍。
+ $script:UpdateCardsBuilt=1;$script:SwitchableCardsBuilt=1;$script:SwitchGestureCardsBuilt=1;$script:SwitchButtonCardsBuilt=0;$script:LoginExpiredCardsBuilt=1
  $scaledBoundsPass=$true
  foreach($scale in @(1.0,1.25,1.5,2.0)){
   $fakeWindow=[pscustomobject]@{IsVisible=$true;ActualWidth=430.0;ActualHeight=279.0;Scale=$scale;Left=-1900.0;Top=120.0}
@@ -497,11 +547,11 @@ if($SelfTest){
   $doubleClickInvokesSwitch=$script:SwitchButtonInvocations-eq 1
  }
  [pscustomobject]@{ScaledBoundsPass=$scaledBoundsPass;InsideEdgeClickKeepsPanel=$insideClickKeepsPanel;SingleClickKeepsPanel=$singleClickKeepsPanel;DoubleClickInvokesSwitch=$doubleClickInvokesSwitch;DpiScale=[Windows.PresentationSource]::FromVisual($script:Detail).CompositionTarget.TransformToDevice.M11}|ConvertTo-Json -Compress
-[pscustomobject]@{AccountsFromApi=@($script:Status.accounts).Count;CardsBuilt=@($stackForTest.Children).Count;LoginExpiredCards=$script:LoginExpiredCardsBuilt;SwitchableCards=$script:SwitchableCardsBuilt;SwitchGestureCards=$script:SwitchGestureCardsBuilt;SwitchButtonCards=$script:SwitchButtonCardsBuilt;SwitchButtonInvocations=$script:SwitchButtonInvocations;UpdateBadgeHidden=$badgeHiddenWithoutUpdate;UpdateBadgeShown=$badgeShownWithUpdate;UpdateBadgeClicks=$badgeClickInvocations;UpdateCards=$script:UpdateCardsBuilt;PanelHeight=[Math]::Round($script:Detail.Height,1);TopmostRestored=$topmostRestored;NoFocusSteal=$noFocusSteal;RuntimeErrors=$Error.Count;Errors=@($Error|ForEach-Object{$_.InvocationInfo.PositionMessage+' :: '+$_.Exception.Message})}|ConvertTo-Json -Compress -Depth 3
+[pscustomobject]@{AccountsFromApi=@($script:Status.accounts).Count;CardsBuilt=@($stackForTest.Children).Count;RefreshKeptWindow=$refreshKeptWindow;RefreshKeptCards=$refreshKeptCards;LoginExpiredCards=$script:LoginExpiredCardsBuilt;SwitchableCards=$script:SwitchableCardsBuilt;SwitchGestureCards=$script:SwitchGestureCardsBuilt;SwitchButtonCards=$script:SwitchButtonCardsBuilt;SwitchButtonInvocations=$script:SwitchButtonInvocations;UpdateBadgeHidden=$badgeHiddenWithoutUpdate;UpdateBadgeShown=$badgeShownWithUpdate;UpdateBadgeClicks=$badgeClickInvocations;UpdateCards=$script:UpdateCardsBuilt;PanelHeight=[Math]::Round($script:Detail.Height,1);TopmostRestored=$topmostRestored;NoFocusSteal=$noFocusSteal;RuntimeErrors=$Error.Count;Errors=@($Error|ForEach-Object{$_.InvocationInfo.PositionMessage+' :: '+$_.Exception.Message})}|ConvertTo-Json -Compress -Depth 3
 Close-Detail
 $Window.Close()
 try{$script:Mutex.ReleaseMutex()}catch{}
-if($Error.Count -gt 0 -or -not$insideClickKeepsPanel -or -not$singleClickKeepsPanel -or -not$doubleClickInvokesSwitch -or -not$topmostRestored -or -not$noFocusSteal -or -not$badgeHiddenWithoutUpdate -or -not$badgeShownWithUpdate -or $badgeClickInvocations -ne 1 -or $script:UpdateCardsBuilt -ne 1){throw 'Widget self-test failed'}
+if($Error.Count -gt 0 -or -not$refreshKeptWindow -or -not$refreshKeptCards -or -not$insideClickKeepsPanel -or -not$singleClickKeepsPanel -or -not$doubleClickInvokesSwitch -or -not$topmostRestored -or -not$noFocusSteal -or -not$badgeHiddenWithoutUpdate -or -not$badgeShownWithUpdate -or $badgeClickInvocations -ne 1 -or $script:UpdateCardsBuilt -ne 1){throw 'Widget self-test failed'}
  exit
 }
 $TopmostTimer=New-Object Windows.Threading.DispatcherTimer
@@ -510,7 +560,7 @@ $TopmostTimer.Add_Tick({Ensure-WidgetTopmost})
 $TopmostTimer.Start()
 $Window.Add_Closed({$TopmostTimer.Stop()})
 $Window.Add_ContentRendered({Ensure-WidgetTopmost})
-$Window.Add_MouseLeftButtonDown({$hadDetail=$null-ne$script:Detail;if($hadDetail){Close-Detail};$start=[System.Windows.Forms.Cursor]::Position;try{$Window.DragMove()}catch{};$end=[System.Windows.Forms.Cursor]::Position;$distance=[Math]::Abs($end.X-$start.X)+[Math]::Abs($end.Y-$start.Y);if($distance-le 3-and-not$hadDetail){Show-Detail;Request-QuotaRefresh}})
+$Window.Add_MouseLeftButtonDown({$hadDetail=$null-ne$script:Detail;if($hadDetail){Close-Detail};$start=[System.Windows.Forms.Cursor]::Position;try{$Window.DragMove()}catch{};$end=[System.Windows.Forms.Cursor]::Position;$distance=[Math]::Abs($end.X-$start.X)+[Math]::Abs($end.Y-$start.Y);if($distance-le 3-and-not$hadDetail){Show-Detail;Request-QuotaRefresh -Auto}})
 $Menu=New-Object Windows.Controls.ContextMenu;$Menu.Placement='Right';$Menu.PlacementTarget=$Window;$Menu.HorizontalOffset=8;$Refresh=New-Object Windows.Controls.MenuItem;$Refresh.Header='立即刷新额度';$script:RefreshMenuItem=$Refresh;$Refresh.Add_Click({Request-QuotaRefresh});$Menu.Items.Add($Refresh)|Out-Null;$CheckUpdate=New-Object Windows.Controls.MenuItem;$CheckUpdate.Header='检查更新…';$CheckUpdate.Add_Click({try{$st=Invoke-RestMethod "http://127.0.0.1:$script:Port/api/update/status?force=1" -TimeoutSec 15;if($st.available){$script:UpdateInfo=$st;Update-UpdateBadge ([pscustomobject]@{version=$script:AppVersion;update=$st});$choice=[Windows.MessageBox]::Show("发现新版本 v$($st.latest)（当前 v$($st.current)）。`n`n现在更新并重启吗？",'检查更新','OKCancel','Question');if($choice-eq[Windows.MessageBoxResult]::OK){Update-Companion -Confirmed}}else{[Windows.MessageBox]::Show("已经是最新版本（v$script:AppVersion）。",'检查更新','OK','Information')|Out-Null}}catch{[Windows.MessageBox]::Show("检查更新失败：`n$(Get-ApiErrorMessage $_)",'Codex Companion','OK','Error')|Out-Null}});$Menu.Items.Add($CheckUpdate)|Out-Null;$WarmCurrent=New-Object Windows.Controls.MenuItem;$WarmCurrent.Header='预热当前账号';$WarmCurrent.Add_Click({$script:Status=Get-Status;$active=@($script:Status.accounts|Where-Object{$_.is_active})|Select-Object -First 1;if($null-ne$active){$shown=if([string]::IsNullOrWhiteSpace([string]$active.display_name)){[string]$active.name}else{[string]$active.display_name};Warmup-WidgetAccount ([string]$active.id) $shown}else{[Windows.MessageBox]::Show('没有找到当前账号。','Codex Companion','OK','Warning')|Out-Null}});$Menu.Items.Add($WarmCurrent)|Out-Null;$Open=New-Object Windows.Controls.MenuItem;$Open.Header='打开完整页面';$Open.Add_Click({Start-Process "http://127.0.0.1:$script:Port/"});$Menu.Items.Add($Open)|Out-Null;$Version=New-Object Windows.Controls.MenuItem;$Version.Header="Codex Companion v$script:AppVersion";$Version.IsEnabled=$false;$script:VersionItem=$Version;$Menu.Items.Add((New-Object Windows.Controls.Separator))|Out-Null;$Menu.Items.Add($Version)|Out-Null;$Exit=New-Object Windows.Controls.MenuItem;$Exit.Header='退出浮窗';$Exit.Add_Click({$Window.Close()});$Menu.Items.Add($Exit)|Out-Null;$Menu.Add_Opened({$script:MenuOpen=$true});$Menu.Add_Closed({$script:MenuOpen=$false});$Window.ContextMenu=$Menu
 $script:RetryItem=$null;$script:RetryToggleBusy=$false
 function Update-RetryMenuItem{
@@ -530,5 +580,7 @@ $script:RetryItem=New-Object Windows.Controls.MenuItem;$script:RetryItem.IsCheck
 $StopMenu=New-Object Windows.Controls.MenuItem;$StopMenu.Header='中止运行中的对话';$StopMenu.Add_SubmenuOpened({$StopMenu.Items.Clear();$status=Get-Status;$running=@(Get-RunningTasks $status);if($running.Count-eq 0){$empty=New-Object Windows.Controls.MenuItem;$empty.Header='当前没有后台运行中的对话';$empty.IsEnabled=$false;$StopMenu.Items.Add($empty)|Out-Null}else{foreach($task in $running){$item=New-Object Windows.Controls.MenuItem;$item.Header="中止：$([string]$task.prompt)";$item.Tag=[string]$task.id;$item.Add_Click({param($sender,$eventArgs)try{Invoke-RestMethod "http://127.0.0.1:$script:Port/api/task/$([uri]::EscapeDataString([string]$sender.Tag))/stop" -Method Post -ContentType 'application/json' -Body '{}' -TimeoutSec 15|Out-Null;[Windows.MessageBox]::Show('已请求中止这个对话。','Codex Companion','OK','Information')|Out-Null}catch{[Windows.MessageBox]::Show("中止失败：`n$(Get-ApiErrorMessage $_)",'Codex Companion','OK','Error')|Out-Null}});$StopMenu.Items.Add($item)|Out-Null}}});$Menu.Items.Add($StopMenu)|Out-Null
 $Shutdown=New-Object Windows.Controls.MenuItem;$Shutdown.Header='退出 Companion（后台与浮窗）';$Shutdown.Add_Click({$choice=[Windows.MessageBox]::Show('确定退出 Companion 后台和浮窗吗？正在运行的后台任务可能中断。','退出 Companion','YesNo','Warning');if($choice-ne[Windows.MessageBoxResult]::Yes){return};try{Invoke-RestMethod "http://127.0.0.1:$script:Port/api/shutdown" -Method Post -ContentType 'application/json' -Body '{}' -TimeoutSec 5|Out-Null}catch{};$Window.Close()});$Menu.Items.Add($Shutdown)|Out-Null
 $OutsideTimer=New-Object Windows.Threading.DispatcherTimer;$OutsideTimer.Interval=[TimeSpan]::FromMilliseconds(60);$script:MouseWasDown=$false;$OutsideTimer.Add_Tick({$isDown=(([CompanionMouse]::GetAsyncKeyState(1)-band 0x8000)-ne 0);if($isDown-and-not$script:MouseWasDown){Handle-OutsidePointerDown ([System.Windows.Forms.Cursor]::Position)};$script:MouseWasDown=$isDown});$OutsideTimer.Start()
-$script:QuotaPollTimer=New-Object Windows.Threading.DispatcherTimer;$script:QuotaPollTimer.Interval=[TimeSpan]::FromMilliseconds(900);$script:QuotaPollTimer.Add_Tick({Poll-QuotaRefresh})
-$Timer=New-Object Windows.Threading.DispatcherTimer;$Timer.Interval=[TimeSpan]::FromSeconds(60);$Timer.Add_Tick({Update-Widget});$Timer.Start();$Warm=New-Object Windows.Threading.DispatcherTimer;$Warm.Interval=[TimeSpan]::FromMilliseconds(800);$script:WarmCount=0;$Warm.Add_Tick({$script:WarmCount++;Update-Widget;if(@($script:Status.accounts).Count-gt 0-or$script:WarmCount-ge 25){$Warm.Stop()}});$Warm.Start();$Window.Add_Closed({Close-Detail;$Timer.Stop();$Warm.Stop();$OutsideTimer.Stop();if($null-ne$script:QuotaPollTimer){$script:QuotaPollTimer.Stop()};try{$script:Mutex.ReleaseMutex()}catch{};[Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvokeShutdown('Normal')});Update-Widget;$Window.Show();Hide-FromTaskSwitcher $Window;[Windows.Threading.Dispatcher]::Run()
+$script:QuotaPollTimer=New-Object Windows.Threading.DispatcherTimer;$script:QuotaPollTimer.Interval=[TimeSpan]::FromMilliseconds(1500);$script:QuotaPollTimer.Add_Tick({Poll-QuotaRefresh})
+# 刷新结果若赶上用户在点面板，先排队，等手停下来 1.2 秒后再补一次更新。
+$script:DetailRefreshTimer=New-Object Windows.Threading.DispatcherTimer;$script:DetailRefreshTimer.Interval=[TimeSpan]::FromMilliseconds(1200);$script:DetailRefreshTimer.Add_Tick({if(-not$script:DetailPendingRefresh-or$null-eq$script:Detail){$script:DetailRefreshTimer.Stop();return};if($script:SwitchInProgress-or$script:MenuOpen-or[DateTime]::UtcNow-lt$script:DetailGuardUntil){return};$script:DetailRefreshTimer.Stop();Refresh-Detail})
+$Timer=New-Object Windows.Threading.DispatcherTimer;$Timer.Interval=[TimeSpan]::FromSeconds(60);$Timer.Add_Tick({Update-Widget});$Timer.Start();$Warm=New-Object Windows.Threading.DispatcherTimer;$Warm.Interval=[TimeSpan]::FromMilliseconds(800);$script:WarmCount=0;$Warm.Add_Tick({$script:WarmCount++;Update-Widget;if(@($script:Status.accounts).Count-gt 0-or$script:WarmCount-ge 25){$Warm.Stop()}});$Warm.Start();$Window.Add_Closed({Close-Detail;$Timer.Stop();$Warm.Stop();$OutsideTimer.Stop();if($null-ne$script:QuotaPollTimer){$script:QuotaPollTimer.Stop()};if($null-ne$script:DetailRefreshTimer){$script:DetailRefreshTimer.Stop()};try{$script:Mutex.ReleaseMutex()}catch{};[Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvokeShutdown('Normal')});Update-Widget;$Window.Show();Hide-FromTaskSwitcher $Window;[Windows.Threading.Dispatcher]::Run()

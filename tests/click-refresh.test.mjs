@@ -84,7 +84,7 @@ test('status exposes refresh progress, and quick refresh keeps the old blocking 
 
 test('every click entry point in the widget really asks the backend for fresh quota', () => {
   assert.match(widget, /Body '\{"quick":true\}'/);
-  assert.match(widget, /\{Show-Detail;Request-QuotaRefresh\}/);
+  assert.match(widget, /\{Show-Detail;Request-QuotaRefresh -Auto\}/);
   assert.match(widget, /\$Refresh\.Add_Click\(\{Request-QuotaRefresh\}\)/);
   assert.match(widget, /\$sender\.Text='↻ 刷新中…';Request-QuotaRefresh/);
   assert.match(widget, /Add_Tick\(\{Poll-QuotaRefresh\}\)/);
