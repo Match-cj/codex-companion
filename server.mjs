@@ -20,6 +20,7 @@ import { contextWarning, contextRatio, formatTokenCount, trimContextLedger } fro
 import { humanError } from './human-error.mjs';
 import { base64Url, decodeJwtPayload, jwtExpiry, oauthPortStatus } from './auth-utils.mjs';
 import { createFeishuInbox, inboxEntryFromEvent } from './feishu-inbox.mjs';
+import { parseFeishuPost, isRichTextMessage } from './feishu-post.mjs';
 import { createNativeUsage } from './native-usage.mjs';
 import { sweepStaleHomes } from './temp-homes.mjs';
 import { classifyQuotaFailure, probeNetwork, networkNoticeDecision, readSystemProxy } from './network-health.mjs';
@@ -32,7 +33,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.51';
+const APP_VERSION = '1.0.52';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -860,7 +861,7 @@ async function handleFeishuControlCommand(text, message) {
   return false;
 }
 
-async function handleFeishuMessage(data) {
+async function handleFeishuMessage(data, { recovered = false } = {}) {
   let replyMessageId = '';
   let selectedThreadId = '';
   try {
@@ -886,26 +887,46 @@ async function handleFeishuMessage(data) {
     if (/^绑定\s+[a-f0-9]{24}$/i.test(incomingText)) return; // Never submit a replayed pairing secret as a task.
     const messageId = String(message.message_id || '');
     const received = Array.isArray(config.feishuReceivedMessageIds) ? config.feishuReceivedMessageIds.map(String) : [];
-    if (messageId && received.includes(messageId)) return;
-    if (messageId) {
+    if (!recovered && messageId && received.includes(messageId)) return;
+    if (!recovered && messageId) {
       config.feishuReceivedMessageIds = [...received, messageId].slice(-200);
       await saveConfig();
     }
     let text = '';
     let input = [];
-    if (message.message_type === 'text') {
+    const msgType = String(message.message_type || '');
+    const isTextLike = msgType === 'text' || isRichTextMessage(msgType);
+    if (msgType === 'text') {
       try { text = String(JSON.parse(message.content || '{}').text || '').trim(); } catch { return; }
       text = text.replace(/@_user_\d+/g, '').trim();
       if (!text) return;
       input = [{ type: 'text', text }];
-    } else if (message.message_type === 'image') {
+    } else if (msgType === 'image') {
       let imageKey = '';
       try { imageKey = String(JSON.parse(message.content || '{}').image_key || '').trim(); } catch { return; }
       const imagePath = await downloadFeishuImage(messageId, imageKey);
       input = [{ type: 'text', text: '请查看并处理我从飞书回复的这张图片。' }, { type: 'localImage', path: imagePath }];
-    } else return;
+    } else if (isRichTextMessage(msgType)) {
+      // One message can carry an @-mention, several screenshots and several
+      // paragraphs. Send all of it to Codex instead of dropping it silently.
+      const parsed = parseFeishuPost(message.content);
+      text = parsed.text;
+      if (!text && !parsed.imageKeys.length) {
+        await sendFeishuAppText('收到了，但这条消息里没有能读出来的文字或图片。请直接发文字或截图。', { replyTo: message.message_id });
+        return;
+      }
+      if (text) input.push({ type: 'text', text });
+      for (const imageKey of parsed.imageKeys) {
+        try { input.push({ type: 'localImage', path: await downloadFeishuImage(messageId, imageKey) }); }
+        catch (error) { console.warn('[feishu post image]', error.message); }
+      }
+      if (!text) input.unshift({ type: 'text', text: '请查看并处理我从飞书回复的这些图片。' });
+    } else {
+      await sendFeishuAppText('这条消息的格式暂时读不了。请直接发文字、截图，或者文字加截图一起发。', { replyTo: message.message_id });
+      return;
+    }
     const chatId = String(message.chat_id || '');
-    if (!config.feishuBoundChatId && message.message_type !== 'text') {
+    if (!config.feishuBoundChatId && !isTextLike) {
       await sendFeishuAppText('请先发送“绑定”，再在 Codex 通知下回复图片。', { replyTo: message.message_id });
       return;
     }
@@ -916,8 +937,8 @@ async function handleFeishuMessage(data) {
       return;
     }
     if (chatId !== config.feishuBoundChatId) return;
-    if (message.message_type === 'text' && typeof handleFeishuControlCommand === 'function' && await handleFeishuControlCommand(text, message)) return;
-    if (message.message_type === 'text' && isQuotaCommand(text)) {
+    if (isTextLike && typeof handleFeishuControlCommand === 'function' && await handleFeishuControlCommand(text, message)) return;
+    if (isTextLike && isQuotaCommand(text)) {
       await sendFeishuAppText(await currentQuotaText(), { replyTo: message.message_id });
       return;
     }
@@ -929,7 +950,7 @@ async function handleFeishuMessage(data) {
       await sendFeishuAppText('无法识别这条消息所属的原 Codex 对话，未转发到其他任务。请从对应任务的结果通知回复，或在本机控制台核对绑定。', { replyTo: message.message_id });
       return;
     }
-    if (message.message_type === 'text' && /^(新话题|重开话题|换个话题|rotate topic)$/i.test(text)) {
+    if (isTextLike && /^(新话题|重开话题|换个话题|rotate topic)$/i.test(text)) {
       await rotateFeishuTopic(threadId);
       await sendFeishuAppText('已为这个 Codex 对话关闭旧话题映射。下一条完成结果会自动创建新的飞书话题，旧话题保留不变。', { replyTo: message.message_id, taskId: threadId });
       return;
@@ -958,7 +979,8 @@ async function handleFeishuMessage(data) {
       } catch (error) { console.warn('[feishu reaction]', error.message); }
       if (!reacted) await sendFeishuAppText('Codex 正在后台处理；本轮结束后会自动重新打开桌面端。', { replyTo: message.message_id, taskId: task.id });
     } else {
-      await sendFeishuAppText(`${message.message_type === 'image' ? '图片已发送' : '已发送'}到原 Codex 对话：${task.prompt || task.id}`, { replyTo: message.message_id, taskId: task.id });
+      const sentLabel = msgType === 'image' ? '图片已发送' : isRichTextMessage(msgType) ? '文字和图片已发送' : '已发送';
+      await sendFeishuAppText(`${sentLabel}到原 Codex 对话：${task.prompt || task.id}`, { replyTo: message.message_id, taskId: task.id });
     }
   } catch (error) {
     console.error('[feishu reply]', error.message);
@@ -1346,11 +1368,62 @@ async function startFeishuLongConnection() {
 // Every incoming message is written to a local file before anything else
 // happens: an AI running on this PC can then read it, without waiting for a
 // Feishu admin to approve an app.
-async function receiveFeishuMessage(data) {
+async function receiveFeishuMessage(data, opts = {}) {
   const entry = inboxEntryFromEvent(data);
   if (entry) await feishuInbox.append(entry).catch(error => console.error('[feishu inbox]', humanError(error)));
-  if (await replyFeishuInbox(data, entry)) return;
-  return handleFeishuMessage(data);
+  if (!opts.recovered && await replyFeishuInbox(data, entry)) return;
+  return handleFeishuMessage(data, opts);
+}
+
+// A message that reached us but produced no reply used to be lost for good:
+// its id was already in the dedupe list, so sending it again was the only fix.
+// On startup we read those ids back from Feishu and replay the newest one, so
+// the user never has to notice or resend anything. Only rich-text (post)
+// messages qualify - those are exactly the ones the old parser dropped.
+async function recoverUnansweredFeishuMessages() {
+  if (!feishuClient || !config.feishuBoundChatId) return;
+  const recent = (Array.isArray(config.feishuReceivedMessageIds) ? config.feishuReceivedMessageIds : []).map(String).slice(-12);
+  const links = config.feishuMessageThreads && typeof config.feishuMessageThreads === 'object' ? config.feishuMessageThreads : {};
+  const seen = new Set((Array.isArray(config.feishuRecoveredMessageIds) ? config.feishuRecoveredMessageIds : []).map(String));
+  const candidates = recent.filter(id => id && !seen.has(id) && !links[id]);
+  if (!candidates.length) return;
+  // Mark everything up front: only the newest replayable message is resent,
+  // and no later restart can replay the same instruction twice.
+  config.feishuRecoveredMessageIds = [...seen, ...candidates].slice(-200);
+  await saveConfig();
+  const allow = (Array.isArray(config.feishuAllowedUserIds) ? config.feishuAllowedUserIds : []).map(String);
+  const cutoff = Date.now() - 2 * 60 * 60 * 1000;
+  for (const id of [...candidates].reverse()) {
+    try {
+      const response = await feishuClient.im.v1.message.get({ path: { message_id: id } });
+      const item = response?.data?.items?.[0];
+      if (!item || response?.code) continue;
+      if (String(item.msg_type || '').toLowerCase() !== 'post') continue;
+      if (String(item.sender?.sender_type || '') !== 'user') continue;
+      const senderId = String(item.sender?.id || item.sender?.sender_id?.open_id || '');
+      if (!allow.includes(senderId) || String(item.chat_id || '') !== String(config.feishuBoundChatId)) continue;
+      const created = Number(item.create_time || 0);
+      if (!created || created < cutoff) continue;
+      const parsed = parseFeishuPost(item.body?.content);
+      if (!parsed.ok || /^(收件箱|消息|最近消息|inbox|绑定|bind)$/i.test(parsed.text.trim())) continue;
+      const data = {
+        sender: { sender_type: 'user', sender_id: { open_id: senderId } },
+        message: {
+          message_id: id,
+          chat_id: String(item.chat_id || ''),
+          root_id: String(item.root_id || ''),
+          parent_id: String(item.parent_id || ''),
+          message_type: 'post',
+          content: String(item.body?.content || '{}'),
+        },
+      };
+      await receiveFeishuMessage(data, { recovered: true });
+      console.log(`[feishu recover] 已自动补发一条没收到回复的图文消息 ${id}`);
+      return;
+    } catch (error) {
+      console.warn('[feishu recover]', humanError(error));
+    }
+  }
 }
 // "收件箱" lets the phone read back what this PC received.
 async function replyFeishuInbox(data, entry) {
@@ -4028,6 +4101,9 @@ async function main() {
   readSystemProxy().then(proxy => { networkHealth = { ...networkHealth, proxy: proxy?.address || '' }; }).catch(() => {});
   startTaskEngine().catch(e => console.error('[task engine]', e.message));
   startFeishuLongConnection().catch(e => console.error('[feishu connection]', e.message));
+  // Older versions silently dropped rich-text (image + text) Feishu messages.
+  // Replay the newest one once after startup so it never has to be resent.
+  setTimeout(() => { recoverUnansweredFeishuMessages().catch(e => console.error('[feishu recover]', e.message)); }, 20000).unref?.();
   startCodexSessionMonitor().catch(e => console.error('[codex session monitor]', e.message));
   startDesktopRetryWatcher(config);
   // A conversation that existed before the monitor started has no new

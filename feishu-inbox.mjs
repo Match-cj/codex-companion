@@ -9,6 +9,7 @@
 // pleasant to read and safe to paste into a chat.
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { parseFeishuPost, postInboxText, isRichTextMessage } from './feishu-post.mjs';
 
 const MAX_ENTRIES = 200;
 
@@ -90,8 +91,11 @@ export function inboxEntryFromEvent(data = {}, now = Date.now()) {
     const content = JSON.parse(message.content || '{}');
     if (type === 'text') text = String(content.text || '').replace(/@_user_\d+/g, '').trim();
     else if (type === 'image') text = '（图片）';
+    else if (isRichTextMessage(type)) text = postInboxText(parseFeishuPost(message.content));
     else text = String(content.text || content.title || '').trim();
-  } catch {}
+  } catch {
+    if (isRichTextMessage(type)) text = postInboxText(parseFeishuPost(message.content));
+  }
   const messageId = String(message.message_id || '');
   // Nothing to read later: a bot echo, or a message with no human content.
   if (!messageId || !text) return null;
