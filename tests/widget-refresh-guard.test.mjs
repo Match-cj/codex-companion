@@ -69,5 +69,5 @@ test('the widget self-test really exercises a completed refresh without reopenin
 test('widget, server and package versions stay aligned', () => {
   assert.ok(server.includes(`const APP_VERSION = '${pkg.version}'`));
   assert.match(widget, new RegExp(`\\$script:AppVersion='${pkg.version.replace(/\./g, '\\.')}'`));
-  assert.equal(pkg.version, '1.0.54');
+  assert.equal(pkg.version, '1.0.55');
 });

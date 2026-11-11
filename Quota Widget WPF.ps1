@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 Add-Type 'using System; using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags); [DllImport("user32.dll", EntryPoint="GetWindowLongW")] public static extern int GetWindowLong(IntPtr hwnd, int index); [DllImport("user32.dll", EntryPoint="SetWindowLongW")] public static extern int SetWindowLong(IntPtr hwnd, int index, int value); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); }'
-$script:Port=$Port; $script:AppVersion='1.0.54'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false; $script:UpdateInfo=$null; $script:Updating=$false; $script:UpdateCardsBuilt=0; $script:UpdateButtonInvocations=0; $script:QuotaRefreshInFlight=$false; $script:QuotaRefreshStartedAt=0; $script:QuotaRefreshDeadline=[DateTime]::UtcNow; $script:QuotaPollTimer=$null; $script:RefreshMenuItem=$null; $script:DetailGuardUntil=[DateTime]::UtcNow; $script:DetailPendingRefresh=$false; $script:DetailRefreshTimer=$null; $script:DetailRefreshLabel=$null; $script:LastAutoRefreshAt=0
+$script:Port=$Port; $script:AppVersion='1.0.55'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false; $script:UpdateInfo=$null; $script:Updating=$false; $script:UpdateCardsBuilt=0; $script:UpdateButtonInvocations=0; $script:QuotaRefreshInFlight=$false; $script:QuotaRefreshStartedAt=0; $script:QuotaRefreshDeadline=[DateTime]::UtcNow; $script:QuotaPollTimer=$null; $script:RefreshMenuItem=$null; $script:DetailGuardUntil=[DateTime]::UtcNow; $script:DetailPendingRefresh=$false; $script:DetailRefreshTimer=$null; $script:DetailRefreshLabel=$null; $script:LastAutoRefreshAt=0
 $mutexName=if($SelfTest){'Global\CodexCompanionQuotaWidget_v5_selftest'}else{'Global\CodexCompanionQuotaWidget_v5'}
 $script:Mutex=New-Object System.Threading.Mutex($false,$mutexName); if(-not $script:Mutex.WaitOne(0,$false)){exit}
 $Transparent=[Windows.Media.Brushes]::Transparent
@@ -384,9 +384,48 @@ function Switch-WidgetAccount($accountId,$accountName){
   [Windows.MessageBox]::Show("账号切换失败：`n$(Get-ApiErrorMessage $_)",'Codex Companion','OK','Error')|Out-Null
  }finally{$script:SwitchInProgress=$false;[Windows.Input.Mouse]::OverrideCursor=$null;Ensure-WidgetTopmost}
 }
+function Format-WindowClock($seconds){try{[DateTimeOffset]::FromUnixTimeSeconds([int64]$seconds).ToLocalTime().ToString('HH:mm')}catch{''}}
+function Get-WindowTooltip($a,$prefix){
+ try{
+  $reset=[int64]$a.usage.($prefix+'_resets_at');if($reset-le 0){return ''}
+  $mins=if($prefix-eq'primary'){300}else{10080}
+  $raw=$a.usage.($prefix+'_window_minutes');if($null-ne$raw-and[int]$raw-gt 0){$mins=[int]$raw}
+  $start=$reset-$mins*60
+  $label=if($prefix-eq'primary'){'5 小时'}else{'周'}
+  return "$label窗口 $(Format-WindowClock $start) 开始 · $(Format-WindowClock $reset) 重置`n固定窗口：期间的请求不会改变重置时间"
+ }catch{return ''}
+}
+# 5 小时窗口是固定窗口：窗口内再发请求也不会提前/推迟重置。窗口正在计时时预热只会白耗额度，直接跳过。
+function Get-WarmupAdvice($a){
+ $advice=[pscustomobject]@{Skip=$false;Text='';Menu='预热 5 小时额度'}
+ if($null-eq$a){return $advice}
+ try{
+  $now=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+  $reset=[int64]0;if($null-ne$a.usage.primary_resets_at){$reset=[int64]$a.usage.primary_resets_at}
+  $mins=300;$rawMins=$a.usage.primary_window_minutes;if($null-ne$rawMins-and[int]$rawMins-gt 0){$mins=[int]$rawMins}
+  $start=$reset-$mins*60
+  $used=-1;if($null-ne$a.usage.primary_used_percent){$used=[int]$a.usage.primary_used_percent}
+  $week=-1;if($null-ne$a.usage.secondary_used_percent){$week=[int]$a.usage.secondary_used_percent}
+  if($week-ge 100){$advice.Skip=$true;$advice.Text='周额度已用完，预热已跳过（没消耗额度）。';$advice.Menu='周额度已用完 · 无法预热';return $advice}
+  if(-not[string]::IsNullOrWhiteSpace([string]$a.usage.error)){$advice.Skip=$true;$advice.Text='额度暂时读不到，预热已跳过；请先刷新额度再试。';$advice.Menu='额度读不到 · 请刷新';return $advice}
+  if($reset-gt$now){
+   $advice.Skip=$true
+   $advice.Text="5 小时窗口 $(Format-WindowClock $start) 开始 · $(Format-WindowClock $reset) 重置。`n预热不能提前重置，已跳过（没消耗额度）。"
+   $advice.Menu="5 小时窗口 $(Format-WindowClock $reset) 重置 · 无需预热"
+   if($used-ge 100){$advice.Text="5 小时额度已用完，$(Format-WindowClock $reset) 重置。`n预热发不出去，已跳过（没消耗额度）。"}
+   return $advice
+  }
+ }catch{}
+ return $advice
+}
 function Warmup-WidgetAccount($accountId,$accountName){
- if($script:WarmupInProgress){return}
- $choice=[Windows.MessageBox]::Show("确定预热【${accountName}】吗？`n`n这会发送一次极小请求，让 5 小时额度窗口从现在开始计时，并消耗极少量额度。",'确认预热额度','YesNo','Information')
+ if($script:WarmupInProgress-or$SelfTest){return}
+ $status=$script:Status;if($null-eq$status){$status=Get-Status}
+ $target=$null
+ if($null-ne$status){$target=@($status.accounts|Where-Object{[string]$_.id-eq[string]$accountId})|Select-Object -First 1}
+ $advice=Get-WarmupAdvice $target
+ if($advice.Skip){[Windows.MessageBox]::Show($advice.Text,'预热已跳过','OK','Information')|Out-Null;return}
+ $choice=[Windows.MessageBox]::Show("确定预热【${accountName}】吗？`n`n只在 5 小时窗口空闲时才有用；会消耗极少量额度，不能提前重置已有窗口。",'确认预热额度','YesNo','Information')
  if($choice-ne[Windows.MessageBoxResult]::Yes){return}
  try{
   $script:WarmupInProgress=$true
@@ -446,13 +485,16 @@ function New-DetailBody($status){
   if($null-ne$five-and$null-ne$week){
    $fiveBox=New-Quota '5h' $five (Get-Countdown $a 'primary') 188
    $weekBox=New-Quota '7d' $week (Get-Countdown $a 'secondary') 188
+   $fiveBox.ToolTip=Get-WindowTooltip $a 'primary';$weekBox.ToolTip=Get-WindowTooltip $a 'secondary'
    [Windows.Controls.Grid]::SetColumn($fiveBox,0);[Windows.Controls.Grid]::SetColumn($weekBox,1)
    $quotaGrid.Children.Add($fiveBox)|Out-Null;$quotaGrid.Children.Add($weekBox)|Out-Null
   }elseif($null-ne$five){
    $fiveBox=New-Quota '5h' $five (Get-Countdown $a 'primary') 390
+   $fiveBox.ToolTip=Get-WindowTooltip $a 'primary'
    [Windows.Controls.Grid]::SetColumnSpan($fiveBox,2);$quotaGrid.Children.Add($fiveBox)|Out-Null
   }elseif($null-ne$week){
    $weekBox=New-Quota '7d' $week (Get-Countdown $a 'secondary') 390
+   $weekBox.ToolTip=Get-WindowTooltip $a 'secondary'
    [Windows.Controls.Grid]::SetColumnSpan($weekBox,2);$quotaGrid.Children.Add($weekBox)|Out-Null
   }
   if($null-ne$five-or$null-ne$week){$content.Children.Add($quotaGrid)|Out-Null}
@@ -464,6 +506,10 @@ function New-DetailBody($status){
   $cardMenu=New-Object Windows.Controls.ContextMenu
   $warmItem=New-Object Windows.Controls.MenuItem;$warmItem.Header='预热 5 小时额度';$warmItem.Tag=@{Id=[string]$a.id;Name=[string]$shownName}
   if($loginExpired){$warmItem.IsEnabled=$false;$warmItem.Header='登录已失效，请先在网页重新登录'}
+  else{
+   $advice=Get-WarmupAdvice $a
+   if($advice.Skip){$warmItem.IsEnabled=$false;$warmItem.Header=$advice.Menu;$warmItem.ToolTip=$advice.Text}
+  }
   $warmItem.Add_Click({param($sender,$eventArgs) Warmup-WidgetAccount ([string]$sender.Tag.Id) ([string]$sender.Tag.Name)})
   $cardMenu.Items.Add($warmItem)|Out-Null;$cardMenu.Add_Opened({$script:MenuOpen=$true});$cardMenu.Add_Closed({$script:MenuOpen=$false});$card.ContextMenu=$cardMenu
   if((-not$a.is_active)-and(-not$loginExpired)){

@@ -23,6 +23,7 @@ import { createFeishuInbox, inboxEntryFromEvent } from './feishu-inbox.mjs';
 import { parseFeishuPost, isRichTextMessage } from './feishu-post.mjs';
 import { stallNoticeDecision } from './stall-notice.mjs';
 import { createNativeUsage } from './native-usage.mjs';
+import { warmupDecision, describeWarmupWindow } from './warmup-policy.mjs';
 import { sweepStaleHomes } from './temp-homes.mjs';
 import { classifyQuotaFailure, probeNetwork, networkNoticeDecision, readSystemProxy } from './network-health.mjs';
 import { validNativeVault, createNativeVaultStore } from './native-vault.mjs';
@@ -34,7 +35,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.54';
+const APP_VERSION = '1.0.55';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -3400,19 +3401,40 @@ async function handle(req, res) {
     }
     if (req.method==='POST'&&u.pathname==='/api/accounts/warmup'){
       if(data.confirm!==true)throw Error('预热会发送一次最小请求并启动额度窗口，请先确认。');
-      const result=await warmupNativeAccount(String(data.id));
-      return send(res,200,{ok:true,...result,message:`${result.name} 已完成最小预热，5 小时窗口已开始计时。`});
+      const id=String(data.id);
+      const account=accounts.find(item=>String(item.id)===id);
+      if(!account)throw Error('没有找到这个账号，请刷新后再试。');
+      const decision=warmupDecision(account.usage,{accountName:account.display_name||account.name});
+      if(decision.action==='skip')return send(res,200,{ok:true,skipped:true,reason:decision.reason,resetAt:decision.resetAt,startedAt:decision.startedAt,message:decision.message});
+      const result=await warmupNativeAccount(id);
+      const refreshed=accounts.find(item=>String(item.id)===id);
+      return send(res,200,{ok:true,...result,message:describeWarmupWindow(refreshed?.usage,{name:result.name})});
     }
     if (req.method==='POST'&&u.pathname==='/api/accounts/warmup-all'){
       if(data.confirm!==true)throw Error('批量预热会让全部可用账号发送一次最小请求，请先确认。');
       const snapshot=[...accounts];
       const results=[];
       for(const account of snapshot){
-        try{results.push({ok:true,...await warmupNativeAccount(String(account.id))});}
-        catch(error){results.push({ok:false,id:String(account.id),name:account.display_name||account.name,error:humanError(error)});}
+        const name=account.display_name||account.name;
+        const decision=warmupDecision(account.usage,{accountName:name});
+        if(decision.action==='skip'){
+          results.push({ok:true,skipped:true,id:String(account.id),name,reason:decision.reason,message:decision.message});
+          continue;
+        }
+        try{
+          const done=await warmupNativeAccount(String(account.id));
+          const refreshed=accounts.find(item=>String(item.id)===String(account.id));
+          results.push({ok:true,...done,message:describeWarmupWindow(refreshed?.usage,{name:done.name})});
+        }
+        catch(error){results.push({ok:false,id:String(account.id),name,error:humanError(error)});}
       }
-      const succeeded=results.filter(item=>item.ok).length;
-      return send(res,200,{ok:succeeded>0,total:results.length,succeeded,failedCount:results.length-succeeded,results,message:`已预热 ${succeeded}/${results.length} 个账号。`});
+      const succeeded=results.filter(item=>item.ok&&!item.skipped).length;
+      const skipped=results.filter(item=>item.skipped).length;
+      const failedCount=results.filter(item=>!item.ok).length;
+      const parts=[`已预热 ${succeeded} 个`];
+      if(skipped)parts.push(`${skipped} 个窗口正在计时，已跳过（没耗额度）`);
+      if(failedCount)parts.push(`${failedCount} 个失败`);
+      return send(res,200,{ok:succeeded>0||skipped>0,total:results.length,succeeded,skipped,failedCount,results,message:`${parts.join('；')}。`});
     }
     if (req.method==='POST'&&u.pathname==='/api/security'){
       if (!isLoopback(req.socket.remoteAddress)) return send(res,403,{error:'安全设置只能在本机修改'});

@@ -1,0 +1,73 @@
+// Codex 5-hour quota windows are fixed: the first request inside a window
+// starts it, and the reset timestamp never moves for later requests in the
+// same window. Warming up an already-running window therefore cannot change
+// the reset time -- it only burns a little quota.
+//
+// Keep this module pure so both the server and its tests can reason about the
+// decision without starting a Codex process.
+
+function clock(seconds, now = Date.now()) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '';
+  const date = new Date(seconds * 1000);
+  return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
+function numberOrNull(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+export function windowStart(usage) {
+  const resetAt = numberOrNull(usage?.primary_resets_at);
+  if (!resetAt) return 0;
+  const minutes = numberOrNull(usage?.primary_window_minutes) || 300;
+  return resetAt - minutes * 60;
+}
+
+/**
+ * Decide whether a warm-up is worth sending at all.
+ * Returns { action: 'allow' | 'skip', reason, resetAt, startedAt, message }.
+ */
+export function warmupDecision(usage, { now = Date.now(), accountName = '' } = {}) {
+  const nowSec = Math.floor(now / 1000);
+  const resetAt = numberOrNull(usage?.primary_resets_at) || 0;
+  const startedAt = windowStart(usage);
+  const running = resetAt > nowSec + 30;
+  const fiveHourUsed = numberOrNull(usage?.primary_used_percent);
+  const weeklyUsed = numberOrNull(usage?.secondary_used_percent);
+  const who = accountName ? `【${accountName}】` : '';
+  const base = { resetAt, startedAt };
+
+  if (Number.isFinite(weeklyUsed) && weeklyUsed >= 100) {
+    return { ...base, action: 'skip', reason: 'weekly_exhausted', message: `${who}周额度已用完，预热已跳过（没消耗额度）。` };
+  }
+  if (usage && typeof usage.error === 'string' && usage.error.trim()) {
+    return { ...base, action: 'skip', reason: 'usage_error', message: `${who}额度暂时读不到，预热已跳过；请先刷新额度再试。` };
+  }
+  if (running && Number.isFinite(fiveHourUsed) && fiveHourUsed >= 100) {
+    return { ...base, action: 'skip', reason: 'five_hour_exhausted', message: `${who}5 小时额度已用完，${clock(resetAt, now)} 重置。预热发不出去，已跳过（没消耗额度）。` };
+  }
+  if (running) {
+    return {
+      ...base,
+      action: 'skip',
+      reason: 'window_running',
+      message: `${who}5 小时窗口 ${clock(startedAt, now)} 开始 · ${clock(resetAt, now)} 重置。\n预热不能提前重置，已跳过（没消耗额度）。`,
+    };
+  }
+  return {
+    ...base,
+    action: 'allow',
+    reason: resetAt ? 'window_expired' : 'no_window',
+    message: `${who}当前没有进行中的 5 小时窗口，预热会启动新窗口。`,
+  };
+}
+
+/** Truthful feedback after a real warm-up, using the freshly read window. */
+export function describeWarmupWindow(usage, { now = Date.now(), name = '' } = {}) {
+  const resetAt = numberOrNull(usage?.primary_resets_at) || 0;
+  const who = name ? `${name} ` : '';
+  if (!resetAt) return `${who}已发送最小预热请求；额度窗口时间还没读回来，稍后会自动刷新。`;
+  const startedAt = windowStart(usage);
+  return `${who}已发送最小请求。\n5 小时窗口 ${clock(startedAt, now)} 开始 · ${clock(resetAt, now)} 重置（固定窗口，不会因预热提前）。`;
+}
