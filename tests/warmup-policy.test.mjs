@@ -25,6 +25,18 @@ test('a running 5-hour window is never warmed up again', () => {
   assert.match(decision.message, /设计二组/);
 });
 
+test('a full quota with a stale future reset is not skipped -- clicking 预热 must do something', () => {
+  const full = { ...runningWindow, primary_used_percent: 0 };
+  const decision = warmupDecision(full, { now, accountName: '品牌组' });
+  assert.equal(decision.action, 'allow');
+  assert.equal(decision.reason, 'window_running_idle');
+  assert.match(decision.message, /额度是满的/);
+  assert.match(decision.message, /核对/);
+  assert.match(decision.message, /品牌组/);
+  const unknown = { ...runningWindow, primary_used_percent: undefined };
+  assert.equal(warmupDecision(unknown, { now }).action, 'allow');
+});
+
 test('exhausted 5-hour quota, exhausted weekly quota and unreadable usage are skipped too', () => {
   assert.equal(warmupDecision({ ...runningWindow, primary_used_percent: 100 }, { now }).reason, 'five_hour_exhausted');
   assert.equal(warmupDecision({ ...runningWindow, secondary_used_percent: 100 }, { now }).reason, 'weekly_exhausted');
@@ -59,38 +71,47 @@ test('window start and feedback use the real reset timestamp', () => {
   assert.match(describeWarmupWindow({}, { now }), /窗口时间还没读回来/);
 });
 
-test('both server warm-up endpoints consult the policy and never claim to reset a running window', () => {
+test('both server warm-up endpoints log the decision and verify the window afterwards', () => {
   const server = fs.readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
-  assert.match(server, /import \{ warmupDecision, describeWarmupWindow \} from '\.\/warmup-policy\.mjs'/);
-  assert.match(server, /warmupDecision\(account\.usage/);
-  assert.match(server, /if\(decision\.action==='skip'\)return send\(res,200,\{ok:true,skipped:true/);
-  assert.match(server, /const decision=warmupDecision\(account\.usage,\{accountName:name\}\)/);
+  assert.match(server, /import \{ warmupDecision \} from '\.\/warmup-policy\.mjs'/);
+  assert.match(server, /import \{ verifyWarmupWindow, isTransientWarmupError \} from '\.\/warmup-verify\.mjs'/);
+  assert.match(server, /const warmupLogPath = path\.join\(appDir, 'warmup\.log'\)/);
+  assert.match(server, /const before=\{\.\.\.\(account\.usage\|\|\{\}\)\}/);
+  assert.match(server, /verifyWarmupWindow\(before,after/);
+  assert.match(server, /appendWarmupLog\(`收到预热请求/);
+  assert.match(server, /ok:verdict\.started/);
+  assert.match(server, /warmupLogPath,/);
   assert.doesNotMatch(server, /5 小时窗口已开始计时/);
 });
 
-test('widget disables pointless warm-ups and explains the fixed window on hover', () => {
+test('widget lets a full-quota account warm up even with a stale reset timestamp', () => {
   const widget = fs.readFileSync(new URL('../Quota Widget WPF.ps1', import.meta.url), 'utf8');
   assert.match(widget, /function Get-WarmupAdvice/);
   assert.match(widget, /function Get-WindowTooltip/);
   assert.match(widget, /\$warmItem\.IsEnabled=\$false;\$warmItem\.Header=\$advice\.Menu/);
   assert.match(widget, /\$fiveBox\.ToolTip=Get-WindowTooltip \$a 'primary'/);
   assert.match(widget, /if\(\$advice\.Skip\)\{\[Windows\.MessageBox\]::Show\(\$advice\.Text/);
+  assert.match(widget, /if\(\$used-le 0\)/);
+  assert.match(widget, /额度满格 · 点预热核对窗口/);
+  assert.match(widget, /-TimeoutSec 210/);
+  assert.match(widget, /\$result\.ok-eq\$false/);
+  assert.match(widget, /预热没有成功/);
   assert.doesNotMatch(widget, /让 5 小时额度窗口从现在开始计时/);
-  assert.match(widget, /固定窗口：期间的请求不会改变重置时间/);
 });
 
-test('dashboard no longer promises to restart a running window', () => {
+test('dashboard states the verified result and the log path', () => {
   const dashboard = fs.readFileSync(new URL('../dashboard.html', import.meta.url), 'utf8');
   assert.doesNotMatch(dashboard, /从现在开始计时/);
-  assert.match(dashboard, /窗口计时中或额度耗尽的账号自动跳过/);
-  assert.match(dashboard, /只在窗口空闲时有效；计时中会自动跳过，不耗额度/);
+  assert.match(dashboard, /额度满格但还显示旧窗口时间时也能点/);
+  assert.match(dashboard, /CodexCompanion\\warmup\.log/);
+  assert.match(dashboard, /result\.ok===false/);
 });
 
 test('widget, server and package versions stay aligned', () => {
   const server = fs.readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
   const widget = fs.readFileSync(new URL('../Quota Widget WPF.ps1', import.meta.url), 'utf8');
   const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-  assert.equal(pkg.version, '1.0.56');
-  assert.match(server, /const APP_VERSION = '1\.0\.56'/);
-  assert.match(widget, /\$script:AppVersion='1\.0\.56'/);
+  assert.equal(pkg.version, '1.0.57');
+  assert.match(server, /const APP_VERSION = '1\.0\.57'/);
+  assert.match(widget, /\$script:AppVersion='1\.0\.57'/);
 });

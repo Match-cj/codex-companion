@@ -23,7 +23,8 @@ import { createFeishuInbox, inboxEntryFromEvent } from './feishu-inbox.mjs';
 import { parseFeishuPost, isRichTextMessage } from './feishu-post.mjs';
 import { stallNoticeDecision } from './stall-notice.mjs';
 import { createNativeUsage } from './native-usage.mjs';
-import { warmupDecision, describeWarmupWindow } from './warmup-policy.mjs';
+import { warmupDecision } from './warmup-policy.mjs';
+import { verifyWarmupWindow, isTransientWarmupError } from './warmup-verify.mjs';
 import { updateFailureRecord, updateRetryDecision, updateLogLine, trimUpdateLog, UPDATE_LOG_MAX_BYTES } from './update-diagnostics.mjs';
 import { sweepStaleHomes } from './temp-homes.mjs';
 import { classifyQuotaFailure, probeNetwork, networkNoticeDecision, readSystemProxy } from './network-health.mjs';
@@ -36,7 +37,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.56';
+const APP_VERSION = '1.0.57';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -3254,6 +3255,7 @@ async function handle(req, res) {
       const updateWritable = await installDirWritableCached();
       return send(res,200,{
         version:APP_VERSION,
+        warmupLogPath,
         taskEngineReady:!!codex?.proc,
         codexSessionMonitorReady: codexSessionWatcherReady,
         taskEngineError,
@@ -3410,37 +3412,63 @@ async function handle(req, res) {
       const id=String(data.id);
       const account=accounts.find(item=>String(item.id)===id);
       if(!account)throw Error('没有找到这个账号，请刷新后再试。');
-      const decision=warmupDecision(account.usage,{accountName:account.display_name||account.name});
-      if(decision.action==='skip')return send(res,200,{ok:true,skipped:true,reason:decision.reason,resetAt:decision.resetAt,startedAt:decision.startedAt,message:decision.message});
-      const result=await warmupNativeAccount(id);
-      const refreshed=accounts.find(item=>String(item.id)===id);
-      return send(res,200,{ok:true,...result,message:describeWarmupWindow(refreshed?.usage,{name:result.name})});
+      const name=account.display_name||account.name||id;
+      const before={...(account.usage||{})};
+      const decision=warmupDecision(before,{accountName:name});
+      await appendWarmupLog(`收到预热请求：${name} · 5 小时已用 ${before.primary_used_percent??'?'}% · 周已用 ${before.secondary_used_percent??'?'}% · 重置 ${fmtWarmupClock(before.primary_resets_at)} · 判定 ${decision.action}/${decision.reason}`);
+      if(decision.action==='skip'){
+        await appendWarmupLog(`已跳过 ${name}：${decision.message}`);
+        return send(res,200,{ok:true,skipped:true,reason:decision.reason,resetAt:decision.resetAt,startedAt:decision.startedAt,message:decision.message,logPath:warmupLogPath});
+      }
+      try{
+        const result=await warmupNativeAccount(id);
+        const refreshed=accounts.find(item=>String(item.id)===id);
+        const after=refreshed?.usage||{};
+        const verdict=verifyWarmupWindow(before,after,{name:result.name||name});
+        await appendWarmupLog(`${name} 请求完成：重置 ${fmtWarmupClock(before.primary_resets_at)} -> ${fmtWarmupClock(after.primary_resets_at)} · ${verdict.started?'窗口已启动':'窗口未启动'}/${verdict.reason}`,verdict.started?'INFO':'WARN');
+        return send(res,200,{ok:verdict.started,started:verdict.started,skipped:false,...result,reason:verdict.reason,window:{resetAt:verdict.resetAt,startedAt:verdict.startedAt,beforeResetAt:verdict.beforeResetAt,afterResetAt:verdict.afterResetAt},message:verdict.message,logPath:warmupLogPath});
+      }catch(error){
+        const reason=humanError(error);
+        const hint=isTransientWarmupError(error)?'这像是网络或超时问题，检查 VPN / 网络后再点一次即可。':'';
+        await appendWarmupLog(`${name} 预热失败：${reason}`,'ERROR');
+        return send(res,200,{ok:false,skipped:false,error:reason,logPath:warmupLogPath,message:`【${name}】预热没成功：${reason}\n这次没有启动 5 小时窗口，也没有提前重置。${hint}\n原因已记入 ${warmupLogPath}`});
+      }
     }
     if (req.method==='POST'&&u.pathname==='/api/accounts/warmup-all'){
       if(data.confirm!==true)throw Error('批量预热会让全部可用账号发送一次最小请求，请先确认。');
       const snapshot=[...accounts];
       const results=[];
+      await appendWarmupLog(`收到批量预热请求：${snapshot.length} 个账号`);
       for(const account of snapshot){
         const name=account.display_name||account.name;
-        const decision=warmupDecision(account.usage,{accountName:name});
+        const before={...(account.usage||{})};
+        const decision=warmupDecision(before,{accountName:name});
         if(decision.action==='skip'){
+          await appendWarmupLog(`跳过 ${name}：${decision.reason}`);
           results.push({ok:true,skipped:true,id:String(account.id),name,reason:decision.reason,message:decision.message});
           continue;
         }
         try{
           const done=await warmupNativeAccount(String(account.id));
           const refreshed=accounts.find(item=>String(item.id)===String(account.id));
-          results.push({ok:true,...done,message:describeWarmupWindow(refreshed?.usage,{name:done.name})});
+          const verdict=verifyWarmupWindow(before,refreshed?.usage||{},{name:done.name||name});
+          await appendWarmupLog(`${name}：重置 ${fmtWarmupClock(before.primary_resets_at)} -> ${fmtWarmupClock(refreshed?.usage?.primary_resets_at)} · ${verdict.started?'窗口已启动':'窗口未启动'}/${verdict.reason}`,verdict.started?'INFO':'WARN');
+          results.push({ok:verdict.started,skipped:false,...done,reason:verdict.reason,message:verdict.message});
         }
-        catch(error){results.push({ok:false,id:String(account.id),name,error:humanError(error)});}
+        catch(error){
+          await appendWarmupLog(`${name} 预热失败：${humanError(error)}`,'ERROR');
+          results.push({ok:false,id:String(account.id),name,error:humanError(error),message:`${name} 预热没成功：${humanError(error)}`});
+        }
       }
       const succeeded=results.filter(item=>item.ok&&!item.skipped).length;
       const skipped=results.filter(item=>item.skipped).length;
+      const notStarted=results.filter(item=>item.ok===false&&!item.error).length;
       const failedCount=results.filter(item=>!item.ok).length;
-      const parts=[`已预热 ${succeeded} 个`];
+      const parts=[`已启动 ${succeeded} 个`];
       if(skipped)parts.push(`${skipped} 个窗口正在计时，已跳过（没耗额度）`);
-      if(failedCount)parts.push(`${failedCount} 个失败`);
-      return send(res,200,{ok:succeeded>0||skipped>0,total:results.length,succeeded,skipped,failedCount,results,message:`${parts.join('；')}。`});
+      if(notStarted)parts.push(`${notStarted} 个请求发了但窗口没启动`);
+      if(failedCount-notStarted>0)parts.push(`${failedCount-notStarted} 个失败`);
+      return send(res,200,{ok:failedCount===0,total:results.length,succeeded,skipped,failedCount,results,logPath:warmupLogPath,message:`${parts.join('；')}。详情见 ${warmupLogPath}`});
     }
     if (req.method==='POST'&&u.pathname==='/api/security'){
       if (!isLoopback(req.socket.remoteAddress)) return send(res,403,{error:'安全设置只能在本机修改'});
@@ -3740,6 +3768,25 @@ async function appendUpdateLog(message, level = 'INFO') {
     }
   } catch {}
 }
+// 预热失败以前同样只落在会被覆盖的 stdout/stderr 里，事后根本查不到「点了
+// 为什么没反应」。单独留一份追加日志：决策、请求前后窗口时间、结果全记下。
+const warmupLogPath = path.join(appDir, 'warmup.log');
+function fmtWarmupClock(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value <= 0) return '无';
+  return new Date(value * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+}
+async function appendWarmupLog(message, level = 'INFO') {
+  try {
+    await fs.mkdir(appDir, { recursive: true });
+    await fs.appendFile(warmupLogPath, updateLogLine(Date.now(), level, message), 'utf8');
+    const stat = await fs.stat(warmupLogPath).catch(() => null);
+    if (stat && stat.size > UPDATE_LOG_MAX_BYTES * 1.5) {
+      await fs.writeFile(warmupLogPath, trimUpdateLog(await fs.readFile(warmupLogPath, 'utf8'), UPDATE_LOG_MAX_BYTES), 'utf8');
+    }
+  } catch {}
+}
+
 async function loadUpdateFailure() {
   try { return JSON.parse(await fs.readFile(updateFailurePath, 'utf8')); } catch { return null; }
 }

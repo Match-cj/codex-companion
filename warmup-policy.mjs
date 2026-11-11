@@ -49,6 +49,19 @@ export function warmupDecision(usage, { now = Date.now(), accountName = '' } = {
   if (running && Number.isFinite(fiveHourUsed) && fiveHourUsed >= 100) {
     return { ...base, action: 'skip', reason: 'five_hour_exhausted', message: `${who}5 小时额度已用完，${clock(resetAt, now)} 重置。预热发不出去，已跳过（没消耗额度）。` };
   }
+  // A full quota with a future reset timestamp is contradictory: an idle
+  // account has no countdown at all, so that timestamp is a leftover from an
+  // older window (or the API is still showing a stale value). Do NOT skip here
+  // -- this is exactly the case where the user clicked 预热 on a fresh account
+  // and nothing happened. Send the request and verify the window afterwards.
+  if (running && !(Number.isFinite(fiveHourUsed) && fiveHourUsed > 0)) {
+    return {
+      ...base,
+      action: 'allow',
+      reason: 'window_running_idle',
+      message: `${who}额度是满的，但界面上还留着一个旧的窗口时间（${clock(resetAt, now)} 重置）。空账号本来不倒计时，所以这次会真的发一次最小请求，并核对 5 小时窗口有没有从现在开始。`,
+    };
+  }
   if (running) {
     return {
       ...base,

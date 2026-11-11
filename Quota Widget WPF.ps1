@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 Add-Type 'using System; using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags); [DllImport("user32.dll", EntryPoint="GetWindowLongW")] public static extern int GetWindowLong(IntPtr hwnd, int index); [DllImport("user32.dll", EntryPoint="SetWindowLongW")] public static extern int SetWindowLong(IntPtr hwnd, int index, int value); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); }'
-$script:Port=$Port; $script:AppVersion='1.0.56'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false; $script:UpdateInfo=$null; $script:Updating=$false; $script:UpdateCardsBuilt=0; $script:UpdateButtonInvocations=0; $script:QuotaRefreshInFlight=$false; $script:QuotaRefreshStartedAt=0; $script:QuotaRefreshDeadline=[DateTime]::UtcNow; $script:QuotaPollTimer=$null; $script:RefreshMenuItem=$null; $script:DetailGuardUntil=[DateTime]::UtcNow; $script:DetailPendingRefresh=$false; $script:DetailRefreshTimer=$null; $script:DetailRefreshLabel=$null; $script:LastAutoRefreshAt=0
+$script:Port=$Port; $script:AppVersion='1.0.57'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false; $script:UpdateInfo=$null; $script:Updating=$false; $script:UpdateCardsBuilt=0; $script:UpdateButtonInvocations=0; $script:QuotaRefreshInFlight=$false; $script:QuotaRefreshStartedAt=0; $script:QuotaRefreshDeadline=[DateTime]::UtcNow; $script:QuotaPollTimer=$null; $script:RefreshMenuItem=$null; $script:DetailGuardUntil=[DateTime]::UtcNow; $script:DetailPendingRefresh=$false; $script:DetailRefreshTimer=$null; $script:DetailRefreshLabel=$null; $script:LastAutoRefreshAt=0
 $mutexName=if($SelfTest){'Global\CodexCompanionQuotaWidget_v5_selftest'}else{'Global\CodexCompanionQuotaWidget_v5'}
 $script:Mutex=New-Object System.Threading.Mutex($false,$mutexName); if(-not $script:Mutex.WaitOne(0,$false)){exit}
 $Transparent=[Windows.Media.Brushes]::Transparent
@@ -422,6 +422,14 @@ function Get-WarmupAdvice($a){
   if($week-ge 100){$advice.Skip=$true;$advice.Text='周额度已用完，预热已跳过（没消耗额度）。';$advice.Menu='周额度已用完 · 无法预热';return $advice}
   if(-not[string]::IsNullOrWhiteSpace([string]$a.usage.error)){$advice.Skip=$true;$advice.Text='额度暂时读不到，预热已跳过；请先刷新额度再试。';$advice.Menu='额度读不到 · 请刷新';return $advice}
   if($reset-gt$now){
+   # 额度满格却还显示一个将来的重置时间＝上个窗口留下的旧值。空账号本来不倒计时，
+   # 这种情况绝不能置灰跳过，否则用户点预热就像「没生效」（2026-11-11 08:40 实测）。
+   if($used-le 0){
+    $advice.Skip=$false
+    $advice.Text="额度是满的，但界面上还留着一个旧的窗口时间（$(Format-WindowClock $reset) 重置）。`n空账号本来不倒计时；点预热会真的发一次最小请求，并核对窗口有没有从现在开始。"
+    $advice.Menu='额度满格 · 点预热核对窗口'
+    return $advice
+   }
    $advice.Skip=$true
    $advice.Text="5 小时窗口 $(Format-WindowClock $start) 开始 · $(Format-WindowClock $reset) 重置。`n预热不能提前重置，已跳过（没消耗额度）。"
    $advice.Menu="5 小时窗口 $(Format-WindowClock $reset) 重置 · 无需预热"
@@ -441,17 +449,24 @@ function Warmup-WidgetAccount($accountId,$accountName){
  if($null-ne$status){$target=@($status.accounts|Where-Object{[string]$_.id-eq[string]$accountId})|Select-Object -First 1}
  $advice=Get-WarmupAdvice $target
  if($advice.Skip){[Windows.MessageBox]::Show($advice.Text,'预热已跳过','OK','Information')|Out-Null;return}
- $choice=[Windows.MessageBox]::Show("确定预热【${accountName}】吗？`n`n现在没有在计时的 5 小时窗口：不用就一直不开始，用一次才从这次请求开始倒数 5 小时。`n会消耗极少量额度；窗口一旦开始，重置时间就固定了。",'确认预热额度','YesNo','Information')
+ $choice=[Windows.MessageBox]::Show("确定预热【${accountName}】吗？`n`n$($advice.Text)`n`n会消耗极少量额度；预热后会核对 5 小时窗口有没有真的从现在开始，不会假装成功。",'确认预热额度','YesNo','Information')
  if($choice-ne[Windows.MessageBoxResult]::Yes){return}
  try{
   $script:WarmupInProgress=$true
   [Windows.Input.Mouse]::OverrideCursor=[Windows.Input.Cursors]::Wait
   $payload=@{id=$accountId;confirm=$true}|ConvertTo-Json -Compress
-  $result=Invoke-RestMethod "http://127.0.0.1:$script:Port/api/accounts/warmup" -Method Post -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($payload)) -TimeoutSec 120
+  # 后台最长要等 Codex 210 秒；旧版 120 秒就超时，看起来就是「点了没反应」。
+  $result=Invoke-RestMethod "http://127.0.0.1:$script:Port/api/accounts/warmup" -Method Post -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($payload)) -TimeoutSec 210
   Update-Widget
-  [Windows.MessageBox]::Show([string]$result.message,'Codex Companion','OK','Information')|Out-Null
+  $msg=[string]$result.message
+  if($null-ne$result.logPath-and$result.ok-ne$true){$msg="$msg`n`n日志：$($result.logPath)"}
+  if($result.ok-eq$false){[Windows.MessageBox]::Show($msg,'预热没有成功','OK','Error')|Out-Null}
+  elseif($result.skipped-eq$true){[Windows.MessageBox]::Show($msg,'预热已跳过','OK','Information')|Out-Null}
+  else{[Windows.MessageBox]::Show($msg,'预热成功','OK','Information')|Out-Null}
  }catch{
-  [Windows.MessageBox]::Show("额度预热失败：`n$(Get-ApiErrorMessage $_)",'Codex Companion','OK','Error')|Out-Null
+  $log='';if($null-ne$script:Status-and$script:Status.PSObject.Properties['warmupLogPath']){$log=[string]$script:Status.warmupLogPath}
+  $extra=if($log){"`n`n日志：$log"}else{''}
+  [Windows.MessageBox]::Show("额度预热失败：`n$(Get-ApiErrorMessage $_)$extra",'Codex Companion','OK','Error')|Out-Null
  }finally{$script:WarmupInProgress=$false;[Windows.Input.Mouse]::OverrideCursor=$null}
 }
 function New-DetailBody($status){

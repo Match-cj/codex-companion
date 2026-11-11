@@ -92,8 +92,30 @@ try {
     if (-not $vendor) { throw '下载内容中没有 Windows x64 Codex CLI。' }
     Copy-Item -LiteralPath $vendor -Destination (Join-Path $runtimeRoot 'codex') -Recurse
 
-    Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/nodejs/node/v$((& $node --version).TrimStart('v'))/LICENSE" -OutFile (Join-Path $payloadRoot 'NODE-LICENSE.txt')
-    Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/openai/codex/main/LICENSE' -OutFile (Join-Path $payloadRoot 'CODEX-LICENSE.txt')
+    # 第三方许可文本仅用于安装包合规展示，缺失不影响运行。优先从本地已下载的
+    # 依赖复制，网络不可达时容错跳过，不再因 GitHub raw 超时中断整个构建。
+    function Copy-License($sourcePaths, $fallbackUrl, $destPath) {
+        foreach ($src in $sourcePaths) {
+            if ($src -and (Test-Path -LiteralPath $src)) {
+                Copy-Item -LiteralPath $src -Destination $destPath -Force
+                return $true
+            }
+        }
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri $fallbackUrl -OutFile $destPath -TimeoutSec 20 -ErrorAction Stop
+            return $true
+        } catch {
+            Write-Warning ("无法获取许可文本 $destPath（不影响安装）：$($_.Exception.Message)")
+            return $false
+        }
+    }
+    $nodeInstallDir = Split-Path (Get-Command node.exe -ErrorAction Stop).Source -Parent
+    $codexLicenseCandidates = @(
+        (Join-Path $depsRoot 'node_modules\@openai\codex\LICENSE'),
+        (Join-Path $depsRoot 'node_modules\@openai\codex\LICENSE.md')
+    )
+    Copy-License @((Join-Path $nodeInstallDir 'LICENSE'), (Join-Path $nodeInstallDir 'LICENSE.md')) "https://raw.githubusercontent.com/nodejs/node/v$((& $node --version).TrimStart('v'))/LICENSE" (Join-Path $payloadRoot 'NODE-LICENSE.txt') | Out-Null
+    Copy-License $codexLicenseCandidates 'https://raw.githubusercontent.com/openai/codex/main/LICENSE' (Join-Path $payloadRoot 'CODEX-LICENSE.txt') | Out-Null
 
     $manifestFiles = @(Get-ChildItem -LiteralPath $payloadRoot -Recurse -File | Sort-Object FullName | ForEach-Object {
         $relativePath = $_.FullName.Substring($payloadRoot.Length).TrimStart([IO.Path]::DirectorySeparatorChar).Replace('\', '/')
