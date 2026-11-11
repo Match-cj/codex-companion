@@ -1,7 +1,9 @@
-// Codex 5-hour quota windows are fixed: the first request inside a window
-// starts it, and the reset timestamp never moves for later requests in the
-// same window. Warming up an already-running window therefore cannot change
-// the reset time -- it only burns a little quota.
+// Codex 5-hour quota windows are anchored to the first request, not to the
+// clock: while no window is open nothing is counting down, and the first
+// request starts a fresh 5-hour window. Once it is running the reset timestamp
+// never moves for later requests -- so warming up an already-running window
+// cannot change the reset time, it only burns a little quota. That is the only
+// case where a warm-up is pointless; on an idle account it starts the window.
 //
 // Keep this module pure so both the server and its tests can reason about the
 // decision without starting a Codex process.
@@ -59,7 +61,7 @@ export function warmupDecision(usage, { now = Date.now(), accountName = '' } = {
     ...base,
     action: 'allow',
     reason: resetAt ? 'window_expired' : 'no_window',
-    message: `${who}当前没有进行中的 5 小时窗口，预热会启动新窗口。`,
+    message: `${who}现在没有在计时的 5 小时窗口：不用就一直不开始，用一次才从这次请求开始倒数 5 小时。预热会启动新窗口。`,
   };
 }
 
@@ -69,5 +71,5 @@ export function describeWarmupWindow(usage, { now = Date.now(), name = '' } = {}
   const who = name ? `${name} ` : '';
   if (!resetAt) return `${who}已发送最小预热请求；额度窗口时间还没读回来，稍后会自动刷新。`;
   const startedAt = windowStart(usage);
-  return `${who}已发送最小请求。\n5 小时窗口 ${clock(startedAt, now)} 开始 · ${clock(resetAt, now)} 重置（固定窗口，不会因预热提前）。`;
+  return `${who}已发送最小请求。\n5 小时窗口 ${clock(startedAt, now)} 开始 · ${clock(resetAt, now)} 重置（从这次请求开始计时，不会因预热提前）。`;
 }

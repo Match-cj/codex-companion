@@ -102,6 +102,9 @@ export function pickPatchAsset(release) {
     return {
       name: asset.name,
       url: asset.browser_download_url,
+      // api.github.com 常常比 release 下载域名好连；带 accept 头可直接取到
+      // 二进制，作为「下载域名连不上」时的备用通道。
+      apiUrl: String(asset.url || ''),
       size: Number(asset.size) || 0,
       version: normalizeVersion(match[1]),
     };
@@ -157,7 +160,7 @@ export function summarizeRelease(release, currentVersion) {
     publishedAt: release?.published_at || null,
     htmlUrl: release?.html_url || null,
     patch: patch && available && compareVersions(patch.version, currentVersion) > 0
-      ? { name: patch.name, url: patch.url, size: patch.size, sha256: readPatchSha(release?.body) }
+      ? { name: patch.name, url: patch.url, apiUrl: patch.apiUrl || '', size: patch.size, sha256: readPatchSha(release?.body) }
       : null,
     requiresFullInstaller: available && !(patch && compareVersions(patch.version, currentVersion) > 0),
   };

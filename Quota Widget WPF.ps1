@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 Add-Type 'using System; using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags); [DllImport("user32.dll", EntryPoint="GetWindowLongW")] public static extern int GetWindowLong(IntPtr hwnd, int index); [DllImport("user32.dll", EntryPoint="SetWindowLongW")] public static extern int SetWindowLong(IntPtr hwnd, int index, int value); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); }'
-$script:Port=$Port; $script:AppVersion='1.0.55'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false; $script:UpdateInfo=$null; $script:Updating=$false; $script:UpdateCardsBuilt=0; $script:UpdateButtonInvocations=0; $script:QuotaRefreshInFlight=$false; $script:QuotaRefreshStartedAt=0; $script:QuotaRefreshDeadline=[DateTime]::UtcNow; $script:QuotaPollTimer=$null; $script:RefreshMenuItem=$null; $script:DetailGuardUntil=[DateTime]::UtcNow; $script:DetailPendingRefresh=$false; $script:DetailRefreshTimer=$null; $script:DetailRefreshLabel=$null; $script:LastAutoRefreshAt=0
+$script:Port=$Port; $script:AppVersion='1.0.56'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false; $script:UpdateInfo=$null; $script:Updating=$false; $script:UpdateCardsBuilt=0; $script:UpdateButtonInvocations=0; $script:QuotaRefreshInFlight=$false; $script:QuotaRefreshStartedAt=0; $script:QuotaRefreshDeadline=[DateTime]::UtcNow; $script:QuotaPollTimer=$null; $script:RefreshMenuItem=$null; $script:DetailGuardUntil=[DateTime]::UtcNow; $script:DetailPendingRefresh=$false; $script:DetailRefreshTimer=$null; $script:DetailRefreshLabel=$null; $script:LastAutoRefreshAt=0
 $mutexName=if($SelfTest){'Global\CodexCompanionQuotaWidget_v5_selftest'}else{'Global\CodexCompanionQuotaWidget_v5'}
 $script:Mutex=New-Object System.Threading.Mutex($false,$mutexName); if(-not $script:Mutex.WaitOne(0,$false)){exit}
 $Transparent=[Windows.Media.Brushes]::Transparent
@@ -177,6 +177,10 @@ $script:UpdateBadge.Add_PreviewMouseLeftButtonDown($updateBadgeHandler)
 if($SelfTest){$script:TestUpdateHandler=$updateBadgeHandler}
 $Root.Children.Add($script:UpdateBadge)|Out-Null
 function Set-Arc($r){if($r-le 0){$Arc.Data=$null;return};$c=36;$radius=28;$start=-90;$end=$start+(3.599*[Math]::Min(99.9,$r));$a1=$start*[Math]::PI/180;$a2=$end*[Math]::PI/180;$p1=New-Object Windows.Point -ArgumentList ($c+$radius*[Math]::Cos($a1)),($c+$radius*[Math]::Sin($a1));$p2=New-Object Windows.Point -ArgumentList ($c+$radius*[Math]::Cos($a2)),($c+$radius*[Math]::Sin($a2));$g=New-Object Windows.Media.StreamGeometry;$ctx=$g.Open();$ctx.BeginFigure($p1,$false,$false);$ctx.ArcTo($p2,(New-Object Windows.Size -ArgumentList $radius,$radius),0,(($end-$start)-gt 180),[Windows.Media.SweepDirection]::Clockwise,$true,$false);$ctx.Close();$g.Freeze();$Arc.Data=$g}
+function Restore-UpdateBadge{
+ # 点更新失败后不能把小圆点藏起来：留着它，用户才知道还能再试。
+ if($null-ne$script:UpdateBadge -and $null-ne$script:UpdateInfo -and [bool]$script:UpdateInfo.available){$script:UpdateBadge.Visibility='Visible'}
+}
 function Update-UpdateBadge($status){
  $script:UpdateInfo=if($null-ne$status-and$null-ne$status.update){$status.update}else{$null}
  if($null-ne$status-and$status.PSObject.Properties['version']-and$status.version){$script:AppVersion=[string]$status.version}
@@ -186,7 +190,9 @@ function Update-UpdateBadge($status){
  if($null-ne$script:UpdateBadge){
   $script:UpdateBadge.Visibility=if($visible){'Visible'}else{'Collapsed'}
   if($visible){
-   $script:UpdateBadge.ToolTip=if($script:UpdateInfo.canApply){"有新版本 v$($script:UpdateInfo.latest)（当前 v$script:AppVersion）· 点一下更新并重启"}else{"有新版本 v$($script:UpdateInfo.latest)· 点一下打开下载页"}
+   $fail=''
+   if($null-ne$script:UpdateInfo.lastError){$fail="`n上次更新没成功：$([string]$script:UpdateInfo.lastError.message)（会自动重试）"}
+   $script:UpdateBadge.ToolTip=if($script:UpdateInfo.canApply){"有新版本 v$($script:UpdateInfo.latest)（当前 v$script:AppVersion）· 点一下更新并重启$fail"}else{"有新版本 v$($script:UpdateInfo.latest)· 点一下打开下载页$fail"}
   }
  }
  if($null-ne$script:VersionItem){$script:VersionItem.Header="Codex Companion v$script:AppVersion"}
@@ -327,7 +333,10 @@ function Show-WidgetNotice([string]$message,[double]$seconds=5){
  $script:NoticeTimer.Add_Tick({Close-WidgetNotice});$script:NoticeTimer.Start()
 }
 function Update-Companion([switch]$Confirmed){
- if($script:Updating){return}
+ if($script:Updating){
+  # 后台正在更新时静默忽略；但如果上一次卡住超过 3 分钟，自动解锁，别让点击永远没反应。
+  if($null-ne$script:UpdatingSince-and([DateTime]::UtcNow-$script:UpdatingSince).TotalMinutes-ge 3){$script:Updating=$false}else{return}
+ }
  $info=$script:UpdateInfo
  if($null-eq$info-or-not$info.available){[Windows.MessageBox]::Show('当前已经是最新版本。','Codex Companion','OK','Information')|Out-Null;return}
  if($SelfTest){$script:UpdateButtonInvocations++;return}
@@ -343,7 +352,7 @@ function Update-Companion([switch]$Confirmed){
   $choice=[Windows.MessageBox]::Show($question,'更新 Codex Companion',[Windows.MessageBoxButton]::OKCancel,[Windows.MessageBoxImage]::Question)
  }
  if($choice-ne[Windows.MessageBoxResult]::OK){return}
- $script:Updating=$true
+ $script:Updating=$true;$script:UpdatingSince=[DateTime]::UtcNow
  if($null-ne$script:UpdateBadge){$script:UpdateBadge.Visibility='Collapsed'}
  try{
   Close-Detail -Force
@@ -351,7 +360,10 @@ function Update-Companion([switch]$Confirmed){
   Invoke-RestMethod "http://127.0.0.1:$script:Port/api/update/apply" -Method Post -ContentType 'application/json' -Body '{}' -TimeoutSec 180|Out-Null
  }catch{
   $script:Updating=$false
-  [Windows.MessageBox]::Show("更新没有完成：`n$(Get-ApiErrorMessage $_)`n`n当前版本仍可正常使用，可以稍后再试。",'Codex Companion','OK','Error')|Out-Null
+  $reason=Get-ApiErrorMessage $_
+  $logPath=[IO.Path]::Combine($env:APPDATA,'CodexCompanion','update.log')
+  Restore-UpdateBadge
+  [Windows.MessageBox]::Show("更新没有完成：`n$reason`n`n当前版本仍可正常使用，软件会自动重试；也可以点右上角小圆点再试。`n`n更新日志：$logPath",'Codex Companion','OK','Error')|Out-Null
  }
 }
 function Switch-WidgetAccount($accountId,$accountName){
@@ -392,10 +404,11 @@ function Get-WindowTooltip($a,$prefix){
   $raw=$a.usage.($prefix+'_window_minutes');if($null-ne$raw-and[int]$raw-gt 0){$mins=[int]$raw}
   $start=$reset-$mins*60
   $label=if($prefix-eq'primary'){'5 小时'}else{'周'}
-  return "$label窗口 $(Format-WindowClock $start) 开始 · $(Format-WindowClock $reset) 重置`n固定窗口：期间的请求不会改变重置时间"
+  return "$label窗口 $(Format-WindowClock $start) 开始 · $(Format-WindowClock $reset) 重置`n固定窗口：期间的请求不会改变重置时间`n窗口空闲时不倒计时，第一次请求才开始计时"
  }catch{return ''}
 }
-# 5 小时窗口是固定窗口：窗口内再发请求也不会提前/推迟重置。窗口正在计时时预热只会白耗额度，直接跳过。
+# 5 小时窗口由「第一次请求」开启：窗口空闲时压根没有倒计时在跑，用一次才开始
+# 倒数 5 小时；窗口一旦开始，期间再发多少请求也不会提前/推迟重置，此时预热只会白耗额度。
 function Get-WarmupAdvice($a){
  $advice=[pscustomobject]@{Skip=$false;Text='';Menu='预热 5 小时额度'}
  if($null-eq$a){return $advice}
@@ -416,6 +429,9 @@ function Get-WarmupAdvice($a){
    return $advice
   }
  }catch{}
+ # 窗口空闲：不置灰，并把「预热到底会做什么」写在菜单上，让人一眼看懂。
+ $advice.Menu='现在没有计时窗口 · 点预热开始 5 小时'
+ $advice.Text='这个账号现在没有在计时的 5 小时窗口；不用就一直不开始，点预热会用一次额度并从现在开始倒数 5 小时。'
  return $advice
 }
 function Warmup-WidgetAccount($accountId,$accountName){
@@ -425,7 +441,7 @@ function Warmup-WidgetAccount($accountId,$accountName){
  if($null-ne$status){$target=@($status.accounts|Where-Object{[string]$_.id-eq[string]$accountId})|Select-Object -First 1}
  $advice=Get-WarmupAdvice $target
  if($advice.Skip){[Windows.MessageBox]::Show($advice.Text,'预热已跳过','OK','Information')|Out-Null;return}
- $choice=[Windows.MessageBox]::Show("确定预热【${accountName}】吗？`n`n只在 5 小时窗口空闲时才有用；会消耗极少量额度，不能提前重置已有窗口。",'确认预热额度','YesNo','Information')
+ $choice=[Windows.MessageBox]::Show("确定预热【${accountName}】吗？`n`n现在没有在计时的 5 小时窗口：不用就一直不开始，用一次才从这次请求开始倒数 5 小时。`n会消耗极少量额度；窗口一旦开始，重置时间就固定了。",'确认预热额度','YesNo','Information')
  if($choice-ne[Windows.MessageBoxResult]::Yes){return}
  try{
   $script:WarmupInProgress=$true
@@ -508,7 +524,7 @@ function New-DetailBody($status){
   if($loginExpired){$warmItem.IsEnabled=$false;$warmItem.Header='登录已失效，请先在网页重新登录'}
   else{
    $advice=Get-WarmupAdvice $a
-   if($advice.Skip){$warmItem.IsEnabled=$false;$warmItem.Header=$advice.Menu;$warmItem.ToolTip=$advice.Text}
+   if($advice.Skip){$warmItem.IsEnabled=$false;$warmItem.Header=$advice.Menu;$warmItem.ToolTip=$advice.Text}else{$warmItem.Header=$advice.Menu;$warmItem.ToolTip=$advice.Text}
   }
   $warmItem.Add_Click({param($sender,$eventArgs) Warmup-WidgetAccount ([string]$sender.Tag.Id) ([string]$sender.Tag.Name)})
   $cardMenu.Items.Add($warmItem)|Out-Null;$cardMenu.Add_Opened({$script:MenuOpen=$true});$cardMenu.Add_Closed({$script:MenuOpen=$false});$card.ContextMenu=$cardMenu
@@ -607,7 +623,7 @@ $TopmostTimer.Start()
 $Window.Add_Closed({$TopmostTimer.Stop()})
 $Window.Add_ContentRendered({Ensure-WidgetTopmost})
 $Window.Add_MouseLeftButtonDown({$hadDetail=$null-ne$script:Detail;if($hadDetail){Close-Detail};$start=[System.Windows.Forms.Cursor]::Position;try{$Window.DragMove()}catch{};$end=[System.Windows.Forms.Cursor]::Position;$distance=[Math]::Abs($end.X-$start.X)+[Math]::Abs($end.Y-$start.Y);if($distance-le 3-and-not$hadDetail){Show-Detail;Request-QuotaRefresh -Auto}})
-$Menu=New-Object Windows.Controls.ContextMenu;$Menu.Placement='Right';$Menu.PlacementTarget=$Window;$Menu.HorizontalOffset=8;$Refresh=New-Object Windows.Controls.MenuItem;$Refresh.Header='立即刷新额度';$script:RefreshMenuItem=$Refresh;$Refresh.Add_Click({Request-QuotaRefresh});$Menu.Items.Add($Refresh)|Out-Null;$CheckUpdate=New-Object Windows.Controls.MenuItem;$CheckUpdate.Header='检查更新…';$CheckUpdate.Add_Click({try{$st=Invoke-RestMethod "http://127.0.0.1:$script:Port/api/update/status?force=1" -TimeoutSec 15;if($st.available){$script:UpdateInfo=$st;Update-UpdateBadge ([pscustomobject]@{version=$script:AppVersion;update=$st});$choice=[Windows.MessageBox]::Show("发现新版本 v$($st.latest)（当前 v$($st.current)）。`n`n现在更新并重启吗？",'检查更新','OKCancel','Question');if($choice-eq[Windows.MessageBoxResult]::OK){Update-Companion -Confirmed}}else{[Windows.MessageBox]::Show("已经是最新版本（v$script:AppVersion）。",'检查更新','OK','Information')|Out-Null}}catch{[Windows.MessageBox]::Show("检查更新失败：`n$(Get-ApiErrorMessage $_)",'Codex Companion','OK','Error')|Out-Null}});$Menu.Items.Add($CheckUpdate)|Out-Null;$WarmCurrent=New-Object Windows.Controls.MenuItem;$WarmCurrent.Header='预热当前账号';$WarmCurrent.Add_Click({$script:Status=Get-Status;$active=@($script:Status.accounts|Where-Object{$_.is_active})|Select-Object -First 1;if($null-ne$active){$shown=if([string]::IsNullOrWhiteSpace([string]$active.display_name)){[string]$active.name}else{[string]$active.display_name};Warmup-WidgetAccount ([string]$active.id) $shown}else{[Windows.MessageBox]::Show('没有找到当前账号。','Codex Companion','OK','Warning')|Out-Null}});$Menu.Items.Add($WarmCurrent)|Out-Null;$Open=New-Object Windows.Controls.MenuItem;$Open.Header='打开完整页面';$Open.Add_Click({Start-Process "http://127.0.0.1:$script:Port/"});$Menu.Items.Add($Open)|Out-Null;$Version=New-Object Windows.Controls.MenuItem;$Version.Header="Codex Companion v$script:AppVersion";$Version.IsEnabled=$false;$script:VersionItem=$Version;$Menu.Items.Add((New-Object Windows.Controls.Separator))|Out-Null;$Menu.Items.Add($Version)|Out-Null;$Exit=New-Object Windows.Controls.MenuItem;$Exit.Header='退出浮窗';$Exit.Add_Click({$Window.Close()});$Menu.Items.Add($Exit)|Out-Null;$Menu.Add_Opened({$script:MenuOpen=$true});$Menu.Add_Closed({$script:MenuOpen=$false});$Window.ContextMenu=$Menu
+$Menu=New-Object Windows.Controls.ContextMenu;$Menu.Placement='Right';$Menu.PlacementTarget=$Window;$Menu.HorizontalOffset=8;$Refresh=New-Object Windows.Controls.MenuItem;$Refresh.Header='立即刷新额度';$script:RefreshMenuItem=$Refresh;$Refresh.Add_Click({Request-QuotaRefresh});$Menu.Items.Add($Refresh)|Out-Null;$CheckUpdate=New-Object Windows.Controls.MenuItem;$CheckUpdate.Header='检查更新…';$CheckUpdate.Add_Click({try{$st=Invoke-RestMethod "http://127.0.0.1:$script:Port/api/update/status?force=1" -TimeoutSec 60;if($st.available){$script:UpdateInfo=$st;Update-UpdateBadge ([pscustomobject]@{version=$script:AppVersion;update=$st});$choice=[Windows.MessageBox]::Show("发现新版本 v$($st.latest)（当前 v$($st.current)）。`n`n现在更新并重启吗？",'检查更新','OKCancel','Question');if($choice-eq[Windows.MessageBoxResult]::OK){Update-Companion -Confirmed}}else{[Windows.MessageBox]::Show("已经是最新版本（v$script:AppVersion）。",'检查更新','OK','Information')|Out-Null}}catch{[Windows.MessageBox]::Show("检查更新失败：`n$(Get-ApiErrorMessage $_)",'Codex Companion','OK','Error')|Out-Null}});$Menu.Items.Add($CheckUpdate)|Out-Null;$WarmCurrent=New-Object Windows.Controls.MenuItem;$WarmCurrent.Header='预热当前账号';$WarmCurrent.Add_Click({$script:Status=Get-Status;$active=@($script:Status.accounts|Where-Object{$_.is_active})|Select-Object -First 1;if($null-ne$active){$shown=if([string]::IsNullOrWhiteSpace([string]$active.display_name)){[string]$active.name}else{[string]$active.display_name};Warmup-WidgetAccount ([string]$active.id) $shown}else{[Windows.MessageBox]::Show('没有找到当前账号。','Codex Companion','OK','Warning')|Out-Null}});$Menu.Items.Add($WarmCurrent)|Out-Null;$Open=New-Object Windows.Controls.MenuItem;$Open.Header='打开完整页面';$Open.Add_Click({Start-Process "http://127.0.0.1:$script:Port/"});$Menu.Items.Add($Open)|Out-Null;$Version=New-Object Windows.Controls.MenuItem;$Version.Header="Codex Companion v$script:AppVersion";$Version.IsEnabled=$false;$script:VersionItem=$Version;$Menu.Items.Add((New-Object Windows.Controls.Separator))|Out-Null;$Menu.Items.Add($Version)|Out-Null;$Exit=New-Object Windows.Controls.MenuItem;$Exit.Header='退出浮窗';$Exit.Add_Click({$Window.Close()});$Menu.Items.Add($Exit)|Out-Null;$Menu.Add_Opened({$script:MenuOpen=$true});$Menu.Add_Closed({$script:MenuOpen=$false});$Window.ContextMenu=$Menu
 $script:RetryItem=$null;$script:RetryToggleBusy=$false
 function Update-RetryMenuItem{
  if($null-eq$script:RetryItem){return}

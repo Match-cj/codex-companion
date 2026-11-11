@@ -24,6 +24,7 @@ import { parseFeishuPost, isRichTextMessage } from './feishu-post.mjs';
 import { stallNoticeDecision } from './stall-notice.mjs';
 import { createNativeUsage } from './native-usage.mjs';
 import { warmupDecision, describeWarmupWindow } from './warmup-policy.mjs';
+import { updateFailureRecord, updateRetryDecision, updateLogLine, trimUpdateLog, UPDATE_LOG_MAX_BYTES } from './update-diagnostics.mjs';
 import { sweepStaleHomes } from './temp-homes.mjs';
 import { classifyQuotaFailure, probeNetwork, networkNoticeDecision, readSystemProxy } from './network-health.mjs';
 import { validNativeVault, createNativeVaultStore } from './native-vault.mjs';
@@ -35,7 +36,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.55';
+const APP_VERSION = '1.0.56';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -1935,15 +1936,18 @@ function browserLoginPublic() {
     canRetrySave: browserLogin.status === 'failed' && !!browserLogin.pendingAuth,
     ...(browserLogin.status === 'waiting' ? { authUrl: browserLogin.authUrl } : {}) };
 }
+function proxyFromEnv() {
+  return String(process.env.HTTPS_PROXY || process.env.https_proxy || process.env.ALL_PROXY || process.env.all_proxy || process.env.HTTP_PROXY || process.env.http_proxy || '').trim();
+}
 async function browserSystemProxy() {
-  if (process.env.HTTPS_PROXY || process.env.https_proxy || process.env.ALL_PROXY || process.env.all_proxy) return '';
+  // Windows 系统代理（VPN 客户端写进注册表）优先。旧实现一见到环境变量就
+  // 直接放弃系统代理，AI 会话注入的 127.0.0.1:3215 之类端口会让更新下载
+  // 明明有 VPN 却全部走直连，这正是同事点更新一直失败的一类根因。
   try {
-    const script = "$ErrorActionPreference='Stop';$target=[Uri]'https://auth.openai.com';$proxy=[Net.WebRequest]::GetSystemWebProxy().GetProxy($target);if($proxy -and $proxy.AbsoluteUri -ne $target.AbsoluteUri){[Console]::Out.Write($proxy.AbsoluteUri)}";
-    const result = await execFileAsync('powershell.exe', ['-NoLogo','-NoProfile','-NonInteractive','-Command',script], { windowsHide: true, timeout: 5000, maxBuffer: 4096 });
-    const url = new URL(String(result.stdout || '').trim());
-    if (['http:','https:'].includes(url.protocol) && !url.username && !url.password) return url.toString();
+    const parsed = await readSystemProxy();
+    if (parsed?.address) return `http://${parsed.address}`;
   } catch {}
-  return '';
+  return proxyFromEnv();
 }
 async function postFormThroughSystemProxy(url, form) {
   if (process.platform !== 'win32' || !existsSync(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'curl.exe'))) {
@@ -3263,6 +3267,8 @@ async function handle(req, res) {
           applying: updateApplying,
           checkedAt: updateCache.checkedAt || null,
           error: updateCache.error || null,
+          lastError: updateLastError,
+          logPath: updateLogPath,
         },
         security:{ remoteEnabled: !!config.remoteAccessEnabled, local: isLoopback(req.socket.remoteAddress), allowedUserCount: (config.feishuAllowedUserIds || []).length, pairingCommand: isLoopback(req.socket.remoteAddress) && !(config.feishuAllowedUserIds || []).length ? `绑定 ${feishuPairingCode}` : null },
         feishu:publicFeishuState(),
@@ -3716,6 +3722,39 @@ const updateIdleProbeIntervalMs = 5 * 60 * 1000;
 let updateCache = { checkedAt: 0, release: null, summary: null, error: null };
 let updateApplying = false;
 let updateIdleErrorLogged = false;
+// 更新失败以前只写进 server.stdout/stderr.log，而这两个文件每次启动都会被
+// 重定向覆盖，重启后线索就没了。这里单独留一份追加日志和一条「最近一次失败」，
+// 重启后仍能在浮窗/网页看到原因，也让自动重试有依据。
+const updateLogPath = path.join(appDir, 'update.log');
+const updateFailurePath = path.join(appDir, 'update-last-error.json');
+let updateLastError = null;
+let updateRetryInFlight = false;
+
+async function appendUpdateLog(message, level = 'INFO') {
+  try {
+    await fs.mkdir(appDir, { recursive: true });
+    await fs.appendFile(updateLogPath, updateLogLine(Date.now(), level, message), 'utf8');
+    const stat = await fs.stat(updateLogPath).catch(() => null);
+    if (stat && stat.size > UPDATE_LOG_MAX_BYTES * 1.5) {
+      await fs.writeFile(updateLogPath, trimUpdateLog(await fs.readFile(updateLogPath, 'utf8'), UPDATE_LOG_MAX_BYTES), 'utf8');
+    }
+  } catch {}
+}
+async function loadUpdateFailure() {
+  try { return JSON.parse(await fs.readFile(updateFailurePath, 'utf8')); } catch { return null; }
+}
+async function recordUpdateFailure(error, { from = APP_VERSION, to = '', stage = 'apply', attempts = 0 } = {}) {
+  const record = updateFailureRecord(error, { at: Date.now(), from, to, stage, attempts });
+  updateLastError = record;
+  try { await fs.writeFile(updateFailurePath, JSON.stringify(record, null, 2), 'utf8'); } catch {}
+  await appendUpdateLog(`更新失败 [${stage}] ${record.message}`, 'ERROR');
+  return record;
+}
+async function clearUpdateFailure(message = '更新成功，已清除上次失败记录') {
+  updateLastError = null;
+  try { await fs.rm(updateFailurePath, { force: true }); } catch {}
+  await appendUpdateLog(message);
+}
 
 async function fetchUpdateRelease(url, timeoutMs) {
   // 部分网络直连 api.github.com 不通而系统代理可用；Node 内置 fetch 不认系统代理，
@@ -3752,11 +3791,17 @@ async function refreshUpdateRelease(force = false) {
   if (!force && fresh && updateCache.release) return updateCache.release;
   try {
     const release = await fetchUpdateRelease(updateFeedUrl, 5000);
+    const latest = normalizeVersion(release?.tag_name || release?.name || '');
+    if (!updateCache.release || latest !== normalizeVersion(updateCache.release?.tag_name || '')) {
+      await appendUpdateLog(`检查更新成功：最新 v${latest}（当前 v${APP_VERSION}）`);
+    }
     updateCache = { checkedAt: Date.now(), release, summary: null, error: null };
     return release;
   } catch (error) {
     // Being offline or blocked must never be an error the user has to think about.
-    updateCache = { ...updateCache, checkedAt: Date.now(), error: humanError(error) };
+    const reason = humanError(error);
+    updateCache = { ...updateCache, checkedAt: Date.now(), error: reason };
+    await appendUpdateLog(`检查更新失败：${reason}`, 'WARN');
     return updateCache.release;
   }
 }
@@ -3825,6 +3870,8 @@ async function updateStatusPayload(force = false) {
     canApply: Boolean(summary.patch) && writable,
     checkedAt: updateCache.checkedAt,
     error: updateCache.error || null,
+    lastError: updateLastError,
+    logPath: updateLogPath,
     reason: !summary.available ? '' : (summary.requiresFullInstaller ? '这次更新包含依赖变化，需要下载完整安装包。' : (!writable ? '安装目录不可写，需要用安装包升级。' : '')),
   };
 }
@@ -3877,36 +3924,45 @@ async function maybeAutoApplyUpdate(trigger = 'timer') {
 }
 
 async function downloadPatch(asset, target) {
-  // 更新包在 GitHub 上。很多用户的网络直连 GitHub 不通，而 Node 内置 fetch 不认系统代理，
-  // 所以优先走 Windows 自带 curl.exe + 系统代理，再试 curl 直连，最后才试内置 fetch。
+  // 更新包在 GitHub 上。很多用户的网络直连 release 下载域名不通：系统代理、
+  // 环境变量代理、直连、GitHub 接口下载、内置 fetch 依次都试一遍，每一路的
+  // 结果都写进 update.log，失败后不用猜是哪一步断的。
   const curlPath = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'curl.exe');
   const useCurl = process.platform === 'win32' && existsSync(curlPath);
-  const proxy = await browserSystemProxy();
+  const systemProxy = await browserSystemProxy();
+  const envProxy = proxyFromEnv();
   const attempts = [];
-  if (useCurl && proxy) attempts.push({ label: '系统代理', useProxy: true });
-  if (useCurl) attempts.push({ label: '直连', useProxy: false });
-  attempts.push({ label: '内置下载', useProxy: false, fetch: true });
+  if (useCurl && systemProxy) attempts.push({ label: '系统代理', proxy: systemProxy });
+  if (useCurl && envProxy && envProxy !== systemProxy) attempts.push({ label: '环境变量代理', proxy: envProxy });
+  if (useCurl) attempts.push({ label: '直连', proxy: null });
+  if (useCurl && asset.apiUrl) attempts.push({ label: 'GitHub 接口下载', proxy: systemProxy || envProxy || null, url: asset.apiUrl, api: true });
+  attempts.push({ label: '内置下载', fetch: true });
+  await appendUpdateLog(`开始下载补丁 ${asset.name}：${attempts.map(a => a.label).join(' / ')}；系统代理=${systemProxy || '无'}，环境变量代理=${envProxy || '无'}`);
   let lastError;
   for (const attempt of attempts) {
     try {
       const buffer = attempt.fetch
         ? await downloadPatchViaFetch(asset)
-        : await downloadPatchViaCurl(curlPath, asset, target, attempt.useProxy ? proxy : null);
+        : await downloadPatchViaCurl(curlPath, target, attempt.url || asset.url, attempt.proxy, attempt.api);
       if (asset.size && buffer.length !== asset.size) throw Error('更新包下载不完整');
       if (buffer.length > 64 * 1024 * 1024) throw Error('更新包体积异常，已停止');
       await fs.writeFile(target, buffer);
+      await appendUpdateLog(`下载成功：${attempt.label}，${buffer.length} 字节`);
       return createHash('sha256').update(buffer).digest('hex');
     } catch (error) {
       lastError = error;
-      console.error(`[update] patch download via ${attempt.label} failed:`, humanError(error));
+      const reason = humanError(error);
+      console.error(`[update] patch download via ${attempt.label} failed:`, reason);
+      await appendUpdateLog(`下载失败：${attempt.label} · ${reason}`, 'WARN');
     }
   }
   throw Error(`下载更新包失败（已试过 ${attempts.map(a => a.label).join('、')}）：${humanError(lastError)} 当前版本仍可正常使用，稍后会自动重试；也可以打开 Releases 页手动下载完整安装包。`);
 }
-function downloadPatchViaCurl(curlPath, asset, target, proxy) {
+function downloadPatchViaCurl(curlPath, target, url, proxy, api = false) {
   const args = ['-fsSL', '--retry', '1', '--connect-timeout', '8', '--max-time', '30', '-o', target, '-A', `CodexCompanion/${APP_VERSION}`];
+  if (api) args.push('-H', 'accept: application/octet-stream');
   if (proxy) args.push('-x', proxy);
-  args.push(asset.url);
+  args.push(url);
   return new Promise((resolve, reject) => {
     execFile(curlPath, args, { windowsHide: true, timeout: 70000, maxBuffer: 8192 }, error => {
       if (error) return reject(error);
@@ -3961,18 +4017,26 @@ async function scheduleRestart(stageDir, targetVersion) {
   child.unref();
 }
 
-async function applyUpdate() {
+async function applyUpdate({ retry = false } = {}) {
   if (updateApplying) throw Error('更新正在进行中，请稍等。');
-  const status = await updateStatusPayload(true);
-  if (!status.available) throw Error('当前已经是最新版本。');
-  if (!status.patch) throw Error(status.reason || '这次更新需要下载完整安装包。');
-  const stage = path.join(os.tmpdir(), 'CodexCompanionUpdate', `v${status.latest}-${Date.now()}`);
+  let stageName = 'check';
+  let target = '';
   updateApplying = true;
   try {
+    const status = await updateStatusPayload(true);
+    target = status.latest || '';
+    if (!status.available) throw Error('当前已经是最新版本。');
+    if (!status.patch) throw Error(status.reason || '这次更新需要下载完整安装包。');
+    const stage = path.join(os.tmpdir(), 'CodexCompanionUpdate', `v${status.latest}-${Date.now()}`);
+    await appendUpdateLog(`开始安装 v${status.latest}（当前 v${APP_VERSION}）${retry ? '· 自动重试' : '· 手动点击'}`);
     await fs.mkdir(stage, { recursive: true });
     const zipPath = path.join(stage, 'patch.zip');
+    stageName = 'download';
     const actual = await downloadPatch(status.patch, zipPath);
+    stageName = 'verify';
     if (status.patch.sha256 && actual !== status.patch.sha256) throw Error('更新包校验失败（SHA256 不一致），已停止。');
+    await appendUpdateLog('补丁包 SHA256 校验通过');
+    stageName = 'extract';
     const filesDir = path.join(stage, 'files');
     await extractZip(zipPath, filesDir);
     const manifest = validateUpdateManifest(
@@ -3987,6 +4051,7 @@ async function applyUpdate() {
     if (manifest.depsFingerprint && manifest.depsFingerprint !== depsFingerprint(localPackage)) {
       throw Error('这次更新包含依赖变化，需要下载完整安装包。');
     }
+    stageName = 'replace';
     await fs.rm(updateBackupDir, { recursive: true, force: true });
     await fs.mkdir(updateBackupDir, { recursive: true });
     const replaced = [];
@@ -4008,12 +4073,20 @@ async function applyUpdate() {
       }
       throw Error(`替换文件失败，已还原：${humanError(error)}`);
     }
+    stageName = 'restart';
     await fs.writeFile(updateStatePath, JSON.stringify({
       from: APP_VERSION, to: manifest.version, notes: status.notes,
       files: replaced, appliedAt: new Date().toISOString(),
     }, null, 2), 'utf8');
+    await appendUpdateLog(`已替换 ${replaced.length} 个文件，调用重启看门狗`);
     await scheduleRestart(stage, manifest.version);
     return { ok: true, restarting: true, from: APP_VERSION, to: manifest.version };
+  } catch (error) {
+    await recordUpdateFailure(error, {
+      from: APP_VERSION, to: target, stage: stageName,
+      attempts: retry ? Number(updateLastError?.attempts || 0) + 1 : 0,
+    });
+    throw error;
   } finally {
     updateApplying = false;
   }
@@ -4022,6 +4095,7 @@ async function applyUpdate() {
 // Runs before anything else on boot: a finished update is confirmed and cleaned
 // up, an unfinished one is rolled back so the app always starts on known files.
 async function recoverUpdateState() {
+  updateLastError = await loadUpdateFailure();
   if (!existsSync(updateStatePath)) {
     if (existsSync(updateBackupDir)) await fs.rm(updateBackupDir, { recursive: true, force: true }).catch(() => {});
     return;
@@ -4032,6 +4106,8 @@ async function recoverUpdateState() {
       await fs.rm(updateStatePath, { force: true });
       await fs.rm(updateBackupDir, { recursive: true, force: true }).catch(() => {});
       console.log(`[update] applied v${state.from} -> v${state.to}`);
+      await appendUpdateLog(`确认更新成功：v${state.from} -> v${state.to}`);
+      await clearUpdateFailure(`更新到 v${APP_VERSION} 已确认成功，清除失败记录`);
       await notify(`已更新到 v${APP_VERSION}\n${state.notes || '常规修复与改进'}`, { appName: 'Codex Companion' }).catch(() => {});
       return;
     }
@@ -4043,7 +4119,11 @@ async function recoverUpdateState() {
     await fs.rm(updateStatePath, { force: true });
     await fs.rm(updateBackupDir, { recursive: true, force: true }).catch(() => {});
     console.error(`[update] rolled back to v${APP_VERSION} (target was v${state.to})`);
-    await notify(`更新到 v${state.to} 没有成功，已自动回滚到 v${APP_VERSION}。`, { appName: 'Codex Companion' }).catch(() => {});
+    await recordUpdateFailure(Error('新版本启动后没有回应，更新已自动回滚。'), {
+      from: state.from || APP_VERSION, to: state.to || '', stage: 'rollback',
+      attempts: Number(updateLastError?.attempts || 0) + 1,
+    });
+    await notify(`更新到 v${state.to} 没有成功，已自动回滚到 v${APP_VERSION}。\n原因已写入更新日志，软件会自动重试；也可以在网页上点「立即更新」。`, { appName: 'Codex Companion' }).catch(() => {});
   } catch (error) {
     console.error('[update state]', error.message);
   }
@@ -4116,9 +4196,31 @@ async function main() {
   // Update checks are lazy and quiet: the first one waits a minute so it never
   // delays startup, and a blocked network just leaves the badge hidden.
   setTimeout(() => {
-    const checkUpdates = () => {
-      updateStatusPayload(true).then(status => notifyOnceAboutUpdate(status)).catch(() => {})
-        .then(() => maybeAutoApplyUpdate('check')).catch(() => {});
+    const checkUpdates = async () => {
+      try {
+        const status = await updateStatusPayload(true);
+        await notifyOnceAboutUpdate(status);
+        await maybeAutoApplyUpdate('check');
+        // 上次点更新失败（多半是网络抖动）不用人再点一次：隔 10 分钟静默
+        // 重试，最多 3 次；每次结果和原因都留在 update.log 里。
+        const decision = updateRetryDecision({
+          lastError: updateLastError, now: Date.now(),
+          canApply: status.canApply, applying: updateApplying,
+        });
+        if (decision.retry && !updateRetryInFlight) {
+          updateRetryInFlight = true;
+          try {
+            await appendUpdateLog(`上次更新失败，开始自动重试（第 ${Number(updateLastError?.attempts || 0) + 1} 次）`);
+            const result = await applyUpdate({ retry: true });
+            await appendUpdateLog(`自动重试安装成功 v${result.to}，准备重启`);
+            setTimeout(() => process.exit(0), 1200).unref?.();
+          } catch (error) {
+            await appendUpdateLog(`自动重试仍失败：${humanError(error)}`, 'WARN');
+          } finally { updateRetryInFlight = false; }
+        }
+      } catch (error) {
+        await appendUpdateLog(`定时检查更新异常：${humanError(error)}`, 'WARN');
+      }
     };
     checkUpdates();
     setInterval(checkUpdates, updateCheckIntervalMs).unref?.();
