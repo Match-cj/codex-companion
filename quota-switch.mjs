@@ -1,5 +1,6 @@
 // 额度用尽后的账号接力：识别失败原因、挑一个还有额度的账号、解析飞书指令。
 // 全部是纯函数，便于单测覆盖。
+import { roundRemaining } from './quota-facts.mjs';
 
 // Codex 在额度耗尽时给出的提示五花八门（桌面端 / CLI / API），这里统一定义。
 const QUOTA_EXHAUSTED_PATTERNS = [
@@ -19,12 +20,13 @@ export function isQuotaExhaustedText(text) {
 }
 
 // 返回剩余百分比；未知一律给 null，绝不把“读不到”当成“有额度”。
+// 和浮窗/网页/客户端统一用四舍五入，避免 99.4% 被截断成 0% 而客户端显示 1%。
+
 export function quotaLeft(account) {
   const usage = account?.usage || {};
-  const toLeft = value => (Number.isFinite(Number(value)) && value !== null && value !== '' ? Math.max(0, 100 - Number(value)) : null);
   return {
-    primary: toLeft(usage.primary_used_percent),
-    weekly: toLeft(usage.secondary_used_percent),
+    primary: roundRemaining(usage.primary_used_percent),
+    weekly: roundRemaining(usage.secondary_used_percent),
   };
 }
 
@@ -36,13 +38,15 @@ export function quotaLeftText(account) {
   return parts.join(' · ');
 }
 
-// 挑一个能立刻干活的账号：5 小时额度必须还有，周额度优先；读不到额度的一律不自动选。
+// 挑一个能立刻干活的账号：5 小时额度和周额度都必须还有。
+// 周额度读不到时只影响排序、不直接淘汰；但周额度明确见底的账号切过去照样失败，必须排除。
 export function pickQuotaSwitchTarget(accounts, activeId) {
   const list = Array.isArray(accounts) ? accounts : [];
   const candidates = list
     .filter(account => account && String(account.id) !== String(activeId || ''))
     .map(account => ({ account, left: quotaLeft(account) }))
     .filter(item => item.left.primary !== null && item.left.primary > 0)
+    .filter(item => item.left.weekly === null || item.left.weekly > 0)
     .sort((a, b) => {
       const weeklyA = a.left.weekly === null ? 100 : a.left.weekly;
       const weeklyB = b.left.weekly === null ? 100 : b.left.weekly;

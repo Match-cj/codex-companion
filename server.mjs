@@ -12,6 +12,7 @@ import { finalImagePaths, relayFinalImages, validateImageRoot } from './image-re
 import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 import { observeEarlyQuotaReset } from './quota-reset.mjs';
 import { isQuotaExhaustedText, quotaLeft, quotaLeftText, pickQuotaSwitchTarget, findAccountByName, parseSwitchCommand } from './quota-switch.mjs';
+import { buildQuotaFacts } from './quota-facts.mjs';
 import { notificationRules, notificationEnabled, notificationType, resetReminderLeads, validateNotificationSettings, nextResetReminder, nextWasteReminder, parseExpirySeconds, planExpirySuffix, planExpiryStale } from './notification-settings.mjs';
 import { recoverReplyTarget } from './feishu-reply-recovery.mjs';
 import { desktopRetryState, desktopTakeoverAllowed, syncDesktopRetryWatcher, startDesktopRetryWatcher, stopDesktopRetryWatcher, setDesktopRetryNotifier } from './desktop-retry.mjs';
@@ -37,7 +38,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.57';
+const APP_VERSION = '1.0.58';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -3274,7 +3275,7 @@ async function handle(req, res) {
         },
         security:{ remoteEnabled: !!config.remoteAccessEnabled, local: isLoopback(req.socket.remoteAddress), allowedUserCount: (config.feishuAllowedUserIds || []).length, pairingCommand: isLoopback(req.socket.remoteAddress) && !(config.feishuAllowedUserIds || []).length ? `绑定 ${feishuPairingCode}` : null },
         feishu:publicFeishuState(),
-        accounts,
+        accounts:accounts.map(account=>({...account,quotaFacts:buildQuotaFacts(account.usage,Date.now())})),
         quotaRefresh:{ running:manualQuotaRefresh.running, startedAt:manualQuotaRefresh.startedAt, finishedAt:manualQuotaRefresh.finishedAt, error:manualQuotaRefresh.error },
         networkHealth,
         tasks:Object.fromEntries(tasks),

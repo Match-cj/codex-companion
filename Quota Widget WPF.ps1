@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 Add-Type 'using System; using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags); [DllImport("user32.dll", EntryPoint="GetWindowLongW")] public static extern int GetWindowLong(IntPtr hwnd, int index); [DllImport("user32.dll", EntryPoint="SetWindowLongW")] public static extern int SetWindowLong(IntPtr hwnd, int index, int value); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); }'
-$script:Port=$Port; $script:AppVersion='1.0.57'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false; $script:UpdateInfo=$null; $script:Updating=$false; $script:UpdateCardsBuilt=0; $script:UpdateButtonInvocations=0; $script:QuotaRefreshInFlight=$false; $script:QuotaRefreshStartedAt=0; $script:QuotaRefreshDeadline=[DateTime]::UtcNow; $script:QuotaPollTimer=$null; $script:RefreshMenuItem=$null; $script:DetailGuardUntil=[DateTime]::UtcNow; $script:DetailPendingRefresh=$false; $script:DetailRefreshTimer=$null; $script:DetailRefreshLabel=$null; $script:LastAutoRefreshAt=0
+$script:Port=$Port; $script:AppVersion='1.0.58'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false; $script:UpdateInfo=$null; $script:Updating=$false; $script:UpdateCardsBuilt=0; $script:UpdateButtonInvocations=0; $script:QuotaRefreshInFlight=$false; $script:QuotaRefreshStartedAt=0; $script:QuotaRefreshDeadline=[DateTime]::UtcNow; $script:QuotaPollTimer=$null; $script:RefreshMenuItem=$null; $script:DetailGuardUntil=[DateTime]::UtcNow; $script:DetailPendingRefresh=$false; $script:DetailRefreshTimer=$null; $script:DetailRefreshLabel=$null; $script:LastAutoRefreshAt=0
 $mutexName=if($SelfTest){'Global\CodexCompanionQuotaWidget_v5_selftest'}else{'Global\CodexCompanionQuotaWidget_v5'}
 $script:Mutex=New-Object System.Threading.Mutex($false,$mutexName); if(-not $script:Mutex.WaitOne(0,$false)){exit}
 $Transparent=[Windows.Media.Brushes]::Transparent
@@ -58,7 +58,18 @@ function Get-RunningTasks($status){
  if($null-ne$status.taskActivity -and $null-ne$status.taskActivity.rows){$rows+=@($status.taskActivity.rows|Where-Object{$_.source -in @('desktop','takeover','companion')})}
  $seen=@{};return @($rows|Where-Object{$id=[string]$_.id;if($seen.ContainsKey($id)){return $false};$seen[$id]=$true;return $true})
 }
-function Get-Remaining($a,$prefix){if($null -eq $a -or $null -eq $a.usage){return $null};$used=$a.usage.($prefix+'_used_percent');if($null -eq $used){return $null};[Math]::Max(0,[Math]::Min(100,[int](100-[double]$used)))}
+function Get-Remaining($a,$prefix){
+ if($null-eq$a-or$null-eq$a.usage){return $null}
+ # 后端算好的事实层优先，保证浮窗 / 网页 / 客户端用同一套四舍五入。
+ try{$f=$a.quotaFacts.$prefix;if($null-ne$f-and$null-ne$f.remaining){return [int]$f.remaining}}catch{}
+ $used=$a.usage.($prefix+'_used_percent');if($null-eq$used){return $null}
+ [Math]::Max(0,[Math]::Min(100,[int][Math]::Round(100-[double]$used)))
+}
+function Get-QuotaCaption($a,$prefix){
+ # 以前只写倒计时（1天2小时），看不出是哪天；现在把日期和倒计时一起摆出来。
+ try{$f=$a.quotaFacts.$prefix;if($null-ne$f-and$f.resetText){return "$($f.resetText) · $($f.countdown)"}}catch{}
+ return Get-Countdown $a $prefix
+}
 function Test-LoginExpired($a){
  if($null-eq$a-or$null-eq$a.usage){return $false}
  $message=[string]$a.usage.error
@@ -399,6 +410,8 @@ function Switch-WidgetAccount($accountId,$accountName){
 function Format-WindowClock($seconds){try{[DateTimeOffset]::FromUnixTimeSeconds([int64]$seconds).ToLocalTime().ToString('HH:mm')}catch{''}}
 function Get-WindowTooltip($a,$prefix){
  try{
+  # 事实层含带日期的起止时间、机制说明，以及 0% 时的一句人话。
+  $f=$a.quotaFacts.$prefix;if($null-ne$f-and$f.windowText){return [string]$f.windowText}
   $reset=[int64]$a.usage.($prefix+'_resets_at');if($reset-le 0){return ''}
   $mins=if($prefix-eq'primary'){300}else{10080}
   $raw=$a.usage.($prefix+'_window_minutes');if($null-ne$raw-and[int]$raw-gt 0){$mins=[int]$raw}
@@ -514,21 +527,34 @@ function New-DetailBody($status){
   $col2=New-Object Windows.Controls.ColumnDefinition;$col2.Width=195
   $quotaGrid.ColumnDefinitions.Add($col1);$quotaGrid.ColumnDefinitions.Add($col2)
   if($null-ne$five-and$null-ne$week){
-   $fiveBox=New-Quota '5h' $five (Get-Countdown $a 'primary') 188
-   $weekBox=New-Quota '7d' $week (Get-Countdown $a 'secondary') 188
+   $fiveBox=New-Quota '5h' $five (Get-QuotaCaption $a 'primary') 188
+   $weekBox=New-Quota '7d' $week (Get-QuotaCaption $a 'secondary') 188
    $fiveBox.ToolTip=Get-WindowTooltip $a 'primary';$weekBox.ToolTip=Get-WindowTooltip $a 'secondary'
    [Windows.Controls.Grid]::SetColumn($fiveBox,0);[Windows.Controls.Grid]::SetColumn($weekBox,1)
    $quotaGrid.Children.Add($fiveBox)|Out-Null;$quotaGrid.Children.Add($weekBox)|Out-Null
   }elseif($null-ne$five){
-   $fiveBox=New-Quota '5h' $five (Get-Countdown $a 'primary') 390
+   $fiveBox=New-Quota '5h' $five (Get-QuotaCaption $a 'primary') 390
    $fiveBox.ToolTip=Get-WindowTooltip $a 'primary'
    [Windows.Controls.Grid]::SetColumnSpan($fiveBox,2);$quotaGrid.Children.Add($fiveBox)|Out-Null
   }elseif($null-ne$week){
-   $weekBox=New-Quota '7d' $week (Get-Countdown $a 'secondary') 390
+   $weekBox=New-Quota '7d' $week (Get-QuotaCaption $a 'secondary') 390
    $weekBox.ToolTip=Get-WindowTooltip $a 'secondary'
    [Windows.Controls.Grid]::SetColumnSpan($weekBox,2);$quotaGrid.Children.Add($weekBox)|Out-Null
   }
   if($null-ne$five-or$null-ne$week){$content.Children.Add($quotaGrid)|Out-Null}
+  # 纯事实：两个重置点相差多久 + 0% 时的一句人话。不判断浪不浪费、不提醒、不加颜色。
+  $factLines=@()
+  try{
+   $gap=[string]$a.quotaFacts.gapText;if(-not[string]::IsNullOrWhiteSpace($gap)){$factLines+=$gap}
+   $note=[string]$a.quotaFacts.primary.zeroNote
+   if([string]::IsNullOrWhiteSpace($note)){$note=[string]$a.quotaFacts.secondary.zeroNote}
+   if(-not[string]::IsNullOrWhiteSpace($note)){$factLines+=$note}
+  }catch{}
+  if($factLines.Count-gt 0){
+   $fact=New-Text ($factLines -join "`n") 10 $Muted
+   $fact.Margin='0,4,0,0';$fact.MaxWidth=390;$fact.TextWrapping='Wrap'
+   $content.Children.Add($fact)|Out-Null
+  }
   $count=if($null-ne$a.reset_count){$a.reset_count}else{'--'}
   $reset=New-Object Windows.Controls.StackPanel;$reset.Orientation='Horizontal';$reset.Margin='0,5,0,0'
   $reset.Children.Add((New-QuotaIcon 'reset'))|Out-Null
