@@ -78,7 +78,7 @@ test('versions stay aligned across server, widget and package', () => {
   const server = fs.readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
   const widget = fs.readFileSync(new URL('../Quota Widget WPF.ps1', import.meta.url), 'utf8');
   const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-  assert.equal(pkg.version, '1.0.58');
-  assert.match(server, /const APP_VERSION = '1\.0\.58'/);
-  assert.match(widget, /\$script:AppVersion='1\.0\.58'/);
+  assert.equal(pkg.version, '1.0.59');
+  assert.match(server, /const APP_VERSION = '1\.0\.59'/);
+  assert.match(widget, /\$script:AppVersion='1\.0\.59'/);
 });

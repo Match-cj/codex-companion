@@ -38,7 +38,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.58';
+const APP_VERSION = '1.0.59';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。

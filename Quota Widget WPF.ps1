@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 Add-Type 'using System; using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags); [DllImport("user32.dll", EntryPoint="GetWindowLongW")] public static extern int GetWindowLong(IntPtr hwnd, int index); [DllImport("user32.dll", EntryPoint="SetWindowLongW")] public static extern int SetWindowLong(IntPtr hwnd, int index, int value); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); }'
-$script:Port=$Port; $script:AppVersion='1.0.58'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false; $script:UpdateInfo=$null; $script:Updating=$false; $script:UpdateCardsBuilt=0; $script:UpdateButtonInvocations=0; $script:QuotaRefreshInFlight=$false; $script:QuotaRefreshStartedAt=0; $script:QuotaRefreshDeadline=[DateTime]::UtcNow; $script:QuotaPollTimer=$null; $script:RefreshMenuItem=$null; $script:DetailGuardUntil=[DateTime]::UtcNow; $script:DetailPendingRefresh=$false; $script:DetailRefreshTimer=$null; $script:DetailRefreshLabel=$null; $script:LastAutoRefreshAt=0
+$script:Port=$Port; $script:AppVersion='1.0.59'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false; $script:UpdateInfo=$null; $script:Updating=$false; $script:UpdateCardsBuilt=0; $script:UpdateButtonInvocations=0; $script:QuotaRefreshInFlight=$false; $script:QuotaRefreshStartedAt=0; $script:QuotaRefreshDeadline=[DateTime]::UtcNow; $script:QuotaPollTimer=$null; $script:RefreshMenuItem=$null; $script:DetailGuardUntil=[DateTime]::UtcNow; $script:DetailPendingRefresh=$false; $script:DetailRefreshTimer=$null; $script:DetailRefreshLabel=$null; $script:LastAutoRefreshAt=0; $script:TimeMode='remaining'; $script:TimeChipLabel=$null; $script:TestTimeChip=$null; $script:TestTimeChipHandler=$null
 $mutexName=if($SelfTest){'Global\CodexCompanionQuotaWidget_v5_selftest'}else{'Global\CodexCompanionQuotaWidget_v5'}
 $script:Mutex=New-Object System.Threading.Mutex($false,$mutexName); if(-not $script:Mutex.WaitOne(0,$false)){exit}
 $Transparent=[Windows.Media.Brushes]::Transparent
@@ -66,8 +66,13 @@ function Get-Remaining($a,$prefix){
  [Math]::Max(0,[Math]::Min(100,[int][Math]::Round(100-[double]$used)))
 }
 function Get-QuotaCaption($a,$prefix){
- # 以前只写倒计时（1天2小时），看不出是哪天；现在把日期和倒计时一起摆出来。
- try{$f=$a.quotaFacts.$prefix;if($null-ne$f-and$f.resetText){return "$($f.resetText) · $($f.countdown)"}}catch{}
+ # 一次只显示一种时间：默认「还剩多久」，点顶部小标签整体切到「具体几点重置」。
+ # 标签本身常驻当前模式，扫一眼就知道看到的是哪一种，不用猜。
+ try{$f=$a.quotaFacts.$prefix;if($null-ne$f-and$f.resetText){
+  if($script:TimeMode-eq'absolute'){return [string]$f.resetText}
+  if($f.countdown-and$f.countdown-ne'已重置'){return "剩 $($f.countdown)"}
+  return [string]$f.resetText
+ }}catch{}
  return Get-Countdown $a $prefix
 }
 function Test-LoginExpired($a){
@@ -488,17 +493,33 @@ function New-DetailBody($status){
  $topRow=New-Object Windows.Controls.Grid;$topRow.Margin='2,0,0,7'
  $col1=New-Object Windows.Controls.ColumnDefinition;$col1.Width='*'
  $col2=New-Object Windows.Controls.ColumnDefinition;$col2.Width='Auto'
- $topRow.ColumnDefinitions.Add($col1);$topRow.ColumnDefinitions.Add($col2)
+ $col3=New-Object Windows.Controls.ColumnDefinition;$col3.Width='Auto'
+ $topRow.ColumnDefinitions.Add($col1);$topRow.ColumnDefinitions.Add($col2);$topRow.ColumnDefinitions.Add($col3)
  $runningCount=@(Get-RunningTasks $status).Count
  $runningColor=if($runningCount-gt 0){$Green}else{$Muted};$runningText=New-Text "运行中对话：$runningCount（含自动接管）" 11 $runningColor -bold
  [Windows.Controls.Grid]::SetColumn($runningText,0);$topRow.Children.Add($runningText)|Out-Null
  $refreshing=($null-ne$status.quotaRefresh)-and[bool]$status.quotaRefresh.running
  $refreshCaption=if($refreshing){'↻ 刷新中…'}else{'↻'}
  $refreshBrush=if($refreshing){$Yellow}else{$Muted}
+ $timeCaption=if($script:TimeMode-eq'absolute'){'时刻 ▾'}else{'剩余 ▾'}
+ $timeLabel=New-Text $timeCaption 10 $Muted
+ $timeLabel.VerticalAlignment='Center';$timeLabel.Margin='8,0,0,0'
+ $timeLabel.Cursor=[Windows.Input.Cursors]::Hand;$timeLabel.ToolTip='点一下切换：还剩多久 / 具体几点重置'
+ [Windows.Controls.Grid]::SetColumn($timeLabel,1);$topRow.Children.Add($timeLabel)|Out-Null
+ $script:TimeChipLabel=$timeLabel
+ $toggleTimeHandler={param($sender,$eventArgs)
+  $eventArgs.Handled=$true
+  $script:TimeMode=if($script:TimeMode-eq'absolute'){'remaining'}else{'absolute'}
+  # 只换内容不关窗；锁 2 秒，别让定时刷新把刚点过的标签立刻换掉。
+  $script:DetailGuardUntil=[DateTime]::UtcNow.AddSeconds(2)
+  Refresh-Detail
+ }
+ $timeLabel.Add_PreviewMouseLeftButtonDown($toggleTimeHandler)
+ if($SelfTest){$script:TestTimeChip=$timeLabel;$script:TestTimeChipHandler=$toggleTimeHandler}
  $refreshLabel=New-Text $refreshCaption 12 $refreshBrush -bold
  $refreshLabel.HorizontalAlignment='Right';$refreshLabel.VerticalAlignment='Center';$refreshLabel.Margin='8,0,2,0'
  $refreshLabel.Cursor=[Windows.Input.Cursors]::Hand;$refreshLabel.ToolTip='点一下获取最新额度'
- [Windows.Controls.Grid]::SetColumn($refreshLabel,1);$topRow.Children.Add($refreshLabel)|Out-Null
+ [Windows.Controls.Grid]::SetColumn($refreshLabel,2);$topRow.Children.Add($refreshLabel)|Out-Null
  $script:DetailRefreshLabel=$refreshLabel
  $refreshLabel.Add_PreviewMouseLeftButtonDown({param($sender,$eventArgs)$eventArgs.Handled=$true;$script:DetailGuardUntil=[DateTime]::UtcNow.AddSeconds(2);$sender.Text='↻ 刷新中…';Request-QuotaRefresh})
  $stack.Children.Add($topRow)|Out-Null
@@ -542,10 +563,9 @@ function New-DetailBody($status){
    [Windows.Controls.Grid]::SetColumnSpan($weekBox,2);$quotaGrid.Children.Add($weekBox)|Out-Null
   }
   if($null-ne$five-or$null-ne$week){$content.Children.Add($quotaGrid)|Out-Null}
-  # 纯事实：两个重置点相差多久 + 0% 时的一句人话。不判断浪不浪费、不提醒、不加颜色。
+  # 只在 0% 时补一句客观说明；不比较两个重置点、不提醒、不建议、不加颜色。
   $factLines=@()
   try{
-   $gap=[string]$a.quotaFacts.gapText;if(-not[string]::IsNullOrWhiteSpace($gap)){$factLines+=$gap}
    $note=[string]$a.quotaFacts.primary.zeroNote
    if([string]::IsNullOrWhiteSpace($note)){$note=[string]$a.quotaFacts.secondary.zeroNote}
    if(-not[string]::IsNullOrWhiteSpace($note)){$factLines+=$note}
@@ -649,12 +669,22 @@ if($SelfTest){
   & $script:TestSwitchHandler $script:TestSwitchCard ([pscustomobject]@{ClickCount=2;Handled=$false})
   $doubleClickInvokesSwitch=$script:SwitchButtonInvocations-eq 1
  }
+ # 时间标签点一下就整体切换，且刷新后仍记得当前模式（不能出现"不知道看的是哪个时间"）。
+ $timeModeTogglePass=$false
+ if($null-ne$script:TestTimeChipHandler){
+  & $script:TestTimeChipHandler $script:TestTimeChip ([pscustomobject]@{Handled=$false})
+  $timeModeTogglePass=($script:TimeMode-eq'absolute')-and([string]$script:TimeChipLabel.Text-eq'时刻 ▾')
+  & $script:TestTimeChipHandler $script:TimeChipLabel ([pscustomobject]@{Handled=$false})
+  $timeModeTogglePass=$timeModeTogglePass-and($script:TimeMode-eq'remaining')-and([string]$script:TimeChipLabel.Text-eq'剩余 ▾')
+  # 这两次切换会重建面板；卡片计数仍按"首次构建"统计，别让自测动作把自己的断言带偏。
+  $script:UpdateCardsBuilt=1;$script:SwitchableCardsBuilt=1;$script:SwitchGestureCardsBuilt=1;$script:LoginExpiredCardsBuilt=1
+ }
  [pscustomobject]@{ScaledBoundsPass=$scaledBoundsPass;InsideEdgeClickKeepsPanel=$insideClickKeepsPanel;SingleClickKeepsPanel=$singleClickKeepsPanel;DoubleClickInvokesSwitch=$doubleClickInvokesSwitch;DpiScale=[Windows.PresentationSource]::FromVisual($script:Detail).CompositionTarget.TransformToDevice.M11}|ConvertTo-Json -Compress
-[pscustomobject]@{AccountsFromApi=@($script:Status.accounts).Count;CardsBuilt=@($stackForTest.Children).Count;RefreshKeptWindow=$refreshKeptWindow;RefreshKeptCards=$refreshKeptCards;LoginExpiredCards=$script:LoginExpiredCardsBuilt;SwitchableCards=$script:SwitchableCardsBuilt;SwitchGestureCards=$script:SwitchGestureCardsBuilt;SwitchButtonCards=$script:SwitchButtonCardsBuilt;SwitchButtonInvocations=$script:SwitchButtonInvocations;UpdateBadgeHidden=$badgeHiddenWithoutUpdate;UpdateBadgeShown=$badgeShownWithUpdate;UpdateBadgeClicks=$badgeClickInvocations;UpdateCards=$script:UpdateCardsBuilt;PanelHeight=[Math]::Round($script:Detail.Height,1);TopmostRestored=$topmostRestored;NoFocusSteal=$noFocusSteal;RuntimeErrors=$Error.Count;Errors=@($Error|ForEach-Object{$_.InvocationInfo.PositionMessage+' :: '+$_.Exception.Message})}|ConvertTo-Json -Compress -Depth 3
+[pscustomobject]@{AccountsFromApi=@($script:Status.accounts).Count;CardsBuilt=@($stackForTest.Children).Count;RefreshKeptWindow=$refreshKeptWindow;RefreshKeptCards=$refreshKeptCards;LoginExpiredCards=$script:LoginExpiredCardsBuilt;SwitchableCards=$script:SwitchableCardsBuilt;SwitchGestureCards=$script:SwitchGestureCardsBuilt;SwitchButtonCards=$script:SwitchButtonCardsBuilt;SwitchButtonInvocations=$script:SwitchButtonInvocations;UpdateBadgeHidden=$badgeHiddenWithoutUpdate;UpdateBadgeShown=$badgeShownWithUpdate;UpdateBadgeClicks=$badgeClickInvocations;UpdateCards=$script:UpdateCardsBuilt;PanelHeight=[Math]::Round($script:Detail.Height,1);TimeModeToggle=$timeModeTogglePass;TopmostRestored=$topmostRestored;NoFocusSteal=$noFocusSteal;RuntimeErrors=$Error.Count;Errors=@($Error|ForEach-Object{$_.InvocationInfo.PositionMessage+' :: '+$_.Exception.Message})}|ConvertTo-Json -Compress -Depth 3
 Close-Detail
 $Window.Close()
 try{$script:Mutex.ReleaseMutex()}catch{}
-if($Error.Count -gt 0 -or -not$refreshKeptWindow -or -not$refreshKeptCards -or -not$insideClickKeepsPanel -or -not$singleClickKeepsPanel -or -not$doubleClickInvokesSwitch -or -not$topmostRestored -or -not$noFocusSteal -or -not$badgeHiddenWithoutUpdate -or -not$badgeShownWithUpdate -or $badgeClickInvocations -ne 1 -or $script:UpdateCardsBuilt -ne 1){throw 'Widget self-test failed'}
+if($Error.Count -gt 0 -or -not$refreshKeptWindow -or -not$refreshKeptCards -or -not$insideClickKeepsPanel -or -not$singleClickKeepsPanel -or -not$doubleClickInvokesSwitch -or -not$timeModeTogglePass -or -not$topmostRestored -or -not$noFocusSteal -or -not$badgeHiddenWithoutUpdate -or -not$badgeShownWithUpdate -or $badgeClickInvocations -ne 1 -or $script:UpdateCardsBuilt -ne 1){throw 'Widget self-test failed'}
  exit
 }
 $TopmostTimer=New-Object Windows.Threading.DispatcherTimer

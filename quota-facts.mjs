@@ -1,4 +1,4 @@
-// 额度展示的「事实层」：只描述读数与时间，不判断浪不浪费、不建议任何动作。
+// 额度展示的「事实层」：只读数与时间，不判断浪不浪费、不建议任何动作。
 // 后端算一次，浮窗与网页只读结果，避免两端各自取整、各自格式化再对不上。
 // 全部是纯函数，时间由调用方注入，便于单测。
 
@@ -19,7 +19,8 @@ function startOfDay(ms) {
   return date.getTime();
 }
 
-// 以前只写「14:19 重置」，看不出是哪天，两个重置时间根本没法比。
+// 以前只写「14:19 重置」，看不出是哪天。这里把日期算全，
+// 具体显示「还剩多久」还是「几点重置」由前端决定，一次只显示一种。
 export function resetText(resetAt, now = Date.now()) {
   const seconds = Number(resetAt);
   if (!Number.isFinite(seconds) || seconds <= 0) return '';
@@ -44,20 +45,6 @@ export function countdownText(resetAt, now = Date.now()) {
   return `${Math.max(1, minutes)}分`;
 }
 
-// 把两个重置点的差距摆出来即可，不预测「用不用得完」。
-// 能不能用完取决于有没有活、网络稳不稳、活重不重，软件一个都不知道。
-export function resetGapText(primaryReset, secondaryReset) {
-  const primary = Number(primaryReset);
-  const weekly = Number(secondaryReset);
-  if (!Number.isFinite(primary) || !Number.isFinite(weekly) || primary <= 0 || weekly <= 0) return '';
-  const diff = Math.abs(weekly - primary);
-  if (diff < 1800) return '两次重置几乎同时 · 周额度整体重置时 5 小时额度一起清零';
-  const days = Math.floor(diff / 86400);
-  const hours = Math.round((diff % 86400) / 3600);
-  const span = days > 0 ? (hours > 0 ? `约 ${days} 天 ${hours} 小时` : `约 ${days} 天`) : `约 ${hours} 小时`;
-  return `两次重置相差${span} · 周额度整体重置时 5 小时额度一起清零`;
-}
-
 // 0% 到底还能不能跑一次：不猜，只提示可能失败。
 export function zeroNote(remaining, label) {
   return remaining === 0 ? `${label}已见底，下一次请求可能失败` : '';
@@ -77,8 +64,6 @@ function slotFacts(usage, prefix, label, windowMinutes, now) {
   if (prefix === 'primary') {
     lines.push('固定窗口：期间的请求不会改变重置时间');
     lines.push('窗口空闲时不倒计时，第一次请求才开始计时');
-  } else {
-    lines.push('周额度整体重置时，5 小时额度会一起清零');
   }
   const note = zeroNote(remaining, label === '周' ? '周额度' : '5 小时额度');
   if (note) lines.push(note);
@@ -100,6 +85,5 @@ export function buildQuotaFacts(usage, now = Date.now()) {
   return {
     primary: slotFacts(value, 'primary', '5 小时', primaryMinutes, now),
     secondary: slotFacts(value, 'secondary', '周', weeklyMinutes, now),
-    gapText: resetGapText(value.primary_resets_at, value.secondary_resets_at),
   };
 }

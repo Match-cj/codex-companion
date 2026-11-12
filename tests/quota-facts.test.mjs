@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {
-  roundRemaining, resetText, countdownText, resetGapText, zeroNote, buildQuotaFacts,
+  roundRemaining, resetText, countdownText, zeroNote, buildQuotaFacts,
 } from '../quota-facts.mjs';
 import { quotaLeft, pickQuotaSwitchTarget } from '../quota-switch.mjs';
 
@@ -25,7 +25,7 @@ test('remaining percentages round like the client instead of truncating to zero'
   assert.equal(roundRemaining('abc'), null);
 });
 
-test('reset labels carry a date so two reset points can actually be compared', () => {
+test('reset labels carry a date so the exact time is available on demand', () => {
   assert.equal(resetText(sec(at(2026, 11, 12, 14, 19)), NOW), '今天 14:19');
   assert.equal(resetText(sec(at(2026, 11, 13, 6, 53)), NOW), '明天 06:53');
   assert.equal(resetText(sec(at(2026, 11, 11, 23, 10)), NOW), '昨天 23:10');
@@ -40,16 +40,19 @@ test('countdown stays human readable and never claims a negative wait', () => {
   assert.equal(countdownText(sec(NOW - 1000), NOW), '已重置');
 });
 
-test('gap text states the distance between resets without predicting waste', () => {
-  const primary = sec(at(2026, 11, 12, 14, 19));
-  const weekly = sec(at(2026, 11, 13, 15, 19));
-  const text = resetGapText(primary, weekly);
-  assert.match(text, /两次重置相差约 1 天 1 小时/);
-  assert.match(text, /周额度整体重置时 5 小时额度一起清零/);
-  assert.doesNotMatch(text, /浪费|赶紧|建议|提醒/);
-  assert.match(resetGapText(primary, primary + 60), /几乎同时/);
-  assert.equal(resetGapText(null, weekly), '');
-  assert.equal(resetGapText(primary, 0), '');
+test('detail shows one time form at a time and never prints a fake two-reset gap', () => {
+  // 5 小时窗口到周额度重置前会重置几十次；"两次重置相差 6 天"既不是事实也推不出动作。
+  const widget = fs.readFileSync(new URL('../Quota Widget WPF.ps1', import.meta.url), 'utf8');
+  const dashboard = fs.readFileSync(new URL('../dashboard.html', import.meta.url), 'utf8');
+  const facts = fs.readFileSync(new URL('../quota-facts.mjs', import.meta.url), 'utf8');
+  assert.doesNotMatch(facts, /resetGapText|gapText/);
+  assert.doesNotMatch(widget, /gapText|两次重置相差|周额度整体重置时 5 小时额度一起清零/);
+  assert.doesNotMatch(dashboard, /gapText|两次重置相差/);
+  assert.match(widget, /\$script:TimeMode='remaining'/);
+  assert.match(widget, /if\(\$script:TimeMode-eq'absolute'\)\{'时刻 ▾'\}else\{'剩余 ▾'\}/);
+  assert.match(widget, /function Get-QuotaCaption/);
+  assert.match(dashboard, /let quotaTimeMode='remaining'/);
+  assert.match(dashboard, /function toggleQuotaTime\(\)/);
 });
 
 test('zero percent gets a plain fact, not an alarm', () => {
@@ -73,11 +76,9 @@ test('fact bundle carries dates, countdowns, window rules and a zero-percent not
   assert.equal(facts.primary.resetText, '今天 19:19');
   assert.equal(facts.secondary.resetText, '明天 15:19');
   assert.match(facts.primary.windowText, /5 小时窗口 今天 14:19 开始/);
-  assert.match(facts.secondary.windowText, /周额度整体重置时，5 小时额度会一起清零/);
   assert.match(facts.secondary.windowText, /周额度已见底，下一次请求可能失败/);
-  assert.doesNotMatch(facts.secondary.windowText, /窗口空闲时不倒计时/);
-  assert.match(facts.gapText, /两次重置相差/);
-  assert.equal(buildQuotaFacts({}, NOW).gapText, '');
+  assert.doesNotMatch(facts.secondary.windowText, /周额度整体重置时|窗口空闲时不倒计时/);
+  assert.equal(buildQuotaFacts({}, NOW).primary.remaining, null);
 });
 
 test('auto switch never lands on an account whose weekly quota is already empty', () => {
@@ -100,9 +101,9 @@ test('backend computes the facts once and both frontends only render them', () =
   assert.match(server, /quotaFacts:buildQuotaFacts\(account\.usage,Date\.now\(\)\)/);
   assert.match(widget, /\$a\.quotaFacts\.\$prefix/);
   assert.match(widget, /function Get-QuotaCaption/);
-  assert.match(widget, /\$a\.quotaFacts\.gapText/);
+  assert.match(widget, /\$script:TimeChipLabel/);
   assert.match(dashboard, /function quotaHtml\(label,facts\)/);
-  assert.match(dashboard, /facts\.gapText/);
+  assert.match(dashboard, /quotaTimeMode==='absolute'/);
   // 纯事实层：不新增颜色规则、不新增提醒、不新增设置项。
   assert.doesNotMatch(widget, /quotaFacts.* notification/i);
 });
@@ -111,7 +112,7 @@ test('widget, server and package versions stay aligned', () => {
   const server = fs.readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
   const widget = fs.readFileSync(new URL('../Quota Widget WPF.ps1', import.meta.url), 'utf8');
   const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-  assert.equal(pkg.version, '1.0.58');
-  assert.match(server, /const APP_VERSION = '1\.0\.58'/);
-  assert.match(widget, /\$script:AppVersion='1\.0\.58'/);
+  assert.equal(pkg.version, '1.0.59');
+  assert.match(server, /const APP_VERSION = '1\.0\.59'/);
+  assert.match(widget, /\$script:AppVersion='1\.0\.59'/);
 });
