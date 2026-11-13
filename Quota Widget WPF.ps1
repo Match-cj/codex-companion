@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 Add-Type 'using System; using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags); [DllImport("user32.dll", EntryPoint="GetWindowLongW")] public static extern int GetWindowLong(IntPtr hwnd, int index); [DllImport("user32.dll", EntryPoint="SetWindowLongW")] public static extern int SetWindowLong(IntPtr hwnd, int index, int value); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); }'
-$script:Port=$Port; $script:AppVersion='1.0.59'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false; $script:UpdateInfo=$null; $script:Updating=$false; $script:UpdateCardsBuilt=0; $script:UpdateButtonInvocations=0; $script:QuotaRefreshInFlight=$false; $script:QuotaRefreshStartedAt=0; $script:QuotaRefreshDeadline=[DateTime]::UtcNow; $script:QuotaPollTimer=$null; $script:RefreshMenuItem=$null; $script:DetailGuardUntil=[DateTime]::UtcNow; $script:DetailPendingRefresh=$false; $script:DetailRefreshTimer=$null; $script:DetailRefreshLabel=$null; $script:LastAutoRefreshAt=0; $script:TimeMode='remaining'; $script:TimeChipLabel=$null; $script:TestTimeChip=$null; $script:TestTimeChipHandler=$null
+$script:Port=$Port; $script:AppVersion='1.0.60'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false; $script:UpdateInfo=$null; $script:Updating=$false; $script:UpdateCardsBuilt=0; $script:UpdateButtonInvocations=0; $script:QuotaRefreshInFlight=$false; $script:QuotaRefreshStartedAt=0; $script:QuotaRefreshDeadline=[DateTime]::UtcNow; $script:QuotaPollTimer=$null; $script:RefreshMenuItem=$null; $script:DetailGuardUntil=[DateTime]::UtcNow; $script:DetailPendingRefresh=$false; $script:DetailRefreshTimer=$null; $script:DetailRefreshLabel=$null; $script:LastAutoRefreshAt=0; $script:TimeMode='remaining'; $script:TimeChipLabel=$null; $script:TestTimeChip=$null; $script:TestTimeChipHandler=$null
 $mutexName=if($SelfTest){'Global\CodexCompanionQuotaWidget_v5_selftest'}else{'Global\CodexCompanionQuotaWidget_v5'}
 $script:Mutex=New-Object System.Threading.Mutex($false,$mutexName); if(-not $script:Mutex.WaitOne(0,$false)){exit}
 $Transparent=[Windows.Media.Brushes]::Transparent
@@ -123,7 +123,7 @@ function New-QuotaIcon($kind){
   $bar=New-Object Windows.Shapes.Line;$bar.X1=2;$bar.Y1=5;$bar.X2=12;$bar.Y2=5;$bar.Stroke=$Muted;$bar.StrokeThickness=1.2;$canvas.Children.Add($bar)|Out-Null
   foreach($x in @(4,10)){$pin=New-Object Windows.Shapes.Line;$pin.X1=$x;$pin.Y1=1;$pin.X2=$x;$pin.Y2=4;$pin.Stroke=$Muted;$pin.StrokeThickness=1.4;$pin.StrokeStartLineCap='Round';$pin.StrokeEndLineCap='Round';$canvas.Children.Add($pin)|Out-Null}
  }else{
-  $symbol=New-Text '↻' 14 $Muted -bold;$symbol.FontFamily='Segoe UI Symbol';$symbol.Margin='-1,-4,0,0';$canvas.Children.Add($symbol)|Out-Null
+  $symbol=New-Text '↻' 14 $Muted -bold;$symbol.FontFamily='Segoe UI Symbol';$symbol.Margin='0,-4,0,0';$canvas.Children.Add($symbol)|Out-Null
  }
  return $canvas
 }
@@ -139,6 +139,8 @@ function Get-SortReset($a){
 function New-Quota($tag,$remaining,$countdown,$width){
  $box=New-Object Windows.Controls.StackPanel
  $box.Width=$width
+ # 固定宽度在 195 的列里默认会居中，不显式靠左会比标题/到期行右缩 3~4 像素。
+ $box.HorizontalAlignment='Left'
  $box.Margin='0,4,0,0'
  $line=New-Object Windows.Controls.StackPanel;$line.Orientation='Horizontal'
  $line.Children.Add((New-QuotaIcon $tag))|Out-Null
