@@ -24,6 +24,7 @@ import { createFeishuInbox, inboxEntryFromEvent } from './feishu-inbox.mjs';
 import { parseFeishuPost, isRichTextMessage } from './feishu-post.mjs';
 import { stallNoticeDecision } from './stall-notice.mjs';
 import { createNativeUsage } from './native-usage.mjs';
+import { parseResetCommand, selectResetCredit, isPendingResetValid, buildResetConfirmText, buildResetQueryText, buildResetResultText } from './reset-credit.mjs';
 import { warmupDecision } from './warmup-policy.mjs';
 import { verifyWarmupWindow, isTransientWarmupError } from './warmup-verify.mjs';
 import { updateFailureRecord, updateRetryDecision, updateLogLine, trimUpdateLog, UPDATE_LOG_MAX_BYTES } from './update-diagnostics.mjs';
@@ -38,7 +39,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.60';
+const APP_VERSION = '1.0.61';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -313,6 +314,16 @@ const feishuContinueRequests = new Map();
 const feishuReactionEvents = new Map();
 const feishuReactionMessages = new Map();
 const feishuBotReactions = new Map();
+// 「用重置」是不可逆动作：先记下待确认的请求，只有本人再回「确认」才执行。
+// 放在内存里即可——重启后自动作废，比留一个可能被重放的持久化令牌安全。
+const pendingResetRedemptions = new Map();
+async function appendResetCreditLog(line) {
+  try {
+    const logPath = path.join(appDir, 'reset-credit.log');
+    await fs.mkdir(appDir, { recursive: true });
+    await fs.appendFile(logPath, `[${new Date().toISOString()}] ${String(line).replace(/[\r\n]+/g, ' ')}\n`, 'utf8');
+  } catch {}
+}
 const REACTION_DEDUPE_MS = 10 * 60 * 1000;
 function alreadySeenReaction(map, key, now, ttlMs = REACTION_DEDUPE_MS) {
   for (const [storedKey, at] of map) if (now - at > ttlMs) map.delete(storedKey);
@@ -759,7 +770,7 @@ function feishuRunningCount() {
 function feishuMenuText() {
   const takeover = desktopTakeoverAllowed(config) ? '开启' : '关闭';
   const retry = desktopRetryState();
-  return `Codex Tools 手机菜单\n\n自动重试：${retry.enabled ? '开启' : '关闭'}${retry.enabled ? `（已点击 ${retry.hits} 次）` : ''}\n自动接管：${takeover}\n额度用尽自动换号：${config.autoSwitchAccountOnQuotaExhausted === true ? '开启' : '关闭（会先问你）'}\n运行中对话：${feishuRunningCount()} 个\n\n可直接回复下面的命令：\n· 自动重试 开启\n· 自动重试 关闭\n· 自动接管 开启\n· 自动接管 关闭\n· 切换（额度用尽时换到有额度的账号并继续）\n· 切换 账号名\n· 自动切换 开启\n· 自动切换 关闭\n· 账号（看每个账号还剩多少）\n· 状态\n· 自动重试（查状态）\n· 交接提示词\n· 刷新额度\n· 绑定最近对话\n· 新话题\n\n说明：自动重试只是按下桌面端自己的重试按钮，不改对话、不换模型；它开启时自动接管不再转入后台。`;
+  return `Codex Tools 手机菜单\n\n自动重试：${retry.enabled ? '开启' : '关闭'}${retry.enabled ? `（已点击 ${retry.hits} 次）` : ''}\n自动接管：${takeover}\n额度用尽自动换号：${config.autoSwitchAccountOnQuotaExhausted === true ? '开启' : '关闭（会先问你）'}\n运行中对话：${feishuRunningCount()} 个\n\n可直接回复下面的命令：\n· 自动重试 开启\n· 自动重试 关闭\n· 自动接管 开启\n· 自动接管 关闭\n· 切换（额度用尽时换到有额度的账号并继续）\n· 切换 账号名\n· 自动切换 开启\n· 自动切换 关闭\n· 账号（看每个账号还剩多少）\n· 状态\n· 自动重试（查状态）\n· 交接提示词\n· 刷新额度\n· 重置次数（看每个号还有几次）\n· 用重置（用掉一次，会先让你确认）\n· 绑定最近对话\n· 新话题\n\n说明：自动重试只是按下桌面端自己的重试按钮，不改对话、不换模型；它开启时自动接管不再转入后台。`;
 }
 
 function desktopRetryStatusText() {
@@ -794,7 +805,66 @@ setDesktopRetryNotifier(({ window, text }) => {
   notify(`这个「重试」不是模型繁忙，我没有自动点\n窗口：${window}\n错误内容：${detail}\n\n${advice}`, { appName: 'Codex 任务', notificationType: 'retry_unhelpful' }).catch(() => {});
 });
 
-async function handleFeishuControlCommand(text, message) {
+// 使用重置：两步走。第一步只出确认卡，第二步「确认」才真的调用官方兑换。
+// 取出待确认记录时立刻删除，飞书重推同一条消息也不会扣第二次。
+async function handleResetCreditCommand(text, message, senderId) {
+  const parsed = parseResetCommand(text);
+  if (!parsed) return false;
+  const operator = String(senderId || '');
+  const reply = value => sendFeishuAppText(value, { replyTo: message.message_id });
+  if (parsed.action === 'cancel') {
+    pendingResetRedemptions.delete(operator);
+    await reply('已取消，这次不会用掉重置。');
+    return true;
+  }
+  if (parsed.action === 'confirm') {
+    const pending = pendingResetRedemptions.get(operator);
+    if (!isPendingResetValid(pending)) {
+      pendingResetRedemptions.delete(operator);
+      await reply('没有待确认的重置请求，或已超过 10 分钟。请重新发「用重置」。');
+      return true;
+    }
+    pendingResetRedemptions.delete(operator);
+    await reply(`正在为 ${pending.name} 使用重置，稍等十几秒，我会回报结果。`);
+    try {
+      const result = await redeemNativeReset(pending.id, { idempotencyKey: pending.idempotencyKey });
+      await appendResetCreditLog(`兑换完成：${pending.name} · ${result.channel} · code=${result.code} · ok=${result.ok} · uncertain=${result.uncertain} · ${result.message}`);
+      await reply(buildResetResultText({ name: pending.name, verdict: result.verdict, before: result.before, after: result.after, uncertain: result.uncertain }));
+    } catch (error) {
+      const reason = humanError(error);
+      await appendResetCreditLog(`兑换失败：${pending.name} · ${reason}`);
+      await reply(`【${pending.name}】这次没有用成：${reason}\n没有证据表明次数被扣，先到 Codex 的 /usage 里核对，别立刻重试。`);
+    }
+    return true;
+  }
+  if (parsed.action === 'query') {
+    await reply(buildResetQueryText(accounts));
+    return true;
+  }
+  let target = accounts.find(account => account.is_active);
+  if (parsed.targetName) {
+    target = findAccountByName(accounts, parsed.targetName);
+    if (!target) {
+      await reply(`没有找到「${parsed.targetName}」这个账号。\n现有账号：${accounts.map(account => accountDisplayName(account)).join('、')}`);
+      return true;
+    }
+  }
+  if (!target) { await reply('现在没有可用账号，请先登录。'); return true; }
+  const count = Number(target.reset_count);
+  if (Number.isFinite(count) && count <= 0) {
+    await reply(`【${accountDisplayName(target)}】没有可用的免费重置次数了。`);
+    return true;
+  }
+  const pending = { id: String(target.id), name: accountDisplayName(target), at: Date.now(), idempotencyKey: randomUUID() };
+  pendingResetRedemptions.set(operator, pending);
+  await appendResetCreditLog(`确认卡：${pending.name} · 可用 ${count} 次 · key=${pending.idempotencyKey}`);
+  const credit = selectResetCredit(target.usage?.reset_credits || [], { now: Date.now() });
+  await reply(buildResetConfirmText({ name: pending.name, account: target, credit, now: Date.now() }));
+  return true;
+}
+
+async function handleFeishuControlCommand(text, message, senderId = '') {
+  if (await handleResetCreditCommand(text, message, senderId)) return true;
   const command = String(text || '').trim().replace(/[：:]/g, ' ');
   // 账号接力指令：切换 / 切换 账号名 / 自动切换 开启|关闭 / 账号
   const parsedSwitch = parseSwitchCommand(command);
@@ -942,7 +1012,7 @@ async function handleFeishuMessage(data, { recovered = false } = {}) {
       return;
     }
     if (chatId !== config.feishuBoundChatId) return;
-    if (isTextLike && typeof handleFeishuControlCommand === 'function' && await handleFeishuControlCommand(text, message)) return;
+    if (isTextLike && typeof handleFeishuControlCommand === 'function' && await handleFeishuControlCommand(text, message, senderId)) return;
     if (isTextLike && isQuotaCommand(text)) {
       await sendFeishuAppText(await currentQuotaText(), { replyTo: message.message_id });
       return;
@@ -1199,10 +1269,12 @@ async function handleQuotaExhaustedFailure(task, { detail = '' } = {}) {
         `回复「切换 ${accountDisplayName(target)}」：指定账号`,
         '回复「切换 账号名 不继续」：只换账号，不接着跑',
         '回复「自动切换 开启」：以后额度用尽自动换号',
+        '回复「用重置」：用掉一次免费重置（会先让你确认）',
       ].join('\n')
     : [
         '额度重置后回复「继续」就能接着干。',
         '回复「自动切换 开启」：以后有可用账号时自动换号。',
+        '回复「用重置」：用掉一次免费重置（会先让你确认）',
       ].join('\n');
   await notify(`Codex 额度用尽，任务中断\n任务：${task.id}\n中断账号：${activeLine}\n${hint}${otherLines ? '\n\n其它账号：\n' + otherLines : ''}\n\n${actions}${detail ? '\n\n原始提示：' + trim(detail, 400) : ''}`, { appName: 'Codex 任务', taskId: task.id, notificationType: 'task_failed' }).catch(error => console.error('[quota exhausted notice]', error.message));
   return true;
@@ -1824,6 +1896,8 @@ async function verifyNativeVaultRoundTrip() {
 const {
   nativeAccountEntry,
   warmupNativeAccount,
+  redeemNativeReset,
+  inspectResetCredits,
   readNativeUsage,
   readNativeUsages,
 } = createNativeUsage({
@@ -2315,6 +2389,11 @@ function formatQuotaStatus(account) {
       const when = new Date(planExpiry * 1000).toLocaleString('zh-CN', { hour12: false });
       lines.push(planExpiry <= Date.now() / 1000 ? `会员：已到期（${when}），部分模型可能用不了` : `会员：${account.plan_type || ''} 到期 ${when}（还剩 ${formatQuotaReset(planExpiry)}）`);
     }
+  }
+  const resetCount = Number(account.reset_count);
+  if (Number.isFinite(resetCount) && resetCount > 0) {
+    const resetExpiry = parseExpirySeconds(account?.reset_credits_expires_at);
+    lines.push(`免费重置：${resetCount} 次${Number.isFinite(resetExpiry) ? ` · ${formatQuotaReset(resetExpiry)}后到期` : ''}`);
   }
   return lines.join('\n');
 }
@@ -3407,6 +3486,24 @@ async function handle(req, res) {
       }finally{
         launchCodexDesktop();
       }
+    }
+    if (req.method==='GET'&&u.pathname==='/api/accounts/reset-credits'){
+      if(!isLoopback(req.socket.remoteAddress))return send(res,403,{error:'重置诊断只能在本机读取'});
+      const id=String(u.searchParams.get('id')||'');
+      const account=accounts.find(item=>String(item.id)===id);
+      if(!account)throw Error('没有找到这个账号。');
+      return send(res,200,{ok:true,name:accountDisplayName(account),...await inspectResetCredits(id)});
+    }
+    if (req.method==='POST'&&u.pathname==='/api/accounts/redeem-reset'){
+      if(!isLoopback(req.socket.remoteAddress))return send(res,403,{error:'使用重置只能在本机操作'});
+      if(data.confirm!==true)throw Error('使用重置不可撤销，请先确认。');
+      const id=String(data.id||'');
+      const account=accounts.find(item=>String(item.id)===id);
+      if(!account)throw Error('没有找到这个账号，请刷新后再试。');
+      const name=accountDisplayName(account);
+      const result=await redeemNativeReset(id,{idempotencyKey:String(data.idempotencyKey||randomUUID())});
+      await appendResetCreditLog(`本机兑换：${name} · ${result.channel} · ok=${result.ok} · uncertain=${result.uncertain} · ${result.message}`);
+      return send(res,200,{...result,message:buildResetResultText({name,verdict:result.verdict,before:result.before,after:result.after,uncertain:result.uncertain})});
     }
     if (req.method==='POST'&&u.pathname==='/api/accounts/warmup'){
       if(data.confirm!==true)throw Error('预热会发送一次最小请求并启动额度窗口，请先确认。');

@@ -46,6 +46,9 @@ test('network diagnosis is wired to quota reads, the status API, both UIs and a 
 });
 
 test('every isolated Codex home is cleaned with credential scrubbing, not a silent rm', () => {
-  assert.equal((nativeUsage.match(/wipeAndRemoveHome\(home, root\)/g) || []).length, 2);
+  // 隔离进程有预热、读额度、兑换重置、只读诊断四处，每一处都要有对应的清理。
+  const sessions = (nativeUsage.match(/new IsolatedUsageSession\(/g) || []).length;
+  assert.ok(sessions >= 2);
+  assert.equal((nativeUsage.match(/wipeAndRemoveHome\(home, root\)/g) || []).length, sessions);
   assert.doesNotMatch(nativeUsage, /fs\.rm\(resolvedHome/);
 });

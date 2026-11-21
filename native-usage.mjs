@@ -16,6 +16,7 @@ import { humanError } from './human-error.mjs';
 import { wipeAndRemoveHome } from './temp-homes.mjs';
 import { codexLaunch } from './desktop-client.mjs';
 import { decodeJwtPayload } from './auth-utils.mjs';
+import { selectResetCredit, summarizeResetState, verifyResetRedemption } from './reset-credit.mjs';
 
 export class IsolatedUsageSession {
   constructor(home, { version = '', launch = codexLaunch } = {}) {
@@ -163,15 +164,46 @@ async function getJsonWithSecretHeaders(url, headers) {
     curl.stdin.end(Object.entries(headers).map(([name, value]) => `${name}: ${value}`).join('\n') + '\n');
   });
 }
-export async function readResetCreditDetails(auth) {
+function chatgptCredentialHeaders(auth) {
   const accessToken = auth?.tokens?.access_token;
   const accountId = auth?.tokens?.account_id || decodeJwtPayload(auth?.tokens?.id_token)['https://api.openai.com/auth']?.chatgpt_account_id;
   if (!accessToken || !accountId) return null;
-  const details = await getJsonWithSecretHeaders('https://chatgpt.com/backend-api/wham/rate-limit-reset-credits', {
-    Authorization: `Bearer ${accessToken}`,
-    'ChatGPT-Account-ID': accountId,
+  return { Authorization: `Bearer ${accessToken}`, 'ChatGPT-Account-ID': accountId };
+}
+
+// Redeeming is a POST. The request body carries only a UUID and a credit id,
+// so it is safe on the command line; the token still goes through stdin.
+// Unlike the GET helper this returns the HTTP status instead of throwing, so a
+// definite 4xx can be told apart from an ambiguous network failure.
+async function postJsonWithSecretHeaders(url, headers, body) {
+  const payload = JSON.stringify(body);
+  const allHeaders = { ...headers, 'Content-Type': 'application/json' };
+  if (process.platform !== 'win32' || !existsSync(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'curl.exe'))) {
+    const response = await fetch(url, { method: 'POST', headers: allHeaders, body: payload });
+    return { status: response.status, text: await response.text() };
+  }
+  return await new Promise((resolve, reject) => {
+    const curl = spawn('curl.exe', ['--silent', '--show-error', '--request', 'POST', '--header', '@-', '--data-binary', payload, '--write-out', '\nCODEX_HTTP_STATUS:%{http_code}', url], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
+    let stdout = '', stderr = '';
+    curl.stdout.setEncoding('utf8'); curl.stderr.setEncoding('utf8');
+    curl.stdout.on('data', chunk => stdout += chunk); curl.stderr.on('data', chunk => stderr += chunk);
+    curl.on('error', reject);
+    curl.on('exit', code => {
+      const marker = '\nCODEX_HTTP_STATUS:';
+      const index = stdout.lastIndexOf(marker);
+      if (index < 0) return reject(Error(stderr.trim() || `兑换请求没有返回状态（${code ?? '-'}）`));
+      resolve({ status: Number(stdout.slice(index + marker.length).trim()), text: stdout.slice(0, index) });
+    });
+    curl.stdin.end(Object.entries(allHeaders).map(([name, value]) => `${name}: ${value}`).join('\n') + '\n');
   });
+}
+
+export async function readResetCreditDetails(auth) {
+  const headers = chatgptCredentialHeaders(auth);
+  if (!headers) return null;
+  const details = await getJsonWithSecretHeaders('https://chatgpt.com/backend-api/wham/rate-limit-reset-credits', headers);
   const credits = Array.isArray(details?.credits) ? details.credits.map(credit => ({
+    id: credit?.id || credit?.credit_id || null,
     status: credit?.status || null,
     expiresAt: credit?.expires_at || credit?.expiresAt || null,
   })) : null;
@@ -179,6 +211,28 @@ export async function readResetCreditDetails(auth) {
     availableCount: Number.isFinite(Number(details?.available_count)) ? Number(details.available_count) : undefined,
     credits,
   };
+}
+
+// The official client uses this REST endpoint when the app-server read does not
+// include individual credits. `credit_id` is optional here: the server picks a
+// card when it is omitted, which is why this is the fallback path.
+export async function redeemResetViaRest(auth, { idempotencyKey, creditId = '' } = {}) {
+  const headers = chatgptCredentialHeaders(auth);
+  if (!headers) return { ok: false, definite: true, reason: '账号凭据不完整。' };
+  const body = { redeem_request_id: idempotencyKey };
+  if (creditId) body.credit_id = creditId;
+  let response;
+  try {
+    response = await postJsonWithSecretHeaders('https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume', headers, body);
+  } catch (error) {
+    return { ok: false, definite: false, reason: humanError(error) };
+  }
+  if (!Number.isFinite(response.status) || response.status < 200 || response.status >= 300) {
+    return { ok: false, definite: true, reason: `官方接口返回 HTTP ${response.status || '未知'}` };
+  }
+  let parsed = {};
+  try { parsed = JSON.parse(response.text); } catch {}
+  return { ok: true, code: String(parsed?.code || 'reset').toLowerCase(), windowsReset: parsed?.windows_reset ?? null };
 }
 
 // Companion state lives in server.mjs; pass it in and get the quota helpers
@@ -263,6 +317,119 @@ export function createNativeUsage({
       return { id: key, name: entry.email || entry.name || key };
     } finally { nativeWarmupsInProgress.delete(key); }
   }
+  // Redeeming a banked reset is irreversible: run it in the same throwaway
+  // Codex process used for quota reads, then re-read the limits to prove it
+  // actually happened. Never claim success from "the request was sent".
+  const nativeRedemptionsInProgress = new Set();
+  async function redeemNativeReset(id, { idempotencyKey = randomUUID() } = {}) {
+    const key = String(id);
+    if (nativeRedemptionsInProgress.has(key)) throw Error('这个账号正在使用重置，请等这一次结束。');
+    nativeRedemptionsInProgress.add(key);
+    const root = path.join(appDir, 'native-reset');
+    const home = path.join(root, randomUUID());
+    const session = new IsolatedUsageSession(home, { version });
+    try {
+      const entry = await nativeAccountEntry(key);
+      const publicAccount = getAccounts().find(item => String(item.id) === key);
+      const name = publicAccount?.display_name || publicAccount?.name || entry.email || key;
+      const auth = JSON.parse(await unprotectCredential(entry.protected_auth));
+      if (!auth?.tokens?.access_token || !auth?.tokens?.refresh_token) throw Error('账号凭据不完整，无法使用重置。');
+      await fs.mkdir(home, { recursive: true });
+      await atomicJsonWrite(path.join(home, 'auth.json'), auth);
+      await session.start();
+      const before = summarizeResetState(await session.request('account/rateLimits/read', null, 45000));
+      let credit = selectResetCredit(before.credits);
+      if (!credit) {
+        const details = await readResetCreditDetails(auth).catch(() => null);
+        credit = selectResetCredit(details?.credits);
+        if (before.availableCount === null && Number.isFinite(Number(details?.availableCount))) before.availableCount = Number(details.availableCount);
+      }
+      if (before.availableCount === 0) throw Error('这个账号已经没有可用的免费重置次数了。');
+      let channel = '', code = '', uncertain = false, windowsReset = null;
+      if (credit?.id) {
+        try {
+          const result = await session.request('account/rateLimitResetCredit/consume', { idempotencyKey, creditId: credit.id }, 60000);
+          channel = 'app-server';
+          code = String(result?.code || result?.status || 'reset').toLowerCase();
+          windowsReset = result?.windowsReset ?? result?.windows_reset ?? null;
+        } catch (error) {
+          const reason = String(error?.message || error);
+          if (/method not found|unknown method|invalid params|not supported|方法.*不存在|不支持/i.test(reason)) {
+            const rest = await redeemResetViaRest(auth, { idempotencyKey, creditId: credit.id });
+            channel = 'rest-fallback';
+            if (!rest.ok) return { id: key, name, ok: false, uncertain: !rest.definite, message: rest.reason, channel };
+            code = rest.code; windowsReset = rest.windowsReset;
+          } else if (/超时|timeout|timed out|网络|network/i.test(reason)) {
+            uncertain = true; channel = 'app-server-uncertain';
+          } else throw error;
+        }
+      } else {
+        const rest = await redeemResetViaRest(auth, { idempotencyKey });
+        channel = 'rest';
+        if (!rest.ok) return { id: key, name, ok: false, uncertain: !rest.definite, message: rest.reason, channel };
+        code = rest.code; windowsReset = rest.windowsReset;
+      }
+      if (code === 'no_credit' || code === 'nothing_to_reset') {
+        throw Error(code === 'no_credit' ? '官方说这个账号已经没有可用的重置次数了。' : '官方说当前没有可重置的额度窗口，这次没有消耗次数。');
+      }
+      let after = null, verdict = null;
+      if (!uncertain) {
+        try {
+          after = summarizeResetState(await session.request('account/rateLimits/read', null, 45000));
+          verdict = verifyResetRedemption(before, after);
+        } catch (error) {
+          uncertain = true;
+          verdict = { ok: false, uncertain: true, evidence: '', message: `兑换请求已发出，但重新读取额度失败：${humanError(error)}` };
+        }
+      }
+      const updatedAuth = await readJson(path.join(home, 'auth.json')).catch(() => null);
+      if (updatedAuth?.tokens?.access_token && JSON.stringify(updatedAuth) !== JSON.stringify(auth)) await upsertNativeAccount(updatedAuth, entry);
+      nativeUsageCache.delete(key);
+      await refreshAccounts({ awaitNative: true }).catch(() => {});
+      return {
+        id: key, name, channel, code, creditId: credit?.id || '', idempotencyKey, windowsReset,
+        ok: !uncertain && Boolean(verdict?.ok), uncertain, before, after, verdict,
+        message: uncertain ? '兑换请求已发出，但结果没读到，不能确认是否生效。' : (verdict?.message || ''),
+      };
+    } finally {
+      await session.shutdown();
+      if (!await wipeAndRemoveHome(home, root)) console.warn('[reset credit cleanup] 临时目录暂时删不掉，会在下次启动时自动清理。');
+      nativeRedemptionsInProgress.delete(key);
+    }
+  }
+  // Read-only probe used by the diagnostics endpoint: are the individual
+  // credit ids available on this machine? Never logs the ids themselves.
+  async function inspectResetCredits(id) {
+    const key = String(id);
+    const entry = await nativeAccountEntry(key);
+    const root = path.join(appDir, 'native-reset-inspect');
+    const home = path.join(root, randomUUID());
+    const session = new IsolatedUsageSession(home, { version });
+    try {
+      const auth = JSON.parse(await unprotectCredential(entry.protected_auth));
+      await fs.mkdir(home, { recursive: true });
+      await atomicJsonWrite(path.join(home, 'auth.json'), auth);
+      await session.start();
+      const state = summarizeResetState(await session.request('account/rateLimits/read', null, 45000));
+      let source = 'app-server';
+      let credits = state.credits;
+      if (!credits.length) {
+        const details = await readResetCreditDetails(auth).catch(() => null);
+        if (details?.credits?.length) { credits = details.credits; source = 'rest'; }
+      }
+      return {
+        id: key, source, availableCount: state.availableCount,
+        credits: credits.map(credit => ({
+          hasId: Boolean(credit?.id || credit?.creditId || credit?.credit_id),
+          status: credit?.status || null,
+          expiresAt: credit?.expiresAt ?? credit?.expires_at ?? null,
+        })),
+      };
+    } finally {
+      await session.shutdown();
+      if (!await wipeAndRemoveHome(home, root)) console.warn('[reset credit inspect cleanup] 临时目录暂时删不掉。');
+    }
+  }
   async function readNativeUsageOnce(entry, force = false) {
     const cached = nativeUsageCache.get(String(entry.id));
     if (!force && cached && Date.now() - cached.at < 4 * 60 * 1000) return { ...cached.usage, cached: true };
@@ -321,5 +488,5 @@ export function createNativeUsage({
     }));
     return new Map(pairs);
   }
-  return { nativeAccountEntry, warmupNativeAccount, readNativeUsage, readNativeUsages, readNativeUsageOnce };
+  return { nativeAccountEntry, warmupNativeAccount, redeemNativeReset, inspectResetCredits, readNativeUsage, readNativeUsages, readNativeUsageOnce };
 }
