@@ -22,6 +22,7 @@ import { humanError } from './human-error.mjs';
 import { base64Url, decodeJwtPayload, jwtExpiry, oauthPortStatus } from './auth-utils.mjs';
 import { createFeishuInbox, inboxEntryFromEvent } from './feishu-inbox.mjs';
 import { parseFeishuPost, isRichTextMessage } from './feishu-post.mjs';
+import { saveFeishuImage } from './feishu-image-cache.mjs';
 import { stallNoticeDecision } from './stall-notice.mjs';
 import { createNativeUsage } from './native-usage.mjs';
 import { parseResetCommand, selectResetCredit, isPendingResetValid, buildResetConfirmText, buildResetQueryText, buildResetResultText } from './reset-credit.mjs';
@@ -39,7 +40,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.61';
+const APP_VERSION = '1.0.62';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -563,15 +564,13 @@ async function downloadFeishuImage(messageId, imageKey) {
     path: { message_id: messageId, file_key: imageKey },
   });
   const rawType = resource?.headers?.get?.('content-type') || resource?.headers?.['content-type'] || '';
-  const extension = /png/i.test(rawType) ? '.png' : /webp/i.test(rawType) ? '.webp' : /gif/i.test(rawType) ? '.gif' : '.jpg';
-  const imageDir = path.join(appDir, 'feishu-images');
-  await fs.mkdir(imageDir, { recursive: true });
-  const safeId = String(messageId).replace(/[^a-z0-9_-]/gi, '_');
-  const imagePath = path.join(imageDir, `${safeId}${extension}`);
-  await resource.writeFile(imagePath);
-  const cleanup = setTimeout(() => fs.unlink(imagePath).catch(() => {}), 60 * 60 * 1000);
-  cleanup.unref?.();
-  return imagePath;
+  return await saveFeishuImage({
+    imageDir: path.join(appDir, 'feishu-images'),
+    messageId,
+    imageKey,
+    contentType: rawType,
+    writeFile: (imagePath) => resource.writeFile(imagePath),
+  });
 }
 
 async function sendFeishuResultImage(bytes, replyTo, taskId) {
