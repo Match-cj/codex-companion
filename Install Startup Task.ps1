@@ -2,15 +2,23 @@
 
 $ErrorActionPreference = 'Stop'
 $taskName = 'Codex Companion'
-$worker = Join-Path $PSScriptRoot 'Codex Companion Worker.vbs'
-if (-not (Test-Path -LiteralPath $worker)) { throw "找不到独立启动器：$worker" }
+# Launch the PowerShell script directly. Older releases went through a VBS
+# wrapper ("Codex Companion Worker.vbs"); antivirus engines flag VBS scripts
+# that spawn hidden PowerShell as malware and quarantine them, which broke the
+# 5-minute self-heal task with a "cannot find script file" popup every 5 minutes.
+# No wrapper, no wscript.exe: the task calls PowerShell itself.
+$launcher = Join-Path $PSScriptRoot 'Start Codex Companion.ps1'
+if (-not (Test-Path -LiteralPath $launcher)) { throw "找不到启动器：$launcher" }
+$powerShellExe = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+if (-not (Test-Path -LiteralPath $powerShellExe)) { $powerShellExe = 'powershell.exe' }
+$launchArgs = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $launcher + '" -NoBrowser'
 
 $legacyShortcut = Join-Path ([Environment]::GetFolderPath('Startup')) 'Codex Companion.lnk'
 $launchMethod = 'scheduled-task'
 try {
     if ($env:CODEX_COMPANION_FORCE_STARTUP_FALLBACK -eq '1') { throw '启动项回退测试。' }
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $action = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\wscript.exe') -Argument ('"' + $worker + '"') -WorkingDirectory $PSScriptRoot
+    $action = New-ScheduledTaskAction -Execute $powerShellExe -Argument $launchArgs -WorkingDirectory $PSScriptRoot
     $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
     # Repeat trigger: heal a dead backend within 5 minutes even if something
     # killed it (crash, AV, external script). Healthy backend = cheap no-op.
@@ -22,19 +30,19 @@ try {
 }
 catch {
     # Some managed company computers disable per-user scheduled task creation.
-    # A Startup shortcut targeting wscript.exe remains hidden and needs no elevation.
+    # A Startup shortcut targeting powershell.exe remains hidden and needs no elevation.
     $launchMethod = 'startup-shortcut'
     try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue } catch {}
     $startupDirectory = Split-Path -Parent $legacyShortcut
     New-Item -ItemType Directory -Force -Path $startupDirectory | Out-Null
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($legacyShortcut)
-    $shortcut.TargetPath = Join-Path $env:WINDIR 'System32\wscript.exe'
-    $shortcut.Arguments = '"' + $worker + '"'
+    $shortcut.TargetPath = $powerShellExe
+    $shortcut.Arguments = $launchArgs
     $shortcut.WorkingDirectory = $PSScriptRoot
     $shortcut.WindowStyle = 7
     $shortcut.Save()
 }
 
-if ($StartNow) { & (Join-Path $env:WINDIR 'System32\wscript.exe') $worker }
+if ($StartNow) { & $powerShellExe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $launcher -NoBrowser }
 Write-Output "Startup method installed: $launchMethod"

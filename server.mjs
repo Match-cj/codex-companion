@@ -30,6 +30,7 @@ import { warmupDecision } from './warmup-policy.mjs';
 import { verifyWarmupWindow, isTransientWarmupError } from './warmup-verify.mjs';
 import { updateFailureRecord, updateRetryDecision, updateLogLine, trimUpdateLog, UPDATE_LOG_MAX_BYTES } from './update-diagnostics.mjs';
 import { sweepStaleHomes } from './temp-homes.mjs';
+import { healStartupChain } from './startup-chain.mjs';
 import { classifyQuotaFailure, probeNetwork, networkNoticeDecision, readSystemProxy } from './network-health.mjs';
 import { validNativeVault, createNativeVaultStore } from './native-vault.mjs';
 import { DeviceLoginSession } from './device-login.mjs';
@@ -40,7 +41,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.62';
+const APP_VERSION = '1.0.63';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -4321,6 +4322,14 @@ async function main() {
   refreshAccounts().catch(e => console.error('[accounts]', e.message));
   // 启动后检查一次 1455 端口：被 Windows 保留就自动修复（弹一次授权窗口），修一次永久生效。
   setTimeout(() => { repairLoginPort().catch(() => {}); }, 8000).unref?.();
+  // Heal a stale startup chain from older releases: if the scheduled task or
+  // desktop shortcut still points at a VBS wrapper that antivirus deleted,
+  // re-register it to launch PowerShell directly. Runs once, silently.
+  setTimeout(() => {
+    healStartupChain({ sourceDir })
+      .then(outcome => { if (outcome.healed) console.log(`[startup-chain] 已重建被误杀的启动链：task=${outcome.task} shortcut=${outcome.shortcut}`); })
+      .catch(error => console.error('[startup-chain]', error.message));
+  }, 15000).unref?.();
   // Old isolated CODEX_HOME folders could not always be deleted while Codex
   // held sqlite handles. Sweep them once on startup (credentials wiped first),
   // then every run cleans up after itself so nothing accumulates again.

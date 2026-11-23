@@ -16,7 +16,7 @@ const execFileAsync = promisify(execFile);
 
 const sourceDir = path.dirname(fileURLToPath(import.meta.url));
 export const widgetScriptPath = path.join(sourceDir, 'Quota Widget WPF.ps1');
-export const widgetLauncherPath = path.join(sourceDir, 'Launch Quota Widget.vbs');
+export const widgetLauncherPath = path.join(sourceDir, 'Start Quota Widget.ps1');
 
 export const WIDGET_MUTEX_NAME = 'Global\\CodexCompanionQuotaWidget_v5';
 export const WIDGET_WINDOW_TITLE = 'Codex Companion 额度浮窗';
@@ -133,7 +133,10 @@ public class WidgetWindowFocus {
 
 export async function killQuotaWidgetProcesses() {
   if (process.platform !== 'win32') return;
-  const script = `Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" | Where-Object { $_.CommandLine -like '*CodexCompanion\\Quota Widget WPF.ps1*' } | Stop-Process -Force -ErrorAction SilentlyContinue; Get-CimInstance Win32_Process -Filter \"Name='wscript.exe'\" | Where-Object { $_.CommandLine -like '*Launch Quota Widget*' } | Stop-Process -Force -ErrorAction SilentlyContinue;`;
+  // Both the widget itself and its launcher are now PowerShell processes
+  // (the old VBS launcher was quarantined by antivirus). Stop either by
+  // command-line marker; never match this process or the caller's shell.
+  const script = `Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" | Where-Object { ($_.CommandLine -like '*CodexCompanion\\Quota Widget WPF.ps1*' -or $_.CommandLine -like '*CodexCompanion\\Start Quota Widget.ps1*' -or $_.CommandLine -like '*Launch Quota Widget*') -and $_.ProcessId -ne $PID } | Stop-Process -Force -ErrorAction SilentlyContinue;`;
   try { await execPowershellShort(script); } catch {}
 }
 
@@ -149,7 +152,7 @@ export async function openQuotaWidget() {
       if (win) await focusQuotaWidgetWindow(win.hwnd);
       return { ok: true, alreadyOpen: true, message: '额度浮窗已经在运行，并已置顶。' };
     }
-    const child = spawn('wscript.exe', [widgetLauncherPath], { detached: true, windowsHide: true, stdio: 'ignore' });
+    const child = spawn('powershell.exe', ['-NoProfile', '-Sta', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', widgetLauncherPath], { detached: true, windowsHide: true, stdio: 'ignore' });
     child.on('error', (err) => { console.error('[widget] spawn failed:', err.message); });
     child.unref();
     return { ok: true, alreadyOpen: false };

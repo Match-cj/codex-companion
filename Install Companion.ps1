@@ -25,14 +25,20 @@ if ($missing.Count -gt 0) {
     exit 1
 }
 
-$launcher = Join-Path $root 'Codex Companion Launcher.vbs'
+# Launch the PowerShell script directly. The old chain (desktop -> Launcher.vbs
+# -> schtasks -> Worker.vbs) relied on two VBS files that antivirus engines
+# quarantine as "VBS spawning hidden PowerShell"; that broke startup entirely.
+$launcher = Join-Path $root 'Start Codex Companion.ps1'
+$powerShellExe = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+if (-not (Test-Path -LiteralPath $powerShellExe)) { $powerShellExe = 'powershell.exe' }
+$launchArgs = '-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $launcher + '" -NoBrowser'
 $icon = Join-Path $root 'companion.ico'
 $desktop = [Environment]::GetFolderPath('Desktop')
 $shortcutPath = Join-Path $desktop 'Codex 助手.lnk'
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
-$shortcut.TargetPath = Join-Path $env:WINDIR 'System32\wscript.exe'
-$shortcut.Arguments = '"' + $launcher + '"'
+$shortcut.TargetPath = $powerShellExe
+$shortcut.Arguments = $launchArgs
 $shortcut.WorkingDirectory = $root
 if (Test-Path -LiteralPath $icon) { $shortcut.IconLocation = $icon + ',0' }
 $shortcut.Save()

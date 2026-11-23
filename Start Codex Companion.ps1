@@ -8,6 +8,8 @@ $roamingRoot = [Environment]::GetFolderPath('ApplicationData')
 $companionDataRoot = [IO.Path]::GetFullPath((Join-Path $roamingRoot 'CodexCompanion'))
 $env:APPDATA = [IO.Path]::GetFullPath($roamingRoot)
 $env:CODEX_COMPANION_DATA_DIR = $companionDataRoot
+$powerShellExe = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+if (-not (Test-Path -LiteralPath $powerShellExe)) { $powerShellExe = 'powershell.exe' }
 $bundledNode = Join-Path $root 'runtime\node.exe'
 $nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
 $node = if (Test-Path -LiteralPath $bundledNode) { $bundledNode } elseif ($nodeCommand) { $nodeCommand.Source } else { '' }
@@ -187,12 +189,13 @@ if (-not $ready) {
     exit 1
 }
 
-# 4. Start widget through the UTF-8-safe VBS launcher
+# 4. Start widget through the UTF-8-safe PowerShell launcher
 $widgetPath = Join-Path $root 'Quota Widget WPF.ps1'
-if ((Test-Path $widgetPath) -and (Test-Path (Join-Path $root 'Launch Quota Widget.vbs'))) {
+$widgetLauncher = Join-Path $root 'Start Quota Widget.ps1'
+if ((Test-Path $widgetPath) -and (Test-Path $widgetLauncher)) {
     Write-Log "Starting widget"
     try {
-        Start-Process -FilePath 'wscript.exe' -ArgumentList ('"' + (Join-Path $root 'Launch Quota Widget.vbs') + '"') -WindowStyle Hidden
+        Start-Process -FilePath $powerShellExe -ArgumentList @('-NoProfile', '-Sta', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', ('"' + $widgetLauncher + '"')) -WindowStyle Hidden
     } catch {
         Write-Log ("ERROR starting widget: " + $_.Exception.Message)
         Show-ErrorBox ("浮窗启动失败：`n" + $_.Exception.Message +

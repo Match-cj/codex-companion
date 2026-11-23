@@ -1,3 +1,10 @@
+## [1.0.63] - 2026-11-23
+- 修复：**同事更新后每 5 分钟弹一次「无法找到脚本 Codex Companion Worker.vbs」，并且重启后软件再也起不来**。原因是启动链依赖 3 个 VBS 包装脚本（桌面快捷方式 → Launcher.vbs → 计划任务 → Worker.vbs → 后台；浮窗走 Launch Quota Widget.vbs）。这些 VBS 里「用 WScript.Shell 启动隐藏 PowerShell + ExecutionPolicy Bypass」是杀毒软件最典型的误杀特征，同事机器更新时把 Worker.vbs 隔离了，定时自检任务找不到脚本就反复弹窗。
+- 根治：去掉全部 3 个 VBS，启动链改为直接调用 PowerShell。桌面快捷方式、计划任务、安装后的首次启动都直接 `-File Start Codex Companion.ps1`；浮窗新增 `Start Quota Widget.ps1`（纯 PowerShell、保留 UTF-8 安全读取，因 PS5.1 直接读无 BOM 中文会报错）。以后杀软没有 VBS 可隔离，这类弹窗和"重启后起不来"彻底绝迹。
+- 自愈：新增 `startup-chain.mjs`，`server.mjs` 启动后检测一次计划任务/桌面快捷方式是否还指向旧的 VBS/wscript，是则自动重新注册成 PowerShell 直连。旧机器即使只走补丁更新也能自动修复，不必重装。
+- 顺手修了一个打包清单 bug：`Build Branded Installer.ps1` 里 `Desktop Retry Watcher.ps1` 和 `LICENSE` 之间少了逗号，两行被拼成一个字符串，导致这两个文件本该进包却漏了。
+- 新增 11 项启动链测试（旧 wscript/VBS 判为过期、新 PowerShell 不误判、三处安装脚本不再注册 VBS、源码树无 VBS、构建清单无 VBS 且有新脚本、server 自愈已接入）；全量测试与浮窗自测均通过。不动额度、飞书、重置兑换、浮窗外观，不新增提醒或设置。
+
 ## [1.0.62] - 2026-11-22
 - 修复：**飞书一条消息里发多张截图，Codex 里会变成几张一样的图**。转发时给图片存文件只按「消息编号」命名，同一条消息的第 2、3 张会把第 1 张盖掉，最后几个位置全指向最后一张。现在文件名带上每张图自己的编号，各存各的、互不覆盖。
 - 新增 `feishu-image-cache.mjs`（按图片编号生成独立缓存路径、各自定时清理）；`server.mjs` 的 `downloadFeishuImage` 接入，富文本多图处理循环不变。

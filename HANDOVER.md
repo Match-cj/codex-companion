@@ -240,10 +240,9 @@ Codex Switcher 不再是运行依赖。若机器上已有 Switcher，Companion �
 | `human-error.mjs` | 错误翻译成人话 |
 | `dashboard.html` | 完整网页控制台 |
 | `Quota Widget WPF.ps1` | WPF 圆形浮窗及账号面板 |
-| `Launch Quota Widget.vbs` | 隐藏启动浮窗 |
+| `Start Quota Widget.ps1` | 隐藏启动浮窗（纯 PowerShell，UTF-8 安全；旧 VBS 版被杀软误杀，已弃用） |
 | `Start Codex Companion.ps1` | 清理旧实例并启动后台和浮窗 |
-| `Codex Companion Launcher.vbs` | 桌面快捷方式入口 |
-| `Codex Companion Worker.vbs` | 任务计划程序调用的隐藏独立启动入口 |
+| 桌面快捷方式 / 计划任务 | 均直接调用 `Start Codex Companion.ps1`（不再经过 VBS 包装，避免杀软误杀） |
 | `Start Codex Companion.cmd` | 启动并打开网页 |
 | `Start Codex Companion Background.cmd` | 启动但不打开网页 |
 | `Start Quota Widget.cmd` | 单独启动浮窗 |

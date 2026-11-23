@@ -20,4 +20,4 @@ export const nativeAccountsBackupPath = path.join(appDir, 'accounts.vault.backup
 export const switcherAccountsPath = path.join(process.env.USERPROFILE || '', '.codex-switcher', 'accounts.json');
 export const liveAuthPath = path.join(process.env.USERPROFILE || '', '.codex', 'auth.json');
 export const widgetScriptPath = path.join(sourceDir, 'Quota Widget WPF.ps1');
-export const widgetLauncherPath = path.join(sourceDir, 'Launch Quota Widget.vbs');
+export const widgetLauncherPath = path.join(sourceDir, 'Start Quota Widget.ps1');

@@ -106,9 +106,12 @@ try {
 
     $env:CODEX_COMPANION_QUIET = '1'
     & (Join-Path $destination 'Install Companion.ps1')
-    # Start through the same hidden worker regardless of whether startup was
-    # registered as a scheduled task or as the policy-compatible Startup fallback.
-    & (Join-Path $env:WINDIR 'System32\wscript.exe') (Join-Path $destination 'Codex Companion Worker.vbs')
+    # Start the hidden PowerShell launcher directly, regardless of whether
+    # startup was registered as a scheduled task or a Startup fallback. The old
+    # VBS worker was quarantined by antivirus and broke first-run startup.
+    $powerShellExe = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $powerShellExe)) { $powerShellExe = 'powershell.exe' }
+    & $powerShellExe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File (Join-Path $destination 'Start Codex Companion.ps1') -NoBrowser
     $status = $null
     $healthError = ''
     # The launcher can make two 45-second attempts on a cold/antivirus-scanned

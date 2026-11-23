@@ -39,13 +39,13 @@ $issPath = Join-Path $temporaryRoot 'CodexCompanion.iss'
 $node = (Get-Command node.exe -ErrorAction Stop).Source
 $npm = (Get-Command npm.cmd -ErrorAction Stop).Source
 $appFiles = @(
-    'Codex Companion Launcher.vbs','Codex Companion Worker.vbs','companion.ico','dashboard.html','HANDOVER.md',
-    'Install Companion.cmd','Install Companion.ps1','Install Startup Task.ps1','Launch Quota Widget.vbs',
+    'companion.ico','dashboard.html','HANDOVER.md',
+    'Install Companion.cmd','Install Companion.ps1','Install Startup Task.ps1',
     'package.json','package-lock.json','Quota Widget WPF.ps1','README.md',
     'Start Codex Companion Background.cmd','Start Codex Companion.cmd','Start Codex Companion.ps1',
-    'Start Quota Widget.cmd','Stop Codex Companion.cmd','Stop Codex Companion.ps1',
+    'Start Quota Widget.cmd','Start Quota Widget.ps1','Stop Codex Companion.cmd','Stop Codex Companion.ps1',
     'Uninstall Companion.cmd','Uninstall Companion.ps1',
-    'Update Watchdog.ps1','Desktop Retry Watcher.ps1'
+    'Update Watchdog.ps1','Desktop Retry Watcher.ps1',
     'LICENSE','PRIVACY.md','SECURITY.md','THIRD_PARTY.md','CHANGELOG.md'
 )
 
