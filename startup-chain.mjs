@@ -15,23 +15,32 @@ const execFileAsync = promisify(execFile);
 
 export const TASK_NAME = 'Codex Companion';
 
-// Returns true if this Task Scheduler action still uses the removed VBS chain.
+// Returns true if this Task Scheduler action still uses the removed VBS chain,
+// or launches powershell.exe directly (which flashes a Windows Terminal window
+// every 5 minutes on Windows 11 where Terminal is the default console host).
 // Defaults to "healthy" on anything unreadable so we never churn on noise.
 export function taskActionIsStale(action) {
   if (!action) return false;
   const execute = String(action.Execute || '').toLowerCase();
   const args = String(action.Arguments || '').toLowerCase();
   if (execute.includes('wscript.exe') || execute.includes('cscript.exe')) return true;
-  return ['.vbs', 'worker.vbs', 'launcher.vbs'].some(token => args.includes(token));
+  if (['.vbs', 'worker.vbs', 'launcher.vbs'].some(token => args.includes(token))) return true;
+  const directPowerShell = execute.endsWith('powershell.exe') || execute.endsWith('\\powershell.exe');
+  if (directPowerShell && args.includes('start codex companion.ps1')) return true;
+  return false;
 }
 
-// A shortcut is stale if its target is wscript/cscript or its args name a vbs.
+// A shortcut is stale if it uses wscript/cscript, names a VBS, or launches
+// powershell.exe directly (Terminal flash on double-click in Windows 11).
 export function shortcutIsStale(shortcut) {
   if (!shortcut) return false;
   const target = String(shortcut.TargetPath || '').toLowerCase();
   const args = String(shortcut.Arguments || '').toLowerCase();
   if (target.includes('wscript.exe') || target.includes('cscript.exe')) return true;
-  return args.includes('.vbs');
+  if (args.includes('.vbs')) return true;
+  const directPowerShell = target.endsWith('powershell.exe') || target.endsWith('\\powershell.exe');
+  if (directPowerShell && args.includes('start codex companion.ps1')) return true;
+  return false;
 }
 
 async function runPowerShell(script) {

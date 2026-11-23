@@ -12,13 +12,27 @@ if (-not (Test-Path -LiteralPath $launcher)) { throw "找不到启动器：$laun
 $powerShellExe = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
 if (-not (Test-Path -LiteralPath $powerShellExe)) { $powerShellExe = 'powershell.exe' }
 $launchArgs = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $launcher + '" -NoBrowser'
+# Windows 11 makes Windows Terminal the default console host. In that mode a
+# scheduled task launching powershell.exe directly ignores -WindowStyle Hidden
+# and paints a Terminal window for one frame every 5 minutes. Going through the
+# legacy console host in headless mode owns no window, so the task stays invisible.
+# Verified by triggering the task while watching for new visible top-level windows.
+$conhostExe = Join-Path $env:WINDIR 'System32\conhost.exe'
+$useHeadless = Test-Path -LiteralPath $conhostExe
+if ($useHeadless) {
+    $taskExecute = $conhostExe
+    $taskArgs = '--headless "' + $powerShellExe + '" ' + $launchArgs
+} else {
+    $taskExecute = $powerShellExe
+    $taskArgs = $launchArgs
+}
 
 $legacyShortcut = Join-Path ([Environment]::GetFolderPath('Startup')) 'Codex Companion.lnk'
 $launchMethod = 'scheduled-task'
 try {
     if ($env:CODEX_COMPANION_FORCE_STARTUP_FALLBACK -eq '1') { throw '启动项回退测试。' }
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $action = New-ScheduledTaskAction -Execute $powerShellExe -Argument $launchArgs -WorkingDirectory $PSScriptRoot
+    $action = New-ScheduledTaskAction -Execute $taskExecute -Argument $taskArgs -WorkingDirectory $PSScriptRoot
     $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
     # Repeat trigger: heal a dead backend within 5 minutes even if something
     # killed it (crash, AV, external script). Healthy backend = cheap no-op.
@@ -37,12 +51,15 @@ catch {
     New-Item -ItemType Directory -Force -Path $startupDirectory | Out-Null
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($legacyShortcut)
-    $shortcut.TargetPath = $powerShellExe
-    $shortcut.Arguments = $launchArgs
+    $shortcut.TargetPath = $taskExecute
+    $shortcut.Arguments = $taskArgs
     $shortcut.WorkingDirectory = $PSScriptRoot
     $shortcut.WindowStyle = 7
     $shortcut.Save()
 }
 
-if ($StartNow) { & $powerShellExe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $launcher -NoBrowser }
+if ($StartNow) {
+    if ($useHeadless) { & $conhostExe --headless $powerShellExe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $launcher -NoBrowser }
+    else { & $powerShellExe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $launcher -NoBrowser }
+}
 Write-Output "Startup method installed: $launchMethod"

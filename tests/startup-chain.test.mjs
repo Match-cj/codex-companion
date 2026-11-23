@@ -24,13 +24,24 @@ test('task action using any .vbs argument is stale', () => {
   assert.equal(taskActionIsStale({ Execute: 'cscript.exe', Arguments: '//B "C:\\some\\x.vbs"' }), true);
 });
 
-test('the new direct-PowerShell task action is NOT stale', () => {
+test('direct-PowerShell task action is stale (flashes Terminal every 5 minutes)', () => {
   assert.equal(taskActionIsStale({
     Execute: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
     Arguments: '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\\...\\Start Codex Companion.ps1" -NoBrowser',
-  }), false);
-  // Bypass/Hidden alone must not be treated as the removed VBS chain.
+  }), true);
+  assert.equal(taskActionIsStale({
+    Execute: 'powershell.exe',
+    Arguments: '-NoProfile -WindowStyle Hidden -File "C:\\...\\Start Codex Companion.ps1" -NoBrowser',
+  }), true);
+  // Bypass/Hidden alone must not be treated as stale.
   assert.equal(taskActionIsStale({ Execute: 'powershell.exe', Arguments: '-ExecutionPolicy Bypass -WindowStyle Hidden -File x.ps1' }), false);
+});
+
+test('headless conhost task action is healthy (no Terminal flash)', () => {
+  assert.equal(taskActionIsStale({
+    Execute: 'C:\\Windows\\System32\\conhost.exe',
+    Arguments: '--headless "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\\...\\Start Codex Companion.ps1" -NoBrowser',
+  }), false);
 });
 
 test('task action unreadable or missing is treated as healthy (no churn)', () => {
@@ -47,12 +58,19 @@ test('desktop shortcut to the old VBS launcher is stale', () => {
   assert.equal(shortcutIsStale({ TargetPath: 'powershell.exe', Arguments: '-File "C:\\a.vbs"' }), true);
 });
 
-test('the new direct-PowerShell shortcut is NOT stale', () => {
+test('direct-PowerShell shortcut is stale (flashes Terminal on double-click)', () => {
   assert.equal(shortcutIsStale({
     TargetPath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
     Arguments: '-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\\...\\Start Codex Companion.ps1" -NoBrowser',
-  }), false);
+  }), true);
   assert.equal(shortcutIsStale(null), false);
+});
+
+test('headless conhost shortcut is healthy', () => {
+  assert.equal(shortcutIsStale({
+    TargetPath: 'C:\\Windows\\System32\\conhost.exe',
+    Arguments: '--headless "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\\...\\Start Codex Companion.ps1" -NoBrowser',
+  }), false);
 });
 
 test('install scripts no longer register wscript/VBS, and load PowerShell directly', () => {
@@ -67,6 +85,8 @@ test('install scripts no longer register wscript/VBS, and load PowerShell direct
   }
   assert.match(startup, /Start Codex Companion\.ps1/);
   assert.match(portable, /Start Codex Companion\.ps1/);
+  assert.match(startup, /--headless/);
+  assert.match(startup, /conhost\.exe/);
 });
 
 test('widget launchers no longer spawn the VBS file', () => {

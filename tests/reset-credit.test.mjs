@@ -120,7 +120,7 @@ test('没有自动兑换：只有人发口令才会触发，菜单与额度通�
 
 test('版本号四处一致', () => {
   const widget = fs.readFileSync(new URL('../Quota Widget WPF.ps1', import.meta.url), 'utf8');
-  assert.equal(pkg.version, '1.0.63');
-  assert.match(server, /const APP_VERSION = '1\.0\.63'/);
-  assert.match(widget, /\$script:AppVersion='1\.0\.63'/);
+  assert.equal(pkg.version, '1.0.64');
+  assert.match(server, /const APP_VERSION = '1\.0\.64'/);
+  assert.match(widget, /\$script:AppVersion='1\.0\.64'/);
 });

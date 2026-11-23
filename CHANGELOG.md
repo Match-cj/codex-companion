@@ -1,3 +1,9 @@
+## [1.0.64] - 2026-11-23
+- 修复：**每 5 分钟闪一下黑色/终端窗口**。v1.0.63 把启动链从 VBS 改成 PowerShell 直连后，Windows 11 默认由 Windows Terminal 托管控制台，`-WindowStyle Hidden` 不再生效——每 5 分钟的自愈检查启动 PowerShell 时，Terminal 窗口会画一帧再消失。根因实测确认：不触发任务时 9 秒内零新窗口，手动触发一次计划任务就必然弹出标题为 `...\powershell.exe` 的 Terminal 窗口；改成 headless 控制台宿主后，触发任务零新窗口。
+- 根治：计划任务、桌面快捷方式、更新看门狗的后备启动，全部改走 `conhost.exe --headless` 启动 PowerShell（自带旧宿主，不触发 Terminal 托管）。没有 conhost 的老系统自动回退原方式。
+- 自愈升级：`startup-chain.mjs` 现在把「直连 PowerShell 的任务/快捷方式」也判为过期，server 启动后自动重注册成 headless 版；同事只需覆盖安装或补丁更新，不必手动改任务。
+- 可证伪验收：手动触发计划任务并监听新可见窗口数=0；杀掉后台后触发任务，2 秒内 `/api/health` 恢复且浮窗重建。全量测试与浮窗自测通过。不动额度、飞书、重置兑换、浮窗外观，不新增提醒或设置。
+
 ## [1.0.63] - 2026-11-23
 - 修复：**同事更新后每 5 分钟弹一次「无法找到脚本 Codex Companion Worker.vbs」，并且重启后软件再也起不来**。原因是启动链依赖 3 个 VBS 包装脚本（桌面快捷方式 → Launcher.vbs → 计划任务 → Worker.vbs → 后台；浮窗走 Launch Quota Widget.vbs）。这些 VBS 里「用 WScript.Shell 启动隐藏 PowerShell + ExecutionPolicy Bypass」是杀毒软件最典型的误杀特征，同事机器更新时把 Worker.vbs 隔离了，定时自检任务找不到脚本就反复弹窗。
 - 根治：去掉全部 3 个 VBS，启动链改为直接调用 PowerShell。桌面快捷方式、计划任务、安装后的首次启动都直接 `-File Start Codex Companion.ps1`；浮窗新增 `Start Quota Widget.ps1`（纯 PowerShell、保留 UTF-8 安全读取，因 PS5.1 直接读无 BOM 中文会报错）。以后杀软没有 VBS 可隔离，这类弹窗和"重启后起不来"彻底绝迹。

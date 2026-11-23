@@ -32,13 +32,24 @@ $launcher = Join-Path $root 'Start Codex Companion.ps1'
 $powerShellExe = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
 if (-not (Test-Path -LiteralPath $powerShellExe)) { $powerShellExe = 'powershell.exe' }
 $launchArgs = '-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $launcher + '" -NoBrowser'
+# Windows 11 hands console apps to Windows Terminal, which ignores
+# -WindowStyle Hidden. Launch through the headless legacy console host so
+# neither the scheduled task nor a desktop double-click paints a Terminal window.
+$conhostExe = Join-Path $env:WINDIR 'System32\conhost.exe'
+if (Test-Path -LiteralPath $conhostExe) {
+    $shortcutTarget = $conhostExe
+    $shortcutArgs = '--headless "' + $powerShellExe + '" ' + $launchArgs
+} else {
+    $shortcutTarget = $powerShellExe
+    $shortcutArgs = $launchArgs
+}
 $icon = Join-Path $root 'companion.ico'
 $desktop = [Environment]::GetFolderPath('Desktop')
 $shortcutPath = Join-Path $desktop 'Codex 助手.lnk'
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
-$shortcut.TargetPath = $powerShellExe
-$shortcut.Arguments = $launchArgs
+$shortcut.TargetPath = $shortcutTarget
+$shortcut.Arguments = $shortcutArgs
 $shortcut.WorkingDirectory = $root
 if (Test-Path -LiteralPath $icon) { $shortcut.IconLocation = $icon + ',0' }
 $shortcut.Save()

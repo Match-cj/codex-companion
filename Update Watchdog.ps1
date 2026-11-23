@@ -38,7 +38,15 @@ function Start-App {
     $started = $false
     if ($TaskName) { try { Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop; $started = $true } catch {} }
     if (-not $started -and (Test-Path -LiteralPath $Launcher)) {
-        Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $Launcher)
+        # Go through the headless legacy console host: on Windows 11 a direct
+        # powershell.exe launch paints a Terminal window even with Hidden set.
+        $psExe = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $conhost = Join-Path $env:WINDIR 'System32\conhost.exe'
+        if (Test-Path -LiteralPath $conhost) {
+            Start-Process -FilePath $conhost -WindowStyle Hidden -ArgumentList @('--headless', ('"' + $psExe + '"'), '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', ('"' + $Launcher + '"'))
+        } else {
+            Start-Process -FilePath $psExe -WindowStyle Hidden -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $Launcher)
+        }
     }
 }
 
