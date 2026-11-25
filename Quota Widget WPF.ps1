@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 Add-Type 'using System; using System.Runtime.InteropServices; public static class CompanionMouse { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags); [DllImport("user32.dll", EntryPoint="GetWindowLongW")] public static extern int GetWindowLong(IntPtr hwnd, int index); [DllImport("user32.dll", EntryPoint="SetWindowLongW")] public static extern int SetWindowLong(IntPtr hwnd, int index, int value); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); }'
-$script:Port=$Port; $script:AppVersion='1.0.66'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false; $script:UpdateInfo=$null; $script:Updating=$false; $script:UpdateCardsBuilt=0; $script:UpdateButtonInvocations=0; $script:QuotaRefreshInFlight=$false; $script:QuotaRefreshStartedAt=0; $script:QuotaRefreshDeadline=[DateTime]::UtcNow; $script:QuotaPollTimer=$null; $script:RefreshMenuItem=$null; $script:DetailGuardUntil=[DateTime]::UtcNow; $script:DetailPendingRefresh=$false; $script:DetailRefreshTimer=$null; $script:DetailRefreshLabel=$null; $script:LastAutoRefreshAt=0; $script:TimeMode='remaining'; $script:TimeChipLabel=$null; $script:TestTimeChip=$null; $script:TestTimeChipHandler=$null
+$script:Port=$Port; $script:AppVersion='1.0.67'; $script:Status=$null; $script:Detail=$null; $script:DetailClosedAt=[DateTime]::MinValue; $script:SwitchableCardsBuilt=0; $script:SwitchGestureCardsBuilt=0; $script:SwitchButtonCardsBuilt=0; $script:SwitchButtonInvocations=0; $script:LoginExpiredCardsBuilt=0; $script:SwitchInProgress=$false; $script:WarmupInProgress=$false; $script:UpdateInfo=$null; $script:Updating=$false; $script:UpdateCardsBuilt=0; $script:UpdateButtonInvocations=0; $script:QuotaRefreshInFlight=$false; $script:QuotaRefreshStartedAt=0; $script:QuotaRefreshDeadline=[DateTime]::UtcNow; $script:QuotaPollTimer=$null; $script:RefreshMenuItem=$null; $script:DetailGuardUntil=[DateTime]::UtcNow; $script:DetailPendingRefresh=$false; $script:DetailRefreshTimer=$null; $script:DetailRefreshLabel=$null; $script:LastAutoRefreshAt=0; $script:TimeMode='remaining'; $script:TimeChipLabel=$null; $script:TestTimeChip=$null; $script:TestTimeChipHandler=$null
 $mutexName=if($SelfTest){'Global\CodexCompanionQuotaWidget_v5_selftest'}else{'Global\CodexCompanionQuotaWidget_v5'}
 $script:Mutex=New-Object System.Threading.Mutex($false,$mutexName); if(-not $script:Mutex.WaitOne(0,$false)){exit}
 $Transparent=[Windows.Media.Brushes]::Transparent
@@ -32,10 +32,12 @@ function Trace-WidgetSwitch($stage,$accountName,$detail=''){
 function Get-Status{
  if($SelfTest){
   $reset=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()+7200
+  # 可证伪数据：激活账号排在输入最后、且重置时间最晚。
+  # 旧算法（按最早重置时间）会把它排到中间；新算法必须把它提到第一，其余保持输入顺序。
   return [pscustomobject]@{accounts=@(
-   [pscustomobject]@{id='test-active';name='测试当前账号';is_active=$true;plan_type='plus';usage=[pscustomobject]@{primary_used_percent=20;primary_resets_at=$reset}},
    [pscustomobject]@{id='test-other';name='测试备用账号';is_active=$false;plan_type='free';usage=[pscustomobject]@{primary_used_percent=10;primary_resets_at=$reset}},
-   [pscustomobject]@{id='test-expired';name='测试失效账号';is_active=$false;plan_type='pro';usage=[pscustomobject]@{error='登录已失效，请重新登录'}}
+   [pscustomobject]@{id='test-expired';name='测试失效账号';is_active=$false;plan_type='pro';usage=[pscustomobject]@{error='登录已失效，请重新登录'}},
+   [pscustomobject]@{id='test-active';name='测试当前账号';is_active=$true;plan_type='plus';usage=[pscustomobject]@{primary_used_percent=20;primary_resets_at=$reset+7200}}
   );tasks=[pscustomobject]@{};taskActivity=[pscustomobject]@{rows=@()}}
  }
  try{Invoke-RestMethod "http://127.0.0.1:$script:Port/api/status" -TimeoutSec 4}catch{$null}
@@ -127,14 +129,13 @@ function New-QuotaIcon($kind){
  }
  return $canvas
 }
-function Get-SortReset($a){
- $values=@()
- foreach($field in @('primary_resets_at','secondary_resets_at')){
-  $value=$a.usage.$field
-  if($null-ne$value-and[int64]$value-gt 0){$values+=[int64]$value}
- }
- if($values.Count-eq 0){return [int64]::MaxValue}
- return ($values|Measure-Object -Minimum).Minimum
+function Get-DisplayAccounts($status){
+ # 账号卡片顺序必须稳定：当前激活的账号永远排第一，其余保持账号库给出的原始顺序。
+ # 旧版按"最早重置时间"排序，而重置时间每分钟都在变，同一个账号就会上下乱跳。
+ $all=@($status.accounts)
+ $active=@($all|Where-Object{$_.is_active})
+ $rest=@($all|Where-Object{-not $_.is_active})
+ return @($active+$rest)
 }
 function New-Quota($tag,$remaining,$countdown,$width){
  $box=New-Object Windows.Controls.StackPanel
@@ -490,7 +491,7 @@ function Warmup-WidgetAccount($accountId,$accountName){
  }finally{$script:WarmupInProgress=$false;[Windows.Input.Mouse]::OverrideCursor=$null}
 }
 function New-DetailBody($status){
- $accounts=@($status.accounts|Sort-Object{Get-SortReset $_})
+ $accounts=Get-DisplayAccounts $status
  $outer=New-Object Windows.Controls.Border;$outer.Background=$Disc;$outer.CornerRadius=12;$outer.Padding=9;$stack=New-Object Windows.Controls.StackPanel;$outer.Child=$stack
  $topRow=New-Object Windows.Controls.Grid;$topRow.Margin='2,0,0,7'
  $col1=New-Object Windows.Controls.ColumnDefinition;$col1.Width='*'
@@ -648,6 +649,24 @@ if($SelfTest){
  $refreshKeptWindow=($script:Detail -eq $detailWindowBefore)-and((New-Object Windows.Interop.WindowInteropHelper($script:Detail)).Handle -eq $detailHandleBefore)
  $refreshKeptCards=($script:Detail.Content.Child.Children.Count -eq $cardsBefore)
  $stackForTest=$script:Detail.Content.Child
+ # 可证伪：输入里激活账号排最后且重置最晚，显示时必须置顶、其余保持输入顺序；刷新后也一样。
+ $orderedIds=@(Get-DisplayAccounts $script:Status|ForEach-Object{$_.id})-join','
+ $accountOrderPass=($orderedIds-eq'test-active,test-other,test-expired')
+ # 递归收集每张账号卡片里的名字文本（卡片层次：Border > StackPanel > head StackPanel > TextBlock）。
+ $visibleNames=@()
+ foreach($card in $stackForTest.Children){
+  if($card -is [Windows.Controls.Border]-and $null-ne$card.Child){
+   $cardNames=@()
+   foreach($tb in $card.Child.Children){
+    if($tb -is [Windows.Controls.StackPanel]){
+     foreach($node in $tb.Children){if($node -is [Windows.Controls.TextBlock]){$cardNames+=[string]$node.Text}}
+    }
+   }
+   $hit=@($cardNames|Where-Object{$_-match'测试'})|Select-Object -First 1
+   if($hit){$visibleNames+=$hit}
+  }
+ }
+ $visibleOrderPass=(@($visibleNames)-join'|')-eq'● 测试当前账号|测试备用账号|测试失效账号'
  # 卡片计数只按首次构建统计，避免自测里模拟刷新把数字翻倍。
  $script:UpdateCardsBuilt=1;$script:SwitchableCardsBuilt=1;$script:SwitchGestureCardsBuilt=1;$script:SwitchButtonCardsBuilt=0;$script:LoginExpiredCardsBuilt=1
  $scaledBoundsPass=$true
@@ -682,11 +701,11 @@ if($SelfTest){
   $script:UpdateCardsBuilt=1;$script:SwitchableCardsBuilt=1;$script:SwitchGestureCardsBuilt=1;$script:LoginExpiredCardsBuilt=1
  }
  [pscustomobject]@{ScaledBoundsPass=$scaledBoundsPass;InsideEdgeClickKeepsPanel=$insideClickKeepsPanel;SingleClickKeepsPanel=$singleClickKeepsPanel;DoubleClickInvokesSwitch=$doubleClickInvokesSwitch;DpiScale=[Windows.PresentationSource]::FromVisual($script:Detail).CompositionTarget.TransformToDevice.M11}|ConvertTo-Json -Compress
-[pscustomobject]@{AccountsFromApi=@($script:Status.accounts).Count;CardsBuilt=@($stackForTest.Children).Count;RefreshKeptWindow=$refreshKeptWindow;RefreshKeptCards=$refreshKeptCards;LoginExpiredCards=$script:LoginExpiredCardsBuilt;SwitchableCards=$script:SwitchableCardsBuilt;SwitchGestureCards=$script:SwitchGestureCardsBuilt;SwitchButtonCards=$script:SwitchButtonCardsBuilt;SwitchButtonInvocations=$script:SwitchButtonInvocations;UpdateBadgeHidden=$badgeHiddenWithoutUpdate;UpdateBadgeShown=$badgeShownWithUpdate;UpdateBadgeClicks=$badgeClickInvocations;UpdateCards=$script:UpdateCardsBuilt;PanelHeight=[Math]::Round($script:Detail.Height,1);TimeModeToggle=$timeModeTogglePass;TopmostRestored=$topmostRestored;NoFocusSteal=$noFocusSteal;RuntimeErrors=$Error.Count;Errors=@($Error|ForEach-Object{$_.InvocationInfo.PositionMessage+' :: '+$_.Exception.Message})}|ConvertTo-Json -Compress -Depth 3
+[pscustomobject]@{AccountsFromApi=@($script:Status.accounts).Count;CardsBuilt=@($stackForTest.Children).Count;RefreshKeptWindow=$refreshKeptWindow;RefreshKeptCards=$refreshKeptCards;LoginExpiredCards=$script:LoginExpiredCardsBuilt;SwitchableCards=$script:SwitchableCardsBuilt;SwitchGestureCards=$script:SwitchGestureCardsBuilt;SwitchButtonCards=$script:SwitchButtonCardsBuilt;SwitchButtonInvocations=$script:SwitchButtonInvocations;UpdateBadgeHidden=$badgeHiddenWithoutUpdate;UpdateBadgeShown=$badgeShownWithUpdate;UpdateBadgeClicks=$badgeClickInvocations;UpdateCards=$script:UpdateCardsBuilt;PanelHeight=[Math]::Round($script:Detail.Height,1);TimeModeToggle=$timeModeTogglePass;AccountOrderIds=$orderedIds;AccountOrderPass=$accountOrderPass;VisibleOrderPass=$visibleOrderPass;VisibleNames=(@($visibleNames)-join'|');TopmostRestored=$topmostRestored;NoFocusSteal=$noFocusSteal;RuntimeErrors=$Error.Count;Errors=@($Error|ForEach-Object{$_.InvocationInfo.PositionMessage+' :: '+$_.Exception.Message})}|ConvertTo-Json -Compress -Depth 3
 Close-Detail
 $Window.Close()
 try{$script:Mutex.ReleaseMutex()}catch{}
-if($Error.Count -gt 0 -or -not$refreshKeptWindow -or -not$refreshKeptCards -or -not$insideClickKeepsPanel -or -not$singleClickKeepsPanel -or -not$doubleClickInvokesSwitch -or -not$timeModeTogglePass -or -not$topmostRestored -or -not$noFocusSteal -or -not$badgeHiddenWithoutUpdate -or -not$badgeShownWithUpdate -or $badgeClickInvocations -ne 1 -or $script:UpdateCardsBuilt -ne 1){throw 'Widget self-test failed'}
+if($Error.Count -gt 0 -or -not$refreshKeptWindow -or -not$refreshKeptCards -or -not$insideClickKeepsPanel -or -not$singleClickKeepsPanel -or -not$doubleClickInvokesSwitch -or -not$timeModeTogglePass -or -not$accountOrderPass -or -not$visibleOrderPass -or -not$topmostRestored -or -not$noFocusSteal -or -not$badgeHiddenWithoutUpdate -or -not$badgeShownWithUpdate -or $badgeClickInvocations -ne 1 -or $script:UpdateCardsBuilt -ne 1){throw 'Widget self-test failed'}
  exit
 }
 $TopmostTimer=New-Object Windows.Threading.DispatcherTimer
