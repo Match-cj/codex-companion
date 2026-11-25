@@ -22,6 +22,41 @@ export const notificationRules = [
 export function resetReminderLeads(config) {
   return Array.isArray(config.resetReminderLeadMinutes) ? config.resetReminderLeadMinutes : [Number(config.resetReminderMinutes) || 15];
 }
+
+// 免打扰时段：只压掉次要信息，任务相关照常通知（夜里交代的活跑完要能知道）。
+const QUIET_HOURS_ALWAYS_NOTIFY = new Set(['task_started', 'task_completed', 'task_failed', 'task_approval', 'task_stalled', 'takeover_start']);
+
+export function parseClockMinutes(value, fallback) {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(String(value || '').trim());
+  if (!match) return fallback;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return fallback;
+  return hour * 60 + minute;
+}
+
+// 用北京时间判断时段，跟你 elsewhere 的日期口径一致；跨午夜（22:00→08:00）也支持。
+export function shanghaiClockMinutes(value) {
+  const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(new Date(value));
+  const hour = Number(parts.find(part => part.type === 'hour')?.value || 0) % 24;
+  const minute = Number(parts.find(part => part.type === 'minute')?.value || 0);
+  return hour * 60 + minute;
+}
+
+export function inQuietHours(config, nowMs = Date.now()) {
+  if (!config?.quietHoursEnabled) return false;
+  const start = parseClockMinutes(config.quietHoursStart, 22 * 60);
+  const end = parseClockMinutes(config.quietHoursEnd, 8 * 60);
+  if (start === end) return false;
+  const now = shanghaiClockMinutes(nowMs);
+  return start < end ? (now >= start && now < end) : (now >= start || now < end);
+}
+
+// 免打扰时段内是否压掉这类通知。没有类型的消息（无法判断重要性）照常发，避免误吞。
+export function quietHoursMutes(config, type, nowMs = Date.now()) {
+  if (!type || !inQuietHours(config, nowMs)) return false;
+  return !QUIET_HOURS_ALWAYS_NOTIFY.has(type);
+}
 export function notificationEnabled(config, id) {
   return config.notificationTypes?.[id] ?? notificationRules.find(rule=>rule.id===id)?.defaultEnabled ?? true;
 }
@@ -51,6 +86,18 @@ export function validateNotificationSettings(data) {
     const values=data.resetReminderLeadMinutes;
     if(!Array.isArray(values) || values.length>20 || values.some(v=>!Number.isInteger(v)||v<1||v>10080)) throw Error('提前量应为 1～10080 分钟，最多 20 项；可全部取消。');
     result.resetReminderLeadMinutes=[...new Set(values)].sort((a,b)=>b-a);
+  }
+  if(Object.hasOwn(data,'quietHoursEnabled')) {
+    if(typeof data.quietHoursEnabled!=='boolean') throw Error('免打扰开关格式不正确。');
+    result.quietHoursEnabled=data.quietHoursEnabled;
+  }
+  if(Object.hasOwn(data,'quietHoursStart')) {
+    if(parseClockMinutes(data.quietHoursStart,null)===null) throw Error('免打扰开始时间应为 HH:MM。');
+    result.quietHoursStart=data.quietHoursStart;
+  }
+  if(Object.hasOwn(data,'quietHoursEnd')) {
+    if(parseClockMinutes(data.quietHoursEnd,null)===null) throw Error('免打扰结束时间应为 HH:MM。');
+    result.quietHoursEnd=data.quietHoursEnd;
   }
   if(Object.hasOwn(data,'stallMinutes')) {
     if(!Number.isInteger(data.stallMinutes)||data.stallMinutes<1||data.stallMinutes>1440) throw Error('无进展时间应为 1～1440 分钟。');

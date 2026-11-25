@@ -58,18 +58,24 @@ test('OpenAI answers: the network is fine, the upstream API is not', async () =>
   assert.match(networkStateText('proxy_down').hint, /VPN/);
 });
 
-test('one notice going down, one coming back, never a stream while broken', () => {
+test('one down notice, then flapping and recovery inside the gap stay silent', () => {
   const first = networkNoticeDecision({ state: 'ok', notifiedAt: 0 }, true, 1000);
   assert.equal(first.notice, 'down');
   assert.equal(first.state, 'down');
   const repeat = networkNoticeDecision(first, true, 2000);
   assert.equal(repeat.notice, null);
+  assert.equal(repeat.state, 'down');
+  // Recovery inside the 30-min gap is silent (no down/recovered pair spam),
+  // but the state still returns to ok so the next outage is a fresh event.
   const recovered = networkNoticeDecision(repeat, false, 3000);
-  assert.equal(recovered.notice, 'recovered');
+  assert.equal(recovered.notice, null);
   assert.equal(recovered.state, 'ok');
-  const quiet = networkNoticeDecision(recovered, false, 4000);
+  // Flapping again inside the gap stays silent too.
+  const flap = networkNoticeDecision(recovered, true, 4000);
+  assert.equal(flap.notice, null);
+  const quiet = networkNoticeDecision(flap, false, 5000);
   assert.equal(quiet.notice, null);
-  // Ten minutes later a still-broken network may remind once more.
-  const later = networkNoticeDecision(first, true, 1000 + 10 * 60 * 1000 + 1);
+  // Thirty minutes later a still-broken network may remind once more.
+  const later = networkNoticeDecision(first, true, 1000 + 30 * 60 * 1000 + 1);
   assert.equal(later.notice, 'down');
 });

@@ -7,7 +7,7 @@ function context(){
   const sent=[],history=[];
   const c={config:{feishuBoundChatId:'chat',feishuNotificationThreadMode:'task',feishuTaskTopicRoots:{real:'root'},feishuTaskTopicChats:{real:'chat'}},
     canonicalCodexThreadId:id=>id==='alias'?'real':String(id||''),feishuClient:{},feishuTopicCreationLocks:new Map(),codexSessionTopicsAnnounced:new Set(),
-    notificationType:()=>'',notificationEnabled:()=>true,normalizeAppName:v=>v,trim:v=>v,pushHistory:v=>history.push(v),saveConfig:async()=>{},
+    notificationType:()=>'',notificationEnabled:()=>true,quietHoursMutes:()=>false,normalizeAppName:v=>v,trim:v=>v,pushHistory:v=>history.push(v),saveConfig:async()=>{},
     inferNotificationTaskId:async(text,id)=>id,console,sendFeishuAppText:async(text,opts)=>{sent.push(opts);return{messageId:'sent'}}};
   vm.createContext(c);
   for(const [a,b] of [['function existingFeishuTaskTopic(', 'function wrapFeishuText('],['async function notify(text,','function quotaLabel('],['function feishuReplyThreadId(', 'async function continueThreadFromFeishu(']])

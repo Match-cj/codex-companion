@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
-import { notificationEnabled, notificationRules, notificationType, resetReminderLeads, validateNotificationSettings, nextResetReminder, nextWasteReminder, planExpiryStale, planExpirySuffix } from '../notification-settings.mjs';
+import { notificationEnabled, notificationRules, notificationType, resetReminderLeads, validateNotificationSettings, nextResetReminder, nextWasteReminder, planExpiryStale, planExpirySuffix, parseClockMinutes, shanghaiClockMinutes, inQuietHours, quietHoursMutes } from '../notification-settings.mjs';
 
 test('paid plan with past expiry is stale data, not a real expiry (no scary text, suffix suppressed)', () => {
   const past = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
@@ -107,4 +107,45 @@ test('remote request cannot launch Windows uninstall page; local route only open
   await c.route();assert.equal(response.status,403);assert.equal(launches,0);
   assert.match(source,/spawn\('explorer\.exe',\['ms-settings:appsfeatures'\]/);
   assert.doesNotMatch(source.slice(start,source.indexOf("    if (req.method==='POST'&&u.pathname==='/api/config')",start)),/Uninstall Companion\.ps1|Remove-Item|rm\(/);
+});
+
+test('parseClockMinutes accepts HH:MM and rejects garbage', () => {
+  assert.equal(parseClockMinutes('22:00', -1), 22 * 60);
+  assert.equal(parseClockMinutes('08:30', -1), 8 * 60 + 30);
+  assert.equal(parseClockMinutes('24:00', -1), -1);
+  assert.equal(parseClockMinutes('9:99', -1), -1);
+  assert.equal(parseClockMinutes('', -1), -1);
+  assert.equal(parseClockMinutes(null, -1), -1);
+});
+
+test('inQuietHours supports the cross-midnight 22:00-08:00 window in Beijing time', () => {
+  const config = { quietHoursEnabled: true, quietHoursStart: '22:00', quietHoursEnd: '08:00' };
+  // 用 UTC 反推北京时间：北京 23:30 = UTC 15:30，北京 07:30 = UTC 23:30，北京 12:00 = UTC 04:00。
+  assert.equal(inQuietHours(config, Date.parse('2026-11-25T15:30:00Z')), true);
+  assert.equal(inQuietHours(config, Date.parse('2026-11-25T23:30:00Z')), true);
+  assert.equal(inQuietHours(config, Date.parse('2026-11-25T04:00:00Z')), false);
+  assert.equal(inQuietHours(config, Date.parse('2026-11-25T13:59:00Z')), false); // 北京 21:59 还没到
+  assert.equal(inQuietHours(config, Date.parse('2026-11-25T14:00:00Z')), true);  // 北京 22:00 整点起
+  assert.equal(inQuietHours({ ...config, quietHoursEnabled: false }, Date.parse('2026-11-25T15:30:00Z')), false);
+});
+
+test('quietHoursMutes silences secondary types but keeps task results', () => {
+  const config = { quietHoursEnabled: true, quietHoursStart: '22:00', quietHoursEnd: '08:00' };
+  const night = Date.parse('2026-11-25T15:30:00Z'); // 北京 23:30
+  const day = Date.parse('2026-11-25T04:00:00Z');   // 北京 12:00
+  for (const type of ['quota_reset_soon', 'quota_waste', 'network_down', 'windows', 'quota_exhausted', 'plan_expiry']) {
+    assert.equal(quietHoursMutes(config, type, night), true, `${type} should be muted at night`);
+    assert.equal(quietHoursMutes(config, type, day), false, `${type} should pass in daytime`);
+  }
+  for (const type of ['task_completed', 'task_failed', 'task_approval', 'task_stalled', 'task_started', 'takeover_start']) {
+    assert.equal(quietHoursMutes(config, type, night), false, `${type} must still notify at night`);
+  }
+  // 没有类型的消息照常发，避免误吞重要内容。
+  assert.equal(quietHoursMutes(config, '', night), false);
+});
+
+test('validateNotificationSettings accepts quiet hours fields and rejects bad times', () => {
+  assert.deepEqual(validateNotificationSettings({ quietHoursEnabled: true, quietHoursStart: '22:30', quietHoursEnd: '07:15' }), { quietHoursEnabled: true, quietHoursStart: '22:30', quietHoursEnd: '07:15' });
+  assert.throws(() => validateNotificationSettings({ quietHoursStart: '25:00' }), /HH:MM/);
+  assert.throws(() => validateNotificationSettings({ quietHoursEnabled: 'yes' }), /开关/);
 });

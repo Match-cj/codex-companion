@@ -141,17 +141,21 @@ export async function probeNetwork({
   return { state: 'openai_blocked', ...networkStateText('openai_blocked'), proxy: activeProxy?.address || '' };
 }
 
-// One notification on the way down and one on the way back, never a stream of
-// them while the VPN stays broken. `state` is intentionally coarse: the fine
-// grained diagnosis lives in the status payload for the UI.
-export function networkNoticeDecision(previous, degraded, now, minGapMs = 10 * 60 * 1000) {
+// One notification on the way down, never a stream while the network flaps.
+// Every notice (down / recovered / re-down) shares the same gap so a VPN that
+// keeps reconnecting cannot produce an alternating down/recovered pair.
+// `state` stays coarse; the fine diagnosis lives in the status payload for UI.
+export function networkNoticeDecision(previous, degraded, now, minGapMs = 30 * 60 * 1000) {
   const wasDown = previous?.state === 'down';
+  const last = previous?.notifiedAt || 0;
+  const withinGap = last > 0 && now - last < minGapMs;
   if (degraded) {
-    if (wasDown && now - (previous.notifiedAt || 0) < minGapMs) {
-      return { notice: null, state: 'down', notifiedAt: previous.notifiedAt || 0 };
-    }
+    if (withinGap) return { notice: null, state: 'down', notifiedAt: last };
     return { notice: 'down', state: 'down', notifiedAt: now };
   }
-  if (wasDown) return { notice: 'recovered', state: 'ok', notifiedAt: now };
-  return { notice: null, state: 'ok', notifiedAt: previous?.notifiedAt || 0 };
+  if (wasDown) {
+    if (withinGap) return { notice: null, state: 'ok', notifiedAt: last };
+    return { notice: 'recovered', state: 'ok', notifiedAt: now };
+  }
+  return { notice: null, state: 'ok', notifiedAt: last };
 }

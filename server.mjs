@@ -13,7 +13,7 @@ import { finalHtmlPaths, readRelayHtml } from './file-relay.mjs';
 import { observeEarlyQuotaReset } from './quota-reset.mjs';
 import { isQuotaExhaustedText, quotaLeft, quotaLeftText, pickQuotaSwitchTarget, findAccountByName, parseSwitchCommand } from './quota-switch.mjs';
 import { buildQuotaFacts } from './quota-facts.mjs';
-import { notificationRules, notificationEnabled, notificationType, resetReminderLeads, validateNotificationSettings, nextResetReminder, nextWasteReminder, parseExpirySeconds, planExpirySuffix, planExpiryStale } from './notification-settings.mjs';
+import { notificationRules, notificationEnabled, notificationType, resetReminderLeads, validateNotificationSettings, nextResetReminder, nextWasteReminder, parseExpirySeconds, planExpirySuffix, planExpiryStale, quietHoursMutes, inQuietHours } from './notification-settings.mjs';
 import { recoverReplyTarget } from './feishu-reply-recovery.mjs';
 import { desktopRetryState, desktopTakeoverAllowed, syncDesktopRetryWatcher, startDesktopRetryWatcher, stopDesktopRetryWatcher, setDesktopRetryNotifier } from './desktop-retry.mjs';
 import { validateWebhooks, activeWebhookTargets, sendWebhooks, kindLabel as webhookKindLabel, friendlyWebhookReason } from './webhook-notify.mjs';
@@ -41,7 +41,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.64';
+const APP_VERSION = '1.0.65';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -72,6 +72,10 @@ const defaultConfig = {
   feishuImageRelayEnabled: true,
   feishuImageRelayRoot: '',
   stallMinutes: 3,
+  // 免打扰时段：次要通知照常记历史、不推送；任务相关照常推送。
+  quietHoursEnabled: false,
+  quietHoursStart: '22:00',
+  quietHoursEnd: '08:00',
   quotaRefreshMinutes: 5,
   resetReminderMinutes: 15,
   // 防浪费提醒：5 小时额度重置前还剩很多时提醒一次，别让会员费白花。
@@ -2242,6 +2246,12 @@ async function notify(text, opts = {}) {
     saveConfig().catch(()=>{});
     return {ok:false,reason:'type-disabled'};
   }
+  // 免打扰时段：次要通知不推送，但仍记进历史，早上能在网页看到后台做了什么。
+  if(quietHoursMutes(config,type)) {
+    pushHistory({at:Date.now(),appName:normalizeAppName(opts.appName),body:trim(text,3800),sent:false,reason:'quiet-hours',notificationType:type});
+    saveConfig().catch(()=>{});
+    return {ok:false,reason:'quiet-hours'};
+  }
   const notificationEmoji={quota_early:'🎉',quota_reset_soon:'⏰',quota_exhausted:'🚫',quota_expiry:'⌛',plan_expiry:'💳',quota_waste:'💰',network_down:'🌐',context_pressure:'📊',takeover_start:'🤖',task_retry:'🔁',task_approval:'🙋',task_stalled:'🐌',service_exit:'🛑',task_failed:'❌',task_completed:'✅',task_started:'▶️',windows:'🪟'};
   if(type&&notificationEmoji[type]) text=`${notificationEmoji[type]} ${text}`;
   const appName = normalizeAppName(opts.appName);
@@ -3589,7 +3599,7 @@ async function handle(req, res) {
       await saveConfig(); return send(res,200,{ok:true});
     }
     if (req.method==='GET'&&u.pathname==='/api/notifications/settings') {
-      return send(res,200,{rules:notificationRules.map(rule=>({...rule,enabled:notificationEnabled(config,rule.id)})),resetReminderLeadMinutes:resetReminderLeads(config),stallMinutes:Number(config.stallMinutes)||3,wasteReminderLeadMinutes:Number(config.wasteReminderLeadMinutes)||30,wasteReminderMinPercent:Number(config.wasteReminderMinPercent)||30});
+      return send(res,200,{rules:notificationRules.map(rule=>({...rule,enabled:notificationEnabled(config,rule.id)})),resetReminderLeadMinutes:resetReminderLeads(config),stallMinutes:Number(config.stallMinutes)||3,wasteReminderLeadMinutes:Number(config.wasteReminderLeadMinutes)||30,wasteReminderMinPercent:Number(config.wasteReminderMinPercent)||30,quietHoursEnabled:!!config.quietHoursEnabled,quietHoursStart:config.quietHoursStart||'22:00',quietHoursEnd:config.quietHoursEnd||'08:00',quietHoursActive:!!inQuietHours(config)});
     }
     if (req.method==='POST'&&u.pathname==='/api/notifications/settings') {
       const changes=validateNotificationSettings(data);
