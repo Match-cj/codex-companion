@@ -17,7 +17,7 @@ import { notificationRules, notificationEnabled, notificationType, resetReminder
 import { recoverReplyTarget } from './feishu-reply-recovery.mjs';
 import { desktopRetryState, desktopTakeoverAllowed, syncDesktopRetryWatcher, startDesktopRetryWatcher, stopDesktopRetryWatcher, setDesktopRetryNotifier } from './desktop-retry.mjs';
 import { validateWebhooks, activeWebhookTargets, sendWebhooks, kindLabel as webhookKindLabel, friendlyWebhookReason } from './webhook-notify.mjs';
-import { contextWarning, contextRatio, formatTokenCount, trimContextLedger } from './context-budget.mjs';
+import { contextWarning, contextRatio, contextStatsFromTokenInfo, formatTokenCount, trimContextLedger } from './context-budget.mjs';
 import { humanError } from './human-error.mjs';
 import { base64Url, decodeJwtPayload, jwtExpiry, oauthPortStatus } from './auth-utils.mjs';
 import { createFeishuInbox, inboxEntryFromEvent } from './feishu-inbox.mjs';
@@ -41,7 +41,7 @@ import { protectCredential, unprotectCredential } from './credential-crypto.mjs'
 import { encryptPortablePayload, decryptPortableAccountBackup } from './portable-backup.mjs';
 
 const execFileAsync = promisify(execFile);
-const APP_VERSION = '1.0.65';
+const APP_VERSION = '1.0.66';
 const NOTIFICATION_HISTORY_LIMIT = 200;
 
 // 路径常量统一在 app-paths.mjs，加密在 credential-crypto.mjs / portable-backup.mjs。
@@ -2738,8 +2738,8 @@ async function completionNotice({ taskId, status, body, cwd = '' }) {
 
 function sessionFailureMessage(threadId, rawError) {
   const stats = codexSessionContextStats.get(String(threadId)) || {};
-  const used = Number(stats.inputTokens || stats.totalTokens);
-  const limit = Number(stats.contextWindow);
+  const used = Number(stats.inputTokens || 0);
+  const limit = Number(stats.contextWindow || 0);
   const ratio = limit > 0 ? used / limit : 0;
   if (ratio >= 0.9 && /stream disconnected|stream closed before response\.completed/i.test(String(rawError || ''))) {
     return `Codex 对话过长，压缩上下文时中断。\n已使用约 ${Math.round(used / 1000)}k / ${Math.round(limit / 1000)}k token（${Math.round(ratio * 100)}%）。\n\n继续重试或切换模型通常不能解决。请新建对话，并让旧对话先生成交接摘要后再继续。`;
@@ -2835,10 +2835,10 @@ async function processCodexSessionAppend(file) {
       observeSessionActivity(event, codexSessionKinds.get(file) || 'unknown', sessionThreadId(file));
       if (event?.type === 'event_msg' && event?.payload?.type === 'token_count') {
         const info = event.payload.info || {};
-        const usage = info.total_token_usage || info.last_token_usage || {};
-        codexSessionContextStats.set(sessionThreadId(file), {
-          inputTokens: Number(usage.input_tokens || 0), totalTokens: Number(usage.total_tokens || 0), contextWindow: Number(info.model_context_window || 0), at: Date.now(),
-        });
+        // 只取本轮上下文水位（last_token_usage），绝不取累计消耗（total_token_usage）。
+        // 累计值会把历史重发全算进去，轻松冲到几百万，跟 475k 窗口比就假爆表。
+        const stats = contextStatsFromTokenInfo(info);
+        codexSessionContextStats.set(sessionThreadId(file), { ...stats, at: Date.now() });
       }
       if (event?.type === 'response_item' && event.payload?.type === 'message' && event.payload.role === 'user' && conversationTitle((event.payload.content || []).map(item => item.text || '').join('\n'))) {
         announceDesktopConversation(sessionThreadId(file)).catch(error => console.error('[codex topic]', error.message));
@@ -2949,7 +2949,7 @@ async function maybeWarnContextPressure(threadId) {
   if (!level) return false;
   config.contextPressureLedger = trimContextLedger(ledger);
   await saveConfig();
-  const used = Number(stats.inputTokens || stats.totalTokens || 0);
+  const used = Number(stats.inputTokens || 0);
   const limit = Number(stats.contextWindow || 0);
   const label = await taskConversationLabel(threadId);
   const advice = level >= 95

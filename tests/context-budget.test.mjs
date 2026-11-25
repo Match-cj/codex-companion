@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { CONTEXT_LEVELS, contextWarning, contextRatio, formatTokenCount, trimContextLedger } from '../context-budget.mjs';
+import { CONTEXT_LEVELS, contextWarning, contextRatio, contextStatsFromTokenInfo, formatTokenCount, trimContextLedger } from '../context-budget.mjs';
 import { notificationEnabled, notificationType, notificationRules } from '../notification-settings.mjs';
 
 test('token counts read like a human wrote them', () => {
@@ -16,7 +16,48 @@ test('ratio needs both a usage figure and a window', () => {
   assert.equal(contextRatio({}), 0);
   assert.equal(contextRatio({ inputTokens: 100 }), 0);
   assert.equal(contextRatio({ inputTokens: 100, contextWindow: 400 }), 0.25);
-  assert.equal(contextRatio({ totalTokens: 50, contextWindow: 100 }), 0.5);
+  // 累计字段再也不能当水位：它会被当成 0，绝不误报爆表。
+  assert.equal(contextRatio({ totalTokens: 50, contextWindow: 100 }), 0);
+});
+
+// 可证伪验收：直接用 2026-11-25 真实会话抓到的 token_count 事件。
+// 累计 2,156,549（401%）是当前水位 130,918（27.6%）的 16 倍——
+// 旧代码读 total_token_usage 于是刚开一轮对话就喊"已贴上限"。
+test('cumulative token usage never masquerades as current context water level', () => {
+  const realEvent = {
+    total_token_usage: {
+      input_tokens: 2156549, cached_input_tokens: 2051712,
+      output_tokens: 5942, total_tokens: 2162491,
+    },
+    last_token_usage: {
+      input_tokens: 130918, cached_input_tokens: 119808,
+      output_tokens: 189, total_tokens: 131107,
+    },
+    last_usage_includes_reasoning: true,
+    model_context_window: 475000,
+  };
+  const stats = contextStatsFromTokenInfo(realEvent);
+  assert.equal(stats.inputTokens, 130918);
+  assert.equal(stats.contextWindow, 475000);
+  const ratio = contextRatio(stats);
+  // 旧代码这里会得到 2156549/475000 = 4.54（454%），触发 95% 档误报。
+  assert.ok(ratio < 0.3, `当前水位应约 27.6%，实际 ${(ratio * 100).toFixed(1)}%`);
+  assert.ok(Math.abs(ratio - 130918 / 475000) < 1e-9);
+  // 新对话不该被任何档位命中。
+  const ledger = {};
+  assert.equal(contextWarning(ledger, 'fresh-thread', ratio), 0);
+  assert.equal(formatTokenCount(stats.inputTokens), '131k');
+});
+
+test('missing current reading means unknown, never falls back to cumulative', () => {
+  const cumulativeOnly = {
+    total_token_usage: { input_tokens: 9999999, total_tokens: 10000000 },
+    model_context_window: 475000,
+  };
+  const stats = contextStatsFromTokenInfo(cumulativeOnly);
+  assert.equal(stats.inputTokens, 0);
+  assert.equal(contextRatio(stats), 0);
+  assert.equal(contextStatsFromTokenInfo(null).inputTokens, 0);
 });
 
 test('each conversation warns once per level, and compaction re-arms it', () => {

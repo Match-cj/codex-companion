@@ -15,8 +15,25 @@ export function formatTokenCount(value) {
   return String(Math.round(number));
 }
 
+// Codex emits two different token ledgers in the same token_count event:
+//   - total_token_usage: every token sent since the session started. A long
+//     conversation re-sends its transcript each turn, so this climbs far past
+//     the model window (millions of tokens on a 475k window) and is NOT a water level.
+//   - last_token_usage: the context carried into the most recent turn. This is
+//     what the Codex client itself shows as "used / window" and is the only
+//     figure that can be compared against model_context_window.
+// Reading the cumulative figure here used to produce bogus >100% warnings on a
+// brand-new conversation. Never fall back to total_token_usage: an absent
+// current reading means "unknown", not "full".
+export function contextStatsFromTokenInfo(info = {}) {
+  const last = info?.last_token_usage || {};
+  const inputTokens = Number(last.input_tokens || 0);
+  const contextWindow = Number(info?.model_context_window || 0);
+  return { inputTokens, contextWindow };
+}
+
 export function contextRatio(stats = {}) {
-  const used = Number(stats.inputTokens || stats.totalTokens || 0);
+  const used = Number(stats.inputTokens || 0);
   const limit = Number(stats.contextWindow || 0);
   if (!(used > 0) || !(limit > 0)) return 0;
   return used / limit;
